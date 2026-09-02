@@ -15,6 +15,8 @@ export class SkillsTab extends SettingsTab {
 	private editingSkill: Skill | null = null;
 	private importConflicts: { skill: Skill; selected: boolean }[] = [];
 	private importedSkills: Skill[] = [];
+	private showImport = false;
+	private importText = "";
 
 	getTabName(): string {
 		return this.label;
@@ -109,16 +111,19 @@ export class SkillsTab extends SettingsTab {
 		URL.revokeObjectURL(url);
 	}
 
-	async importSkills() {
-		let text: string;
-		try {
-			text = await pickJsonFileText();
-		} catch (error) {
-			if ((error as Error).name === "AbortError") return; // user cancelled the picker
-			Toast.error(`Failed to open file: ${(error as Error).message}`);
-			return;
-		}
+	importSkills() {
+		// No native file chooser here: neither <input type=file> nor showOpenFilePicker() shows a dialog
+		// from the side panel (the picker is "active" but never displayed). Drop or paste instead.
+		this.showImport = !this.showImport;
+		this.requestUpdate();
+	}
 
+	private async importFromFile(file: File | undefined) {
+		if (!file) return;
+		await this.importFromText(await file.text());
+	}
+
+	private async importFromText(text: string) {
 		try {
 			const imported = JSON.parse(text) as Skill[];
 
@@ -141,6 +146,9 @@ export class SkillsTab extends SettingsTab {
 				}
 			}
 
+			this.showImport = false;
+			this.importText = "";
+
 			if (conflicts.length > 0) {
 				// Show conflict resolution UI
 				this.importConflicts = conflicts;
@@ -152,6 +160,47 @@ export class SkillsTab extends SettingsTab {
 		} catch (error) {
 			Toast.error(`Failed to import skills: ${(error as Error).message}`);
 		}
+	}
+
+	private renderImportZone() {
+		return html`
+			<div
+				class="flex flex-col gap-2 p-3 rounded-md border border-dashed border-input bg-muted/30"
+				@dragover=${(e: DragEvent) => {
+					e.preventDefault();
+				}}
+				@drop=${(e: DragEvent) => {
+					e.preventDefault();
+					this.importFromFile(e.dataTransfer?.files?.[0]);
+				}}
+			>
+				<div class="text-sm text-foreground">Drop a skills JSON file here, or paste its contents:</div>
+				<textarea
+					class="w-full min-h-[120px] px-3 py-2 text-xs text-foreground bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+					placeholder='[{"name": "...", "domainPatterns": ["..."], ...}]'
+					.value=${this.importText}
+					@input=${(e: Event) => {
+						this.importText = (e.target as HTMLTextAreaElement).value;
+					}}
+				></textarea>
+				<div class="flex gap-2">
+					${Button({
+						variant: "outline",
+						onClick: () => {
+							this.showImport = false;
+							this.importText = "";
+							this.requestUpdate();
+						},
+						children: "Cancel",
+					})}
+					${Button({
+						variant: "default",
+						onClick: () => this.importFromText(this.importText),
+						children: "Import",
+					})}
+				</div>
+			</div>
+		`;
 	}
 
 	async performImport(skills: Skill[]) {
@@ -363,6 +412,8 @@ export class SkillsTab extends SettingsTab {
 					})}
 				</div>
 
+				${this.showImport ? this.renderImportZone() : ""}
+
 				${Input({
 					type: "text",
 					placeholder: "Search skills by name, domain, or description...",
@@ -388,42 +439,4 @@ export class SkillsTab extends SettingsTab {
 	}
 }
 
-customElements.define("skills-tab", SkillsTab); /**
- * Open a JSON file picker and return the file's text.
- *
- * Prefers the File System Access API; falls back to a hidden <input type=file> that is attached to
- * the document. A detached input's click() never opens a chooser in the side panel, which is why
- * the Import button used to do nothing.
- */
-async function pickJsonFileText(): Promise<string> {
-	const picker = (window as { showOpenFilePicker?: (options: unknown) => Promise<FileSystemFileHandle[]> })
-		.showOpenFilePicker;
-	if (picker) {
-		const [handle] = await picker.call(window, {
-			types: [{ description: "Skills JSON", accept: { "application/json": [".json"] } }],
-			multiple: false,
-		});
-		if (!handle) throw new DOMException("No file selected", "AbortError");
-		return (await handle.getFile()).text();
-	}
-
-	return new Promise<string>((resolve, reject) => {
-		const input = document.createElement("input");
-		input.type = "file";
-		input.accept = "application/json,.json";
-		input.style.display = "none";
-		const done = () => input.remove();
-		input.addEventListener("change", async () => {
-			const file = input.files?.[0];
-			done();
-			if (!file) return reject(new DOMException("No file selected", "AbortError"));
-			resolve(await file.text());
-		});
-		input.addEventListener("cancel", () => {
-			done();
-			reject(new DOMException("No file selected", "AbortError"));
-		});
-		document.body.appendChild(input);
-		input.click();
-	});
-}
+customElements.define("skills-tab", SkillsTab);
