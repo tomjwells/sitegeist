@@ -110,49 +110,48 @@ export class SkillsTab extends SettingsTab {
 	}
 
 	async importSkills() {
-		const input = document.createElement("input");
-		input.type = "file";
-		input.accept = "application/json,.json";
-		input.onchange = async (e) => {
-			const file = (e.target as HTMLInputElement).files?.[0];
-			if (!file) return;
+		let text: string;
+		try {
+			text = await pickJsonFileText();
+		} catch (error) {
+			if ((error as Error).name === "AbortError") return; // user cancelled the picker
+			Toast.error(`Failed to open file: ${(error as Error).message}`);
+			return;
+		}
 
-			try {
-				const text = await file.text();
-				const imported = JSON.parse(text) as Skill[];
+		try {
+			const imported = JSON.parse(text) as Skill[];
 
-				if (!Array.isArray(imported)) {
-					Toast.error("Invalid skills file: expected an array of skills");
-					return;
-				}
-
-				// Store imported skills for later
-				this.importedSkills = imported;
-
-				// Check for conflicts
-				const storage = getSitegeistStorage();
-				const conflicts: { skill: Skill; selected: boolean }[] = [];
-
-				for (const skill of imported) {
-					const existing = await storage.skills.get(skill.name);
-					if (existing) {
-						conflicts.push({ skill, selected: true });
-					}
-				}
-
-				if (conflicts.length > 0) {
-					// Show conflict resolution UI
-					this.importConflicts = conflicts;
-					this.requestUpdate();
-				} else {
-					// No conflicts, import all
-					await this.performImport(imported);
-				}
-			} catch (error) {
-				Toast.error(`Failed to import skills: ${(error as Error).message}`);
+			if (!Array.isArray(imported)) {
+				Toast.error("Invalid skills file: expected an array of skills");
+				return;
 			}
-		};
-		input.click();
+
+			// Store imported skills for later
+			this.importedSkills = imported;
+
+			// Check for conflicts
+			const storage = getSitegeistStorage();
+			const conflicts: { skill: Skill; selected: boolean }[] = [];
+
+			for (const skill of imported) {
+				const existing = await storage.skills.get(skill.name);
+				if (existing) {
+					conflicts.push({ skill, selected: true });
+				}
+			}
+
+			if (conflicts.length > 0) {
+				// Show conflict resolution UI
+				this.importConflicts = conflicts;
+				this.requestUpdate();
+			} else {
+				// No conflicts, import all
+				await this.performImport(imported);
+			}
+		} catch (error) {
+			Toast.error(`Failed to import skills: ${(error as Error).message}`);
+		}
 	}
 
 	async performImport(skills: Skill[]) {
@@ -389,4 +388,42 @@ export class SkillsTab extends SettingsTab {
 	}
 }
 
-customElements.define("skills-tab", SkillsTab);
+customElements.define("skills-tab", SkillsTab); /**
+ * Open a JSON file picker and return the file's text.
+ *
+ * Prefers the File System Access API; falls back to a hidden <input type=file> that is attached to
+ * the document. A detached input's click() never opens a chooser in the side panel, which is why
+ * the Import button used to do nothing.
+ */
+async function pickJsonFileText(): Promise<string> {
+	const picker = (window as { showOpenFilePicker?: (options: unknown) => Promise<FileSystemFileHandle[]> })
+		.showOpenFilePicker;
+	if (picker) {
+		const [handle] = await picker.call(window, {
+			types: [{ description: "Skills JSON", accept: { "application/json": [".json"] } }],
+			multiple: false,
+		});
+		if (!handle) throw new DOMException("No file selected", "AbortError");
+		return (await handle.getFile()).text();
+	}
+
+	return new Promise<string>((resolve, reject) => {
+		const input = document.createElement("input");
+		input.type = "file";
+		input.accept = "application/json,.json";
+		input.style.display = "none";
+		const done = () => input.remove();
+		input.addEventListener("change", async () => {
+			const file = input.files?.[0];
+			done();
+			if (!file) return reject(new DOMException("No file selected", "AbortError"));
+			resolve(await file.text());
+		});
+		input.addEventListener("cancel", () => {
+			done();
+			reject(new DOMException("No file selected", "AbortError"));
+		});
+		document.body.appendChild(input);
+		input.click();
+	});
+}
