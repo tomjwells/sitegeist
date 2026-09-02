@@ -153,7 +153,25 @@ async function fetchAndResizeImage(src: string, maxWidth: number): Promise<Image
 }
 
 async function captureScreenshot(maxWidth: number, windowId: number): Promise<ImageContent> {
-	const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+	let dataUrl: string;
+	try {
+		dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.warn(
+			"[extract_image] captureVisibleTab failed for window",
+			windowId,
+			message,
+			"- retrying with current window",
+		);
+		try {
+			// The remembered window id can be stale (panel moved/reopened); fall back to the panel's own window
+			dataUrl = await chrome.tabs.captureVisibleTab({ format: "png" });
+		} catch (retryError) {
+			const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+			throw new Error(`Screenshot failed (chrome.tabs.captureVisibleTab): ${retryMessage}`);
+		}
+	}
 	return fetchAndResizeImage(dataUrl, maxWidth);
 }
 
@@ -245,10 +263,17 @@ const extractImageRenderer: ToolRenderer<ExtractImageParams, ExtractImageDetails
 		const state = result ? (result.isError ? "error" : "complete") : "inprogress";
 
 		const hasImage = result?.content?.some((c) => c.type === "image");
+		const errorText = result?.isError
+			? result.content
+					.filter((c): c is TextContent => c.type === "text")
+					.map((c) => c.text)
+					.join("\n")
+			: "";
 
 		return {
 			content: html`
 				${renderHeader(state, ImageIcon, label)}
+				${errorText ? html`<div class="px-2 pb-2 text-xs text-destructive whitespace-pre-wrap">${errorText}</div>` : ""}
 				${
 					hasImage
 						? html`<div class="p-2">
