@@ -1,6 +1,7 @@
 import { ConsoleRuntimeProvider, RUNTIME_MESSAGE_ROUTER, type SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
 import {
 	BROWSERJS_RUNTIME_PROVIDER_DESCRIPTION,
+	FETCH_RUNTIME_PROVIDER_DESCRIPTION,
 	NAVIGATE_RUNTIME_PROVIDER_DESCRIPTION,
 } from "../../prompts/prompts.js";
 import { getSitegeistStorage } from "../../storage/app-storage.js";
@@ -417,5 +418,177 @@ export class NavigateRuntimeProvider implements SandboxRuntimeProvider {
 
 	getDescription(): string {
 		return NAVIGATE_RUNTIME_PROVIDER_DESCRIPTION;
+	}
+}
+
+/**
+ * FetchRuntimeProvider
+ *
+ * Makes fetch() usable in the REPL sandbox. The sandbox page's CSP only allows connect-src to a few
+ * CDNs, so a plain fetch() to any other URL fails with "TypeError: Failed to fetch". This provider wraps
+ * window.fetch: the native call is tried first and, if it throws, the request is relayed to the side
+ * panel (which has host permissions, so no CORS/CSP issues) and rebuilt as a Response in the sandbox.
+ *
+ * Relayed requests are made from the extension context without cookies.
+ */
+export class FetchRuntimeProvider implements SandboxRuntimeProvider {
+	private static readonly MAX_RESPONSE_BYTES = 25 * 1024 * 1024;
+
+	getData(): Record<string, any> {
+		return {};
+	}
+
+	getRuntime(): (sandboxId: string) => void {
+		// This function will be stringified and injected into the REPL iframe: keep it self-contained.
+		return (_sandboxId: string) => {
+			const sendRuntimeMessage = (window as any).sendRuntimeMessage;
+			if (typeof sendRuntimeMessage !== "function") {
+				throw new Error("sendRuntimeMessage is not available in this context");
+			}
+
+			const nativeFetch = window.fetch.bind(window);
+			const toBase64 = (buffer: ArrayBuffer): string => {
+				const bytes = new Uint8Array(buffer);
+				let binary = "";
+				for (let i = 0; i < bytes.length; i += 0x8000) {
+					binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+				}
+				return btoa(binary);
+			};
+
+			window.fetch = async (input: any, init?: any): Promise<Response> => {
+				try {
+					return await nativeFetch(input, init);
+				} catch (nativeError) {
+					// Blocked by the sandbox CSP (or CORS): relay through the extension
+					const url: string =
+						typeof input === "string"
+							? input
+							: input instanceof URL
+								? input.toString()
+								: String(input?.url ?? "");
+					if (!/^https?:/i.test(url)) throw nativeError;
+
+					const headers: Record<string, string> = {};
+					const source = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+					if (source) {
+						new Headers(source).forEach((value, key) => {
+							headers[key] = value;
+						});
+					}
+
+					let body: string | undefined;
+					let bodyEncoding: "text" | "base64" = "text";
+					const raw = init?.body;
+					if (raw !== undefined && raw !== null) {
+						if (typeof raw === "string") {
+							body = raw;
+						} else if (raw instanceof URLSearchParams) {
+							body = raw.toString();
+							if (!headers["content-type"])
+								headers["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8";
+						} else if (raw instanceof ArrayBuffer) {
+							body = toBase64(raw);
+							bodyEncoding = "base64";
+						} else if (ArrayBuffer.isView(raw)) {
+							body = toBase64(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer);
+							bodyEncoding = "base64";
+						} else if (raw instanceof Blob) {
+							body = toBase64(await raw.arrayBuffer());
+							bodyEncoding = "base64";
+							if (!headers["content-type"] && raw.type) headers["content-type"] = raw.type;
+						} else {
+							throw new Error(
+								"fetch(): unsupported body type for a relayed request (use string, URLSearchParams, ArrayBuffer or Blob)",
+							);
+						}
+					}
+
+					const response = await sendRuntimeMessage({
+						type: "fetch",
+						args: {
+							url,
+							method: init?.method ?? (input instanceof Request ? input.method : "GET"),
+							headers,
+							body,
+							bodyEncoding,
+						},
+					});
+					if (!response.success) {
+						throw new TypeError(response.error || "fetch() relay failed");
+					}
+
+					const result = response.result;
+					const bytes = Uint8Array.from(atob(result.bodyBase64), (c) => c.charCodeAt(0));
+					const nullBody =
+						result.status === 204 || result.status === 205 || result.status === 304 || bytes.length === 0;
+					return new Response(nullBody ? null : bytes, {
+						status: result.status,
+						statusText: result.statusText,
+						headers: result.headers,
+					});
+				}
+			};
+		};
+	}
+
+	async handleMessage(message: any, respond: (response: any) => void): Promise<void> {
+		if (message.type !== "fetch") {
+			return;
+		}
+
+		try {
+			const { url, method, headers, body, bodyEncoding } = message.args as {
+				url: string;
+				method: string;
+				headers: Record<string, string>;
+				body?: string;
+				bodyEncoding: "text" | "base64";
+			};
+			if (!/^https?:/i.test(url)) {
+				throw new Error("Only http(s) URLs can be fetched");
+			}
+
+			const requestBody =
+				body === undefined
+					? undefined
+					: bodyEncoding === "base64"
+						? Uint8Array.from(atob(body), (c) => c.charCodeAt(0))
+						: body;
+			const upstream = await fetch(url, { method, headers, body: requestBody, credentials: "omit" });
+
+			const buffer = await upstream.arrayBuffer();
+			if (buffer.byteLength > FetchRuntimeProvider.MAX_RESPONSE_BYTES) {
+				throw new Error(`Response too large to relay (${buffer.byteLength} bytes)`);
+			}
+			const bodyBase64 = await new Promise<string>((resolve, reject) => {
+				const reader = new FileReader();
+				reader.onload = () => resolve((reader.result as string).split(",")[1] ?? "");
+				reader.onerror = () => reject(reader.error);
+				reader.readAsDataURL(new Blob([buffer]));
+			});
+
+			const responseHeaders: [string, string][] = [];
+			upstream.headers.forEach((value, key) => {
+				// The body is already decoded; drop framing headers so Response() does not lie about it
+				if (key === "content-encoding" || key === "content-length" || key === "transfer-encoding") return;
+				responseHeaders.push([key, value]);
+			});
+
+			respond({
+				success: true,
+				result: { status: upstream.status, statusText: upstream.statusText, headers: responseHeaders, bodyBase64 },
+			});
+		} catch (error: any) {
+			console.error("[FetchRuntimeProvider] Error:", error);
+			respond({
+				success: false,
+				error: error.message || String(error),
+			});
+		}
+	}
+
+	getDescription(): string {
+		return FETCH_RUNTIME_PROVIDER_DESCRIPTION;
 	}
 }

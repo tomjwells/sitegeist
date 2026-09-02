@@ -267,6 +267,29 @@ await createOrUpdateArtifact('results.json', results);
 `;
 
 // ============================================================================
+// Fetch Runtime Provider (REPL context)
+// ============================================================================
+
+export const FETCH_RUNTIME_PROVIDER_DESCRIPTION = `
+### Fetch
+
+fetch() works in the REPL for any http(s) URL. The sandbox itself may only reach a few CDNs (CSP), so any request it cannot make directly is transparently relayed through the extension, which has host permissions and is not subject to CORS. Just call fetch() normally.
+
+#### Notes
+- Relayed requests send no cookies. If the URL needs the user's login session, fetch from page context instead: await browserjs(() => fetch('/api/...').then(r => r.json()))
+- Supported request bodies: string, URLSearchParams, ArrayBuffer / typed array, Blob
+- Binary responses: await response.arrayBuffer()
+
+#### Example
+\`\`\`javascript
+const res = await fetch('https://example.com/data.json');
+if (!res.ok) throw new Error('HTTP ' + res.status);
+const data = await res.json();
+return data.items.length;
+\`\`\`
+`;
+
+// ============================================================================
 // Navigate Tool
 // ============================================================================
 
