@@ -13,6 +13,9 @@ import type { Skill } from "../storage/stores/skills-store.js";
 import { formatSkills } from "../utils/format-skills.js";
 import "../utils/i18n-extension.js";
 
+// Give up waiting for a load signal after this long (prerendered/activated pages emit none)
+const NAVIGATION_TIMEOUT_MS = 15000;
+
 // Track tool-initiated navigations to filter out duplicate navigation messages
 let isNavigating = false;
 
@@ -176,44 +179,16 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 	}
 
 	private async navigateToUrl(tabId: number, url: string, signal?: AbortSignal): Promise<string> {
-		return new Promise((resolve, reject) => {
-			if (signal?.aborted) {
-				reject(new Error("Aborted"));
-				return;
-			}
-
-			// Set up DOMContentLoaded listener (fires when DOM is ready, more reliable than onCompleted)
-			const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
-				if (details.tabId === tabId && details.frameId === 0) {
-					chrome.webNavigation.onDOMContentLoaded.removeListener(listener);
-					if (abortListener) signal?.removeEventListener("abort", abortListener);
-					resolve(details.url);
-				}
-			};
-
-			// Set up abort listener
-			const abortListener = () => {
-				if (chrome.webNavigation?.onDOMContentLoaded) {
-					chrome.webNavigation.onDOMContentLoaded.removeListener(listener);
-				}
-				reject(new Error("Aborted"));
-			};
-
-			if (signal) {
-				signal.addEventListener("abort", abortListener);
-			}
-
-			chrome.webNavigation.onDOMContentLoaded.addListener(listener);
-
-			// Trigger navigation
-			chrome.tabs.update(tabId, { url }).catch((err: Error) => {
-				if (chrome.webNavigation?.onDOMContentLoaded) {
-					chrome.webNavigation.onDOMContentLoaded.removeListener(listener);
-				}
-				if (abortListener) signal?.removeEventListener("abort", abortListener);
-				reject(err);
-			});
-		});
+		// Register load listeners before triggering the navigation so nothing is missed
+		const loaded = this.waitForTabLoad(tabId, signal);
+		try {
+			await chrome.tabs.update(tabId, { url });
+		} catch (err) {
+			this.cancelWait(tabId);
+			await loaded.catch(() => undefined);
+			throw err;
+		}
+		return loaded;
 	}
 
 	private async openInNewTab(url: string, signal?: AbortSignal): Promise<string> {
@@ -227,33 +202,68 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			throw new Error("Failed to create new tab");
 		}
 
-		// Wait for the tab to load
+		return this.waitForTabLoad(newTab.id, signal);
+	}
+
+	private pendingWaits = new Map<number, () => void>();
+
+	private cancelWait(tabId: number) {
+		this.pendingWaits.get(tabId)?.();
+	}
+
+	/**
+	 * Resolve with the tab's URL once it has loaded.
+	 *
+	 * Listens for DOMContentLoaded, onCompleted and tabs.onUpdated(status: "complete"), and gives up
+	 * after NAVIGATION_TIMEOUT_MS. Waiting only for DOMContentLoaded with frameId 0 (the previous
+	 * behaviour) hangs forever on pages Chrome activates from a prerender (eBay, Google, Amazon...):
+	 * their DOMContentLoaded fired during prerendering with a different frameId and never fires again.
+	 */
+	private waitForTabLoad(tabId: number, signal?: AbortSignal): Promise<string> {
 		return new Promise((resolve, reject) => {
 			if (signal?.aborted) {
 				reject(new Error("Aborted"));
 				return;
 			}
 
-			const listener = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
-				if (details.tabId === newTab.id && details.frameId === 0) {
-					chrome.webNavigation.onDOMContentLoaded.removeListener(listener);
-					if (abortListener) signal?.removeEventListener("abort", abortListener);
-					resolve(details.url);
-				}
+			let settled = false;
+			const cleanup = () => {
+				clearTimeout(timer);
+				chrome.webNavigation.onDOMContentLoaded.removeListener(onNavigation);
+				chrome.webNavigation.onCompleted.removeListener(onNavigation);
+				chrome.tabs.onUpdated.removeListener(onUpdated);
+				signal?.removeEventListener("abort", onAbort);
+				this.pendingWaits.delete(tabId);
+			};
+			const settle = (fn: () => void) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				fn();
 			};
 
-			const abortListener = () => {
-				if (chrome.webNavigation?.onDOMContentLoaded) {
-					chrome.webNavigation.onDOMContentLoaded.removeListener(listener);
-				}
-				reject(new Error("Aborted"));
+			const isTopFrame = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) =>
+				details.frameId === 0 || (details as { frameType?: string }).frameType === "outermost_frame";
+			const onNavigation = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
+				if (details.tabId === tabId && isTopFrame(details)) settle(() => resolve(details.url));
 			};
+			const onUpdated = (updatedTabId: number, info: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
+				if (updatedTabId === tabId && info.status === "complete") settle(() => resolve(tab.url ?? ""));
+			};
+			const onAbort = () => settle(() => reject(new Error("Aborted")));
+			const timer = setTimeout(() => {
+				console.warn(`[Navigate] No load signal for tab ${tabId} within ${NAVIGATION_TIMEOUT_MS}ms, continuing`);
+				chrome.tabs
+					.get(tabId)
+					.then((tab) => settle(() => resolve(tab.url ?? "")))
+					.catch((err: Error) => settle(() => reject(err)));
+			}, NAVIGATION_TIMEOUT_MS);
 
-			if (signal) {
-				signal.addEventListener("abort", abortListener);
-			}
-
-			chrome.webNavigation.onDOMContentLoaded.addListener(listener);
+			this.pendingWaits.set(tabId, () => settle(() => reject(new Error("Navigation cancelled"))));
+			signal?.addEventListener("abort", onAbort);
+			chrome.webNavigation.onDOMContentLoaded.addListener(onNavigation);
+			chrome.webNavigation.onCompleted.addListener(onNavigation);
+			chrome.tabs.onUpdated.addListener(onUpdated);
 		});
 	}
 
