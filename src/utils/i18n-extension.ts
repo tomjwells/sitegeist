@@ -92,6 +92,10 @@ declare module "@mariozechner/mini-lit" {
 		"Update Required": string;
 		"A new version ({version}) is available. Please update to continue.": string;
 		"Update Now": string;
+		Instructions: string;
+		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.": string;
+		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.": string;
+		Saved: string;
 	}
 }
 
@@ -184,6 +188,12 @@ const sitegeistTranslations = {
 		"A new version ({version}) is available. Please update to continue.":
 			"A new version ({version}) is available. Please update to continue.",
 		"Update Now": "Update Now",
+		Instructions: "Instructions",
+		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.":
+			"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.",
+		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.":
+			"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.",
+		Saved: "Saved",
 	},
 	de: {
 		"Permission request failed": "Berechtigungsanfrage fehlgeschlagen",
@@ -275,6 +285,12 @@ const sitegeistTranslations = {
 		"A new version ({version}) is available. Please update to continue.":
 			"Eine neue Version ({version}) ist verfügbar. Bitte aktualisieren Sie, um fortzufahren.",
 		"Update Now": "Jetzt aktualisieren",
+		Instructions: "Anweisungen",
+		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.":
+			"Dauerhafte Anweisungen für den Assistenten, die jeder Unterhaltung hinzugefügt werden. Wird automatisch gespeichert; gilt ab der nächsten neuen oder wieder geöffneten Sitzung.",
+		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.":
+			"z. B. Ich wohne in London, UK. Bevorzuge UK-Seiten (ebay.co.uk, amazon.co.uk), Preise in GBP, britische Schreibweise.",
+		Saved: "Gespeichert",
 	},
 };
 

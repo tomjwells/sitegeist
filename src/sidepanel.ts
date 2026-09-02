@@ -27,6 +27,7 @@ import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
+import { InstructionsTab } from "./dialogs/InstructionsTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { SitegeistSessionListDialog } from "./dialogs/SessionListDialog.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
@@ -81,6 +82,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // STORAGE SETUP
 // ============================================================================
 const storage = new SitegeistAppStorage();
+
+export const CUSTOM_INSTRUCTIONS_SETTING = "customInstructions";
+
+/** SYSTEM_PROMPT plus the user's custom instructions from Settings → Instructions, if any. */
+const buildSystemPrompt = async (): Promise<string> => {
+	const custom = (await storage.settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING))?.trim();
+	if (!custom) return SYSTEM_PROMPT;
+	return `${SYSTEM_PROMPT}\n\n# User Instructions\nThe user set these standing instructions in Settings. Follow them in every session:\n${custom}`;
+};
 setAppStorage(storage);
 
 // ============================================================================
@@ -181,7 +191,14 @@ async function hasAnyApiKey(): Promise<boolean> {
 function openApiKeysDialog(): Promise<void> {
 	return new Promise((resolve) => {
 		SettingsDialog.open(
-			[new ApiKeysOAuthTab(), new CostsTab(), new SkillsTab(), new ProxyTab(), new AboutTab()],
+			[
+				new ApiKeysOAuthTab(),
+				new InstructionsTab(),
+				new CostsTab(),
+				new SkillsTab(),
+				new ProxyTab(),
+				new AboutTab(),
+			],
 			resolve,
 		);
 	});
@@ -348,6 +365,10 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 	const stored = await chrome.storage.local.get("debuggerMode");
 	const debuggerModeEnabled = stored.debuggerMode || false;
 
+	// Always (re)apply the current system prompt + custom instructions, also to restored sessions
+	const systemPrompt = await buildSystemPrompt();
+	initialState = initialState ? { ...initialState, systemPrompt } : undefined;
+
 	// Load CORS proxy settings for extract_document tool
 	const corsProxyEnabled = await storage.settings.get<boolean>("proxy.enabled");
 	const corsProxyUrl = await storage.settings.get<string>("proxy.url");
@@ -380,7 +401,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 
 	agent = new Agent({
 		initialState: initialState || {
-			systemPrompt: SYSTEM_PROMPT,
+			systemPrompt,
 			model: defaultModel,
 			thinkingLevel: "medium",
 			messages: [],
@@ -703,6 +724,7 @@ const renderApp = () => {
 						onClick: () =>
 							SettingsDialog.open([
 								new ApiKeysOAuthTab(),
+								new InstructionsTab(),
 								new CostsTab(),
 								new SkillsTab(),
 								new ProxyTab(),
