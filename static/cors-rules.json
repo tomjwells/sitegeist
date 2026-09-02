@@ -83,5 +83,19 @@
 			"urlFilter": "||api.z.ai",
 			"resourceTypes": ["xmlhttprequest", "other"]
 		}
+	},
+	{
+		"id": 6,
+		"priority": 2,
+		"action": {
+			"type": "modifyHeaders",
+			"requestHeaders": [
+				{ "header": "User-Agent", "operation": "set", "value": "sitegeist/1.0" }
+			]
+		},
+		"condition": {
+			"urlFilter": "||platform.claude.com/v1/oauth/",
+			"resourceTypes": ["xmlhttprequest", "other"]
+		}
 	}
 ]
