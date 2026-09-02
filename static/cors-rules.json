@@ -97,5 +97,19 @@
 			"urlFilter": "||platform.claude.com/v1/oauth/",
 			"resourceTypes": ["xmlhttprequest", "other"]
 		}
+	},
+	{
+		"id": 7,
+		"priority": 2,
+		"action": {
+			"type": "modifyHeaders",
+			"requestHeaders": [
+				{ "header": "Origin", "operation": "remove" }
+			]
+		},
+		"condition": {
+			"urlFilter": "||api.anthropic.com/",
+			"resourceTypes": ["xmlhttprequest", "other"]
+		}
 	}
 ]
