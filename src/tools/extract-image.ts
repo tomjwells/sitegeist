@@ -1,6 +1,12 @@
-import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { Agent, AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ImageContent, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
-import { registerToolRenderer, renderHeader, type ToolRenderer, type ToolRenderResult } from "@mariozechner/pi-web-ui";
+import {
+	type ArtifactsPanel,
+	registerToolRenderer,
+	renderHeader,
+	type ToolRenderer,
+	type ToolRenderResult,
+} from "@mariozechner/pi-web-ui";
 import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { Image as ImageIcon } from "lucide";
@@ -9,7 +15,9 @@ const EXTRACT_IMAGE_DESCRIPTION = `Extract images from the current page. Returns
 
 Modes:
 - selector: Extract an image matching a CSS selector (e.g. "img.hero", "#logo", "img:nth-child(2)")
-- screenshot: Capture the visible area of the current tab`;
+- screenshot: Capture the visible area of the current tab
+
+To keep the image as a file (to attach it somewhere, let the user download it, or read it from the REPL via artifacts), pass saveAs: it is stored as a PNG artifact in one step. Do not try to re-capture or convert images with page JavaScript (html2canvas etc.); site CSPs block that.`;
 
 const extractImageSchema = Type.Object({
 	mode: Type.Union([Type.Literal("selector"), Type.Literal("screenshot")], {
@@ -21,6 +29,11 @@ const extractImageSchema = Type.Object({
 	maxWidth: Type.Optional(
 		Type.Number({ description: "Max width to resize image to (default 800). Reduces token usage." }),
 	),
+	saveAs: Type.Optional(
+		Type.String({
+			description: "Also save the image as a PNG artifact with this filename (e.g. 'screenshot.png')",
+		}),
+	),
 });
 
 type ExtractImageParams = Static<typeof extractImageSchema>;
@@ -28,6 +41,7 @@ type ExtractImageParams = Static<typeof extractImageSchema>;
 interface ExtractImageDetails {
 	mode: string;
 	selector?: string;
+	savedAs?: string;
 }
 
 /**
@@ -149,6 +163,9 @@ export class ExtractImageTool implements AgentTool<typeof extractImageSchema, Ex
 	description = EXTRACT_IMAGE_DESCRIPTION;
 	parameters = extractImageSchema;
 	windowId?: number;
+	/** Set by the host so saveAs can store the image as an artifact */
+	artifactsPanel?: ArtifactsPanel;
+	agent?: Agent;
 
 	async execute(
 		_toolCallId: string,
@@ -180,7 +197,39 @@ export class ExtractImageTool implements AgentTool<typeof extractImageSchema, Ex
 			});
 		}
 
+		if (args.saveAs) {
+			const image = content.find((c): c is ImageContent => c.type === "image");
+			if (!image) throw new Error("No image captured to save");
+			const filename = await this.saveAsArtifact(args.saveAs, image);
+			details.savedAs = filename;
+			content.push({ type: "text", text: `Saved as artifact ${filename}` });
+		}
+
 		return { content, details };
+	}
+
+	private async saveAsArtifact(filename: string, image: ImageContent): Promise<string> {
+		if (!this.artifactsPanel) throw new Error("Artifacts are not available; cannot save image");
+		const name = filename.toLowerCase().endsWith(".png") ? filename : `${filename}.png`;
+		const artifactContent = `data:${image.mimeType};base64,${image.data}`;
+		const exists = this.artifactsPanel.artifacts.has(name);
+		const result = await this.artifactsPanel.tool.execute("", {
+			command: exists ? "rewrite" : "create",
+			filename: name,
+			content: artifactContent,
+		});
+		const text = result.content.find((c) => c.type === "text")?.text ?? "";
+		if (text.startsWith("Error")) throw new Error(text);
+		// Record it in the session so the artifact survives a reload (same as the REPL artifacts helper)
+		this.agent?.appendMessage({
+			role: "artifact",
+			action: exists ? "update" : "create",
+			filename: name,
+			content: artifactContent,
+			...(exists ? {} : { title: name }),
+			timestamp: new Date().toISOString(),
+		});
+		return name;
 	}
 }
 

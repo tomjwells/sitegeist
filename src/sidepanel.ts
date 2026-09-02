@@ -536,7 +536,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			if (!agent) return;
 			SessionCostDialog.open(agent.state.messages);
 		},
-		toolsFactory: (_agent, _agentInterface, _artifactsPanel, runtimeProvidersFactory) => {
+		toolsFactory: (agent, _agentInterface, artifactsPanel, runtimeProvidersFactory) => {
 			const navigateTool = new NavigateTool();
 			const selectElementTool = new AskUserWhichElementTool();
 
@@ -566,6 +566,8 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 
 			const extractImageTool = new ExtractImageTool();
 			extractImageTool.windowId = currentWindowId;
+			extractImageTool.artifactsPanel = artifactsPanel;
+			extractImageTool.agent = agent;
 
 			const tools: AgentTool<any, any>[] = [
 				navigateTool,
