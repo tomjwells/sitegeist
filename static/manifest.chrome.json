@@ -4,6 +4,7 @@
 	"name": "sitegeist-dev",
 	"description": "Your AI companion for the web - Research, automate, create",
 	"version": "1.0.0",
+	"key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyuewwJl7DNIJBHRQSK/4Y6cBmT6R6NiD4cMSS7nOz2MAKv+Kjvy/xmVJmkDPC9O1tjLYhgkoKgmNUQq4+OBohFljv5iKATHFLTgN22rLpje9eTMgvjMdFe/Wrq0hQMSYT04TIWsnEEzdfJZsb7M7a3olQLNx7UU7dvKSyK7neBFgvDYRd61HAczXxN31/8Vvvev91ZDs4/M7S0zgoA39Ct5q90zr4cVtRAeBFY9ouNCSuSvTUgUyOhBZpX0qTnzGTZJ11bZ4/hqXi8CTAHNWKYC95zyMiLFRn9+zOqB8D/Y5ZkGvayjQdRnmyCcyhcg6o4m3nBDZ0IchM3+Sq0AuhQIDAQAB",
 	"action": {
 		"default_title": "Click to open side panel"
 	},
@@ -55,7 +56,9 @@
 		]
 	},
 	"sandbox": {
-		"pages": ["sandbox.html"]
+		"pages": [
+			"sandbox.html"
+		]
 	},
 	"content_security_policy": {
 		"extension_pages": "script-src 'self'; object-src 'self'",
