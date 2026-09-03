@@ -42,6 +42,7 @@ import {
 } from "./messages/NavigationMessage.js";
 import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
+import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
@@ -94,6 +95,29 @@ const buildSystemPrompt = async (): Promise<string> => {
 	const custom = (await storage.settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING))?.trim();
 	if (!custom) return SYSTEM_PROMPT;
 	return `${SYSTEM_PROMPT}\n\n# User Instructions\nThe user set these standing instructions in Settings. Follow them in every session:\n${custom}`;
+};
+
+export const MODEL_CATALOG_URL_SETTING = "models.catalogUrl";
+export const DEFAULT_MODEL_CATALOG_URL = "https://cors-proxy.tjw-private/models";
+
+/**
+ * Fetch { models: { provider: { id: Model } } } from the configured catalog URL and merge it into the
+ * model registry (src/models-registry.ts). Best effort: a missing/failed catalog just leaves the
+ * bundled list in place. Bounded to a few seconds so startup is never blocked for long.
+ */
+const refreshModelCatalog = async (): Promise<void> => {
+	const stored = await storage.settings.get<string>(MODEL_CATALOG_URL_SETTING);
+	const url = (stored ?? DEFAULT_MODEL_CATALOG_URL).trim();
+	if (!url) return;
+	try {
+		const response = await fetch(url, { signal: AbortSignal.timeout(5000), cache: "no-store" });
+		if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		const body = (await response.json()) as { version?: unknown; models?: unknown };
+		const count = registerModels(body.models);
+		console.info(`[Models] catalog ${String(body.version ?? "?")} from ${url}: ${count} models registered`);
+	} catch (error) {
+		console.warn(`[Models] catalog fetch failed (${url}), using bundled list:`, error);
+	}
 };
 setAppStorage(storage);
 
@@ -977,6 +1001,9 @@ async function initApp() {
 
 	// Proxy disabled — CORS is handled locally via declarativeNetRequest rules
 	await storage.settings.set("proxy.enabled", false);
+
+	// Merge a fresh model catalog into the registry (bundled pi-ai list goes stale quickly)
+	await refreshModelCatalog();
 
 	// Create ChatPanel
 	chatPanel = new ChatPanel();

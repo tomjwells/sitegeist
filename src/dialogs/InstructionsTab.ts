@@ -2,7 +2,7 @@ import { i18n } from "@mariozechner/mini-lit/dist/i18n.js";
 import { SettingsTab } from "@mariozechner/pi-web-ui";
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { CUSTOM_INSTRUCTIONS_SETTING } from "../sidepanel.js";
+import { CUSTOM_INSTRUCTIONS_SETTING, DEFAULT_MODEL_CATALOG_URL, MODEL_CATALOG_URL_SETTING } from "../sidepanel.js";
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import "../utils/i18n-extension.js";
 
@@ -14,6 +14,7 @@ import "../utils/i18n-extension.js";
 @customElement("instructions-tab")
 export class InstructionsTab extends SettingsTab {
 	@state() private value = "";
+	@state() private catalogUrl = "";
 	@state() private saved = false;
 	private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -23,7 +24,16 @@ export class InstructionsTab extends SettingsTab {
 
 	override async connectedCallback() {
 		super.connectedCallback();
-		this.value = (await getSitegeistStorage().settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING)) ?? "";
+		const settings = getSitegeistStorage().settings;
+		this.value = (await settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING)) ?? "";
+		this.catalogUrl = (await settings.get<string>(MODEL_CATALOG_URL_SETTING)) ?? DEFAULT_MODEL_CATALOG_URL;
+	}
+
+	private onCatalogInput(e: Event) {
+		this.catalogUrl = (e.target as HTMLInputElement).value;
+		this.saved = false;
+		clearTimeout(this.saveTimer);
+		this.saveTimer = setTimeout(() => this.save(), 400);
 	}
 
 	private onInput(e: Event) {
@@ -34,7 +44,9 @@ export class InstructionsTab extends SettingsTab {
 	}
 
 	private async save() {
-		await getSitegeistStorage().settings.set(CUSTOM_INSTRUCTIONS_SETTING, this.value.trim());
+		const settings = getSitegeistStorage().settings;
+		await settings.set(CUSTOM_INSTRUCTIONS_SETTING, this.value.trim());
+		await settings.set(MODEL_CATALOG_URL_SETTING, this.catalogUrl.trim());
 		this.saved = true;
 	}
 
@@ -50,6 +62,17 @@ export class InstructionsTab extends SettingsTab {
 					.value=${this.value}
 					@input=${(e: Event) => this.onInput(e)}
 				></textarea>
+				<div class="pt-2 text-sm font-medium text-foreground">${i18n("Model catalog URL")}</div>
+				<p class="text-xs text-muted-foreground">
+					${i18n("Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.")}
+				</p>
+				<input
+					type="url"
+					class="w-full px-3 py-2 text-sm text-foreground bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
+					placeholder=${DEFAULT_MODEL_CATALOG_URL}
+					.value=${this.catalogUrl}
+					@input=${(e: Event) => this.onCatalogInput(e)}
+				/>
 				<div class="text-xs text-muted-foreground">${this.saved ? i18n("Saved") : ""}</div>
 			</div>
 		`;

@@ -23,8 +23,22 @@ const entryPoints = {
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
+// Swap pi-ai's static model registry for src/models-registry.ts (same API, mutable) so a fresh model
+// catalog can be merged in at runtime. Catches pi-ai's own relative imports of ./models.js as well as
+// the package entry point re-export.
+const modelsRegistryPlugin = {
+	name: "models-registry",
+	setup(build) {
+		build.onResolve({ filter: /^\.{1,2}\/models\.js$/ }, (args) => {
+			if (!args.importer.includes(`${join("@mariozechner", "pi-ai", "dist")}`)) return null;
+			return { path: join(packageRoot, "src/models-registry.ts") };
+		});
+	},
+};
+
 const buildOptions = {
 	absWorkingDir: packageRoot,
+	plugins: [modelsRegistryPlugin],
 	entryPoints,
 	bundle: true,
 	outdir: outDir,

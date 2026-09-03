@@ -96,6 +96,8 @@ declare module "@mariozechner/mini-lit" {
 		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.": string;
 		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.": string;
 		Saved: string;
+		"Model catalog URL": string;
+		"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.": string;
 	}
 }
 
@@ -194,6 +196,9 @@ const sitegeistTranslations = {
 		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.":
 			"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.",
 		Saved: "Saved",
+		"Model catalog URL": "Model catalog URL",
+		"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.":
+			"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.",
 	},
 	de: {
 		"Permission request failed": "Berechtigungsanfrage fehlgeschlagen",
@@ -291,6 +296,9 @@ const sitegeistTranslations = {
 		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.":
 			"z. B. Ich wohne in London, UK. Bevorzuge UK-Seiten (ebay.co.uk, amazon.co.uk), Preise in GBP, britische Schreibweise.",
 		Saved: "Gespeichert",
+		"Model catalog URL": "Modellkatalog-URL",
+		"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.":
+			"Wird beim Öffnen des Panels geladen und in die Modellliste eingefügt, sodass neue Modelle ohne Update der Erweiterung erscheinen. Leer lassen, um nur die mitgelieferte Liste zu verwenden.",
 	},
 };
 
