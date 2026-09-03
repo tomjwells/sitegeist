@@ -98,6 +98,14 @@ declare module "@mariozechner/mini-lit" {
 		Saved: string;
 		"Model catalog URL": string;
 		"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.": string;
+		"Sync URL": string;
+		"Skills and these instructions are backed up to this server on every change and reconciled when the panel opens, so they survive a reinstall. Leave empty to disable.": string;
+		"Sync now": string;
+		"Syncing…": string;
+		Synced: string;
+		"Sync failed": string;
+		skills: string;
+		instructions: string;
 	}
 }
 
@@ -199,6 +207,15 @@ const sitegeistTranslations = {
 		"Model catalog URL": "Model catalog URL",
 		"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.":
 			"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.",
+		"Sync URL": "Sync URL",
+		"Skills and these instructions are backed up to this server on every change and reconciled when the panel opens, so they survive a reinstall. Leave empty to disable.":
+			"Skills and these instructions are backed up to this server on every change and reconciled when the panel opens, so they survive a reinstall. Leave empty to disable.",
+		"Sync now": "Sync now",
+		"Syncing…": "Syncing…",
+		Synced: "Synced",
+		"Sync failed": "Sync failed",
+		skills: "skills",
+		instructions: "instructions",
 	},
 	de: {
 		"Permission request failed": "Berechtigungsanfrage fehlgeschlagen",
@@ -299,6 +316,15 @@ const sitegeistTranslations = {
 		"Model catalog URL": "Modellkatalog-URL",
 		"Fetched when the panel opens and merged into the model list, so new models appear without an extension update. Leave empty to use only the bundled list.":
 			"Wird beim Öffnen des Panels geladen und in die Modellliste eingefügt, sodass neue Modelle ohne Update der Erweiterung erscheinen. Leer lassen, um nur die mitgelieferte Liste zu verwenden.",
+		"Sync URL": "Sync-URL",
+		"Skills and these instructions are backed up to this server on every change and reconciled when the panel opens, so they survive a reinstall. Leave empty to disable.":
+			"Skills und diese Anweisungen werden bei jeder Änderung auf diesem Server gesichert und beim Öffnen des Panels abgeglichen, sodass sie eine Neuinstallation überleben. Leer lassen, um zu deaktivieren.",
+		"Sync now": "Jetzt synchronisieren",
+		"Syncing…": "Synchronisiere…",
+		Synced: "Synchronisiert",
+		"Sync failed": "Synchronisierung fehlgeschlagen",
+		skills: "Skills",
+		instructions: "Anweisungen",
 	},
 };
 

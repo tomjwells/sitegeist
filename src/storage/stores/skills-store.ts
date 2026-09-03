@@ -1,5 +1,6 @@
 import { Store, type StoreConfig } from "@mariozechner/pi-web-ui";
 import { minimatch } from "minimatch";
+import { pushSkill, pushSkillDelete } from "../../sync.js";
 
 export interface Skill {
 	name: string;
@@ -26,12 +27,15 @@ export class SkillsStore extends Store {
 		return this.getBackend().get("skills", name);
 	}
 
-	async save(skill: Skill): Promise<void> {
+	/** Save locally, then push to the sync server (see src/sync.ts) unless `sync: false`. */
+	async save(skill: Skill, opts: { sync?: boolean } = {}): Promise<void> {
 		await this.getBackend().set("skills", skill.name, skill);
+		if (opts.sync !== false) void pushSkill(skill);
 	}
 
-	async delete(name: string): Promise<void> {
+	async delete(name: string, opts: { sync?: boolean } = {}): Promise<void> {
 		await this.getBackend().delete("skills", name);
+		if (opts.sync !== false) void pushSkillDelete(name);
 	}
 
 	async list(currentUrl?: string): Promise<Skill[]> {

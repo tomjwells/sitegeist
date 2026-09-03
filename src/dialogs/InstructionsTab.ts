@@ -4,6 +4,14 @@ import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { CUSTOM_INSTRUCTIONS_SETTING, DEFAULT_MODEL_CATALOG_URL, MODEL_CATALOG_URL_SETTING } from "../sidepanel.js";
 import { getSitegeistStorage } from "../storage/app-storage.js";
+import {
+	CUSTOM_INSTRUCTIONS_UPDATED_SETTING,
+	DEFAULT_SYNC_URL,
+	pushInstructions,
+	SYNC_URL_SETTING,
+	type SyncResult,
+	syncWithServer,
+} from "../sync.js";
 import "../utils/i18n-extension.js";
 
 /**
@@ -15,7 +23,9 @@ import "../utils/i18n-extension.js";
 export class InstructionsTab extends SettingsTab {
 	@state() private value = "";
 	@state() private catalogUrl = "";
+	@state() private syncUrl = "";
 	@state() private saved = false;
+	@state() private syncStatus = "";
 	private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 	getTabName(): string {
@@ -27,6 +37,22 @@ export class InstructionsTab extends SettingsTab {
 		const settings = getSitegeistStorage().settings;
 		this.value = (await settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING)) ?? "";
 		this.catalogUrl = (await settings.get<string>(MODEL_CATALOG_URL_SETTING)) ?? DEFAULT_MODEL_CATALOG_URL;
+		this.syncUrl = (await settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL;
+	}
+
+	private onSyncUrlInput(e: Event) {
+		this.syncUrl = (e.target as HTMLInputElement).value;
+		this.saved = false;
+		clearTimeout(this.saveTimer);
+		this.saveTimer = setTimeout(() => this.save(), 400);
+	}
+
+	private async syncNow() {
+		this.syncStatus = i18n("Syncing…");
+		const r: SyncResult = await syncWithServer();
+		this.syncStatus = r.ok
+			? `${i18n("Synced")}: ↓${r.pulledSkills} ↑${r.pushedSkills} ✕${r.deletedSkills} ${i18n("skills")}, ${i18n("instructions")} ${r.instructions}`
+			: `${i18n("Sync failed")}: ${r.error ?? "?"}`;
 	}
 
 	private onCatalogInput(e: Event) {
@@ -45,8 +71,16 @@ export class InstructionsTab extends SettingsTab {
 
 	private async save() {
 		const settings = getSitegeistStorage().settings;
-		await settings.set(CUSTOM_INSTRUCTIONS_SETTING, this.value.trim());
+		const text = this.value.trim();
+		const previous = ((await settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING)) ?? "").trim();
+		await settings.set(CUSTOM_INSTRUCTIONS_SETTING, text);
 		await settings.set(MODEL_CATALOG_URL_SETTING, this.catalogUrl.trim());
+		await settings.set(SYNC_URL_SETTING, this.syncUrl.trim());
+		if (text !== previous) {
+			const updatedAt = new Date().toISOString();
+			await settings.set(CUSTOM_INSTRUCTIONS_UPDATED_SETTING, updatedAt);
+			void pushInstructions(text, updatedAt);
+		}
 		this.saved = true;
 	}
 
@@ -73,6 +107,24 @@ export class InstructionsTab extends SettingsTab {
 					.value=${this.catalogUrl}
 					@input=${(e: Event) => this.onCatalogInput(e)}
 				/>
+				<div class="pt-2 text-sm font-medium text-foreground">${i18n("Sync URL")}</div>
+				<p class="text-xs text-muted-foreground">
+					${i18n("Skills and these instructions are backed up to this server on every change and reconciled when the panel opens, so they survive a reinstall. Leave empty to disable.")}
+				</p>
+				<div class="flex gap-2">
+					<input
+						type="url"
+						class="flex-1 px-3 py-2 text-sm text-foreground bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
+						placeholder=${DEFAULT_SYNC_URL}
+						.value=${this.syncUrl}
+						@input=${(e: Event) => this.onSyncUrlInput(e)}
+					/>
+					<button
+						class="px-3 py-2 text-sm rounded-md border border-input bg-background hover:bg-accent"
+						@click=${() => this.syncNow()}
+					>${i18n("Sync now")}</button>
+				</div>
+				<div class="text-xs text-muted-foreground">${this.syncStatus}</div>
 				<div class="text-xs text-muted-foreground">${this.saved ? i18n("Saved") : ""}</div>
 			</div>
 		`;

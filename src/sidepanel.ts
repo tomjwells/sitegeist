@@ -60,6 +60,7 @@ import {
 import * as port from "./utils/port.js";
 import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
+import { syncWithServer } from "./sync.js";
 import { tutorials } from "./tutorials.js";
 
 // Register custom message renderers
@@ -1004,6 +1005,9 @@ async function initApp() {
 
 	// Merge a fresh model catalog into the registry (bundled pi-ai list goes stale quickly)
 	await refreshModelCatalog();
+
+	// Reconcile skills + custom instructions with the sync server (re-hydrates after a reinstall)
+	await syncWithServer();
 
 	// Create ChatPanel
 	chatPanel = new ChatPanel();
