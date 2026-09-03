@@ -110,6 +110,12 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 		let targetTabId = tab.id;
 
 		markNavigationStart();
+		const startedAt = Date.now();
+		console.info("[Navigate] start", {
+			url: "url" in args ? args.url : undefined,
+			newTab: "newTab" in args ? args.newTab : false,
+			tabId: tab.id,
+		});
 		try {
 			if ("url" in args && args.url !== undefined) {
 				// Check if opening in new tab
@@ -130,6 +136,7 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			}
 		} finally {
 			markNavigationEnd();
+			console.info("[Navigate] load wait finished", { ms: Date.now() - startedAt });
 		}
 
 		// Get updated tab info using query (better cross-browser support)
@@ -245,10 +252,16 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			const isTopFrame = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) =>
 				details.frameId === 0 || (details as { frameType?: string }).frameType === "outermost_frame";
 			const onNavigation = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
-				if (details.tabId === tabId && isTopFrame(details)) settle(() => resolve(details.url));
+				if (details.tabId === tabId && isTopFrame(details)) {
+					console.info("[Navigate] load signal: webNavigation", details.url);
+					settle(() => resolve(details.url));
+				}
 			};
 			const onUpdated = (updatedTabId: number, info: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
-				if (updatedTabId === tabId && info.status === "complete") settle(() => resolve(tab.url ?? ""));
+				if (updatedTabId === tabId && info.status === "complete") {
+					console.info("[Navigate] load signal: tabs.onUpdated complete", tab.url);
+					settle(() => resolve(tab.url ?? ""));
+				}
 			};
 			const onAbort = () => settle(() => reject(new Error("Aborted")));
 			const timer = setTimeout(() => {
