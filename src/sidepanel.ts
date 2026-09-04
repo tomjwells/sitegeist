@@ -23,13 +23,14 @@ import {
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
 import { History, Plus, Settings } from "lucide";
+import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
 import { InstructionsTab } from "./dialogs/InstructionsTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
-import { SitegeistSessionListDialog } from "./dialogs/SessionListDialog.js";
+import "./components/SessionsSidebar.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
@@ -128,6 +129,7 @@ setAppStorage(storage);
 let currentSessionId: string | undefined;
 let currentTitle = "";
 let isEditingTitle = false;
+let sessionsSidebarOpen = false;
 let agent: Agent;
 let chatPanel: ChatPanel;
 let agentUnsubscribe: (() => void) | undefined;
@@ -361,6 +363,7 @@ const saveSession = async () => {
 		};
 
 		await storage.sessions.saveSession(currentSessionId, state, metadata, currentTitle);
+		refreshSessionsSidebar();
 	} catch (err) {
 		console.error("Failed to save session:", err);
 	}
@@ -668,19 +671,7 @@ const renderApp = () => {
 						variant: "ghost",
 						size: "sm",
 						children: icon(History, "sm"),
-						onClick: () => {
-							SitegeistSessionListDialog.open(
-								(sessionId: string) => {
-									loadSession(sessionId);
-								},
-								(deletedSessionId: string) => {
-									// Only reload if the current session was deleted
-									if (deletedSessionId === currentSessionId) {
-										newSession();
-									}
-								},
-							);
-						},
+						onClick: () => toggleSessionsSidebar(!sessionsSidebarOpen),
 						title: "Sessions",
 					})}
 					${Button({
@@ -767,12 +758,39 @@ const renderApp = () => {
 				</div>
 			</div>
 
-			<!-- Chat Panel -->
-			${chatPanel}
+			<!-- Chat Panel + sessions sidebar overlay -->
+			<div class="relative flex-1 min-h-0 flex flex-col">
+				${chatPanel}
+				<sessions-sidebar
+					.open=${sessionsSidebarOpen}
+					.currentSessionId=${currentSessionId}
+					.onSelect=${(sessionId: string) => loadSession(sessionId)}
+					.onNew=${newSession}
+					.onDeleted=${(deletedSessionId: string) => {
+						// Only reload if the current session was deleted
+						if (deletedSessionId === currentSessionId) newSession();
+					}}
+					.onToggle=${(open: boolean) => toggleSessionsSidebar(open)}
+				></sessions-sidebar>
+			</div>
 		</div>
 	`;
 
 	render(appHtml, document.body);
+};
+
+const toggleSessionsSidebar = (open: boolean) => {
+	sessionsSidebarOpen = open;
+	void storage.settings.set(SESSIONS_SIDEBAR_OPEN_SETTING, open);
+	renderApp();
+};
+
+const isSessionsSidebar = (el: Element | null): el is SessionsSidebar =>
+	el !== null && el.tagName.toLowerCase() === "sessions-sidebar";
+
+const refreshSessionsSidebar = () => {
+	const el = document.querySelector("sessions-sidebar");
+	if (isSessionsSidebar(el) && sessionsSidebarOpen) void el.refresh();
 };
 
 // ============================================================================
@@ -1008,6 +1026,8 @@ async function initApp() {
 
 	// Reconcile skills + custom instructions with the sync server (re-hydrates after a reinstall)
 	await syncWithServer();
+
+	sessionsSidebarOpen = (await storage.settings.get<boolean>(SESSIONS_SIDEBAR_OPEN_SETTING)) === true;
 
 	// Create ChatPanel
 	chatPanel = new ChatPanel();

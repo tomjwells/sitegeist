@@ -14,6 +14,8 @@ import type { Skill } from "./storage/stores/skills-store.js";
 export const SYNC_URL_SETTING = "sync.url";
 export const DEFAULT_SYNC_URL = "https://cors-proxy.tjw-private/sitegeist";
 export const CUSTOM_INSTRUCTIONS_UPDATED_SETTING = "customInstructionsUpdatedAt";
+/** Also mirror provider logins (API keys / OAuth tokens) to the sync server. Default on. */
+export const SYNC_AUTH_SETTING = "sync.auth";
 
 const TIMEOUT_MS = 8000;
 
@@ -34,7 +36,25 @@ export interface SyncResult {
 	pushedSkills: number;
 	deletedSkills: number;
 	instructions: "pulled" | "pushed" | "same" | "none";
+	pulledLogins: number;
+	pushedLogins: number;
 	error?: string;
+}
+
+interface AuthDocument {
+	keys: Record<string, string>;
+	updatedAt: string;
+}
+
+function isAuthDocument(v: unknown): v is AuthDocument {
+	if (typeof v !== "object" || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return (
+		typeof o.keys === "object" &&
+		o.keys !== null &&
+		Object.values(o.keys as Record<string, unknown>).every(isString) &&
+		isString(o.updatedAt)
+	);
 }
 
 const isString = (v: unknown): v is string => typeof v === "string";
@@ -115,13 +135,73 @@ export async function pushInstructions(text: string, updatedAt: string): Promise
 	}
 }
 
+async function authSyncEnabled(): Promise<boolean> {
+	return (await getSitegeistStorage().settings.get<boolean>(SYNC_AUTH_SETTING)) !== false;
+}
+
+/** Mirror one provider login; called after every providerKeys.set(). */
+export async function pushAuthKey(provider: string, key: string): Promise<void> {
+	if (!(await authSyncEnabled())) return;
+	try {
+		const res = await request("PUT", `/auth/${encodeURIComponent(provider)}`, { key });
+		if (res && !res.ok) console.warn(`[Sync] push login "${provider}" failed: ${res.status}`);
+	} catch (e) {
+		console.warn("[Sync] push login failed:", e);
+	}
+}
+
+/** Remove one provider login from the server; called after every providerKeys.delete(). */
+export async function pushAuthDelete(provider: string): Promise<void> {
+	if (!(await authSyncEnabled())) return;
+	try {
+		const res = await request("DELETE", `/auth/${encodeURIComponent(provider)}`);
+		if (res && !res.ok) console.warn(`[Sync] delete login "${provider}" failed: ${res.status}`);
+	} catch (e) {
+		console.warn("[Sync] delete login failed:", e);
+	}
+}
+
+/**
+ * Logins: union of both sides, local wins on conflict (OAuth refresh tokens rotate, and the browser
+ * that used one last holds the live pair). Fills the local store after a reinstall.
+ */
+async function syncLogins(result: SyncResult): Promise<void> {
+	if (!(await authSyncEnabled())) return;
+	const res = await request("GET", "/auth");
+	if (!res) return;
+	if (!res.ok) throw new Error(`GET /auth -> ${res.status}`);
+	const doc: unknown = await res.json();
+	if (!isAuthDocument(doc)) throw new Error("unexpected /auth response shape");
+	const keys = getSitegeistStorage().providerKeys;
+	const localProviders = new Set(await keys.list());
+	for (const [provider, key] of Object.entries(doc.keys)) {
+		if (localProviders.has(provider)) continue;
+		await keys.set(provider, key, { sync: false });
+		result.pulledLogins++;
+	}
+	for (const provider of localProviders) {
+		const key = await keys.get(provider);
+		if (key === null || doc.keys[provider] === key) continue;
+		await pushAuthKey(provider, key);
+		result.pushedLogins++;
+	}
+}
+
 /**
  * Two-way reconcile with the server. Per skill (by name): newer `lastUpdated` wins; a skill only on
  * one side is copied to the other unless the server holds a tombstone newer than the local copy, in
  * which case the local copy is deleted. Instructions: newer `updatedAt` wins.
  */
 export async function syncWithServer(): Promise<SyncResult> {
-	const result: SyncResult = { ok: false, pulledSkills: 0, pushedSkills: 0, deletedSkills: 0, instructions: "none" };
+	const result: SyncResult = {
+		ok: false,
+		pulledSkills: 0,
+		pushedSkills: 0,
+		deletedSkills: 0,
+		instructions: "none",
+		pulledLogins: 0,
+		pushedLogins: 0,
+	};
 	const storage = getSitegeistStorage();
 	const skills = storage.skills;
 	try {
@@ -175,6 +255,7 @@ export async function syncWithServer(): Promise<SyncResult> {
 		} else if (remoteIns || localText) {
 			result.instructions = "same";
 		}
+		await syncLogins(result);
 		result.ok = true;
 		console.log("[Sync] done:", result);
 	} catch (e) {

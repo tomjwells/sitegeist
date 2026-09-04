@@ -8,6 +8,7 @@ import {
 	CUSTOM_INSTRUCTIONS_UPDATED_SETTING,
 	DEFAULT_SYNC_URL,
 	pushInstructions,
+	SYNC_AUTH_SETTING,
 	SYNC_URL_SETTING,
 	type SyncResult,
 	syncWithServer,
@@ -24,6 +25,7 @@ export class InstructionsTab extends SettingsTab {
 	@state() private value = "";
 	@state() private catalogUrl = "";
 	@state() private syncUrl = "";
+	@state() private syncAuth = true;
 	@state() private saved = false;
 	@state() private syncStatus = "";
 	private saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -38,6 +40,12 @@ export class InstructionsTab extends SettingsTab {
 		this.value = (await settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING)) ?? "";
 		this.catalogUrl = (await settings.get<string>(MODEL_CATALOG_URL_SETTING)) ?? DEFAULT_MODEL_CATALOG_URL;
 		this.syncUrl = (await settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL;
+		this.syncAuth = (await settings.get<boolean>(SYNC_AUTH_SETTING)) !== false;
+	}
+
+	private async onSyncAuthChange(e: Event) {
+		this.syncAuth = (e.target as HTMLInputElement).checked;
+		await getSitegeistStorage().settings.set(SYNC_AUTH_SETTING, this.syncAuth);
 	}
 
 	private onSyncUrlInput(e: Event) {
@@ -51,7 +59,7 @@ export class InstructionsTab extends SettingsTab {
 		this.syncStatus = i18n("Syncing…");
 		const r: SyncResult = await syncWithServer();
 		this.syncStatus = r.ok
-			? `${i18n("Synced")}: ↓${r.pulledSkills} ↑${r.pushedSkills} ✕${r.deletedSkills} ${i18n("skills")}, ${i18n("instructions")} ${r.instructions}`
+			? `${i18n("Synced")}: ↓${r.pulledSkills} ↑${r.pushedSkills} ✕${r.deletedSkills} ${i18n("skills")}, ${i18n("instructions")} ${r.instructions}, ↓${r.pulledLogins} ↑${r.pushedLogins} ${i18n("logins")}`
 			: `${i18n("Sync failed")}: ${r.error ?? "?"}`;
 	}
 
@@ -124,6 +132,10 @@ export class InstructionsTab extends SettingsTab {
 						@click=${() => this.syncNow()}
 					>${i18n("Sync now")}</button>
 				</div>
+				<label class="flex items-start gap-2 text-xs text-muted-foreground">
+					<input type="checkbox" class="mt-0.5" .checked=${this.syncAuth} @change=${(e: Event) => this.onSyncAuthChange(e)} />
+					<span>${i18n("Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.")}</span>
+				</label>
 				<div class="text-xs text-muted-foreground">${this.syncStatus}</div>
 				<div class="text-xs text-muted-foreground">${this.saved ? i18n("Saved") : ""}</div>
 			</div>

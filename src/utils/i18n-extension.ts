@@ -106,6 +106,16 @@ declare module "@mariozechner/mini-lit" {
 		"Sync failed": string;
 		skills: string;
 		instructions: string;
+		"Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.": string;
+		logins: string;
+		Unpin: string;
+		Pin: string;
+		"New Session": string;
+		"Manage sessions (import, export, bulk delete)": string;
+		Pinned: string;
+		Recent: string;
+		"No matching sessions": string;
+		Close: string;
 	}
 }
 
@@ -216,6 +226,17 @@ const sitegeistTranslations = {
 		"Sync failed": "Sync failed",
 		skills: "skills",
 		instructions: "instructions",
+		"Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.":
+			"Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.",
+		logins: "logins",
+		Unpin: "Unpin",
+		Pin: "Pin",
+		"New Session": "New Session",
+		"Manage sessions (import, export, bulk delete)": "Manage sessions (import, export, bulk delete)",
+		Pinned: "Pinned",
+		Recent: "Recent",
+		"No matching sessions": "No matching sessions",
+		Close: "Close",
 	},
 	de: {
 		"Permission request failed": "Berechtigungsanfrage fehlgeschlagen",
@@ -325,6 +346,17 @@ const sitegeistTranslations = {
 		"Sync failed": "Synchronisierung fehlgeschlagen",
 		skills: "Skills",
 		instructions: "Anweisungen",
+		"Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.":
+			"Auch Anbieter-Logins (API-Schlüssel und OAuth-Tokens) auf dem Sync-Server sichern, damit sie das Entfernen der Erweiterung überleben. Nur mit einem eigenen privaten Server verwenden.",
+		logins: "Logins",
+		Unpin: "Lösen",
+		Pin: "Anheften",
+		"New Session": "Neue Sitzung",
+		"Manage sessions (import, export, bulk delete)": "Sitzungen verwalten (Import, Export, Massenlöschung)",
+		Pinned: "Angeheftet",
+		Recent: "Zuletzt",
+		"No matching sessions": "Keine passenden Sitzungen",
+		Close: "Schließen",
 	},
 };
 

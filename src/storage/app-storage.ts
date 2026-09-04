@@ -3,11 +3,11 @@ import {
 	CustomProvidersStore,
 	getAppStorage,
 	IndexedDBStorageBackend,
-	ProviderKeysStore,
 	SessionsStore,
 	SettingsStore,
 } from "@mariozechner/pi-web-ui";
 import { CostStore } from "./stores/cost-store.js";
+import { SitegeistProviderKeysStore } from "./stores/provider-keys-store.js";
 import { SitegeistSessionsStore } from "./stores/sessions-store.js";
 import { SkillsStore } from "./stores/skills-store.js";
 
@@ -17,11 +17,13 @@ import { SkillsStore } from "./stores/skills-store.js";
 export class SitegeistAppStorage extends BaseAppStorage {
 	readonly skills: SkillsStore;
 	readonly costs: CostStore;
+	/** Narrowed type of the base `providerKeys` so callers can pass `{ sync: false }`. */
+	declare readonly providerKeys: SitegeistProviderKeysStore;
 
 	constructor() {
 		// 1. Create all stores (no backend yet)
 		const settings = new SettingsStore();
-		const providerKeys = new ProviderKeysStore();
+		const providerKeys = new SitegeistProviderKeysStore();
 		const sessions = new SitegeistSessionsStore();
 		const customProviders = new CustomProvidersStore();
 		const skills = new SkillsStore();
