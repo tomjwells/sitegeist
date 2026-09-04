@@ -435,7 +435,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		initialState: initialState || {
 			systemPrompt,
 			model: defaultModel,
-			thinkingLevel: "off", // fork default: fast, non-thinking replies (Tom, 2026-09-04); per-session brain selector in the composer overrides
+			thinkingLevel: "medium",
 			messages: [],
 			tools: [],
 		},
