@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { ImageContent, Message, TextContent } from "@mariozechner/pi-ai";
+import { convertAttachments, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
 import type { NavigationMessage } from "./NavigationMessage.js";
 
 // Helper: Check if a message has toolCall blocks
@@ -84,7 +85,13 @@ export async function browserMessageTransformer(messages: AgentMessage[]): Promi
 		}
 
 		// Filter non-LLM messages
-		if (m.role !== "user" && m.role !== "assistant" && m.role !== "toolResult" && m.role !== "navigation") {
+		if (
+			m.role !== "user" &&
+			m.role !== "user-with-attachments" &&
+			m.role !== "assistant" &&
+			m.role !== "toolResult" &&
+			m.role !== "navigation"
+		) {
 			continue;
 		}
 
@@ -111,6 +118,16 @@ ${skillsInfo}
 - DO NOT REPEAT THIS MESSAGE BACK TO THE USER!
 </instructions>`,
 			} as Message);
+		} else if (m.role === "user-with-attachments") {
+			// The chat editor emits this role whenever files/images are attached (pi-web-ui
+			// AgentInterface). It was previously dropped here wholesale — text AND images never
+			// reached the model, which then answered as if nothing had been sent. Convert to a
+			// plain user message: text + image blocks / extracted document text.
+			const um = m as UserMessageWithAttachments;
+			const content: (TextContent | ImageContent)[] =
+				typeof um.content === "string" ? [{ type: "text", text: um.content }] : [...um.content];
+			if (um.attachments?.length) content.push(...convertAttachments(um.attachments));
+			transformed.push({ role: "user", content, timestamp: um.timestamp } as Message);
 		} else if (m.role === "user") {
 			const { attachments, ...rest } = m as any;
 			transformed.push(rest as Message);
