@@ -9,6 +9,7 @@
 
 /* Tell Tailwind to scan local components */
 @source "../src/**/*.ts";
+@source "../scripts/build.mjs";
 
 /* Import Tailwind */
 /* biome-ignore lint/correctness/noInvalidPositionAtImportRule: fuck you */

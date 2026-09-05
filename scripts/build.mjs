@@ -82,21 +82,39 @@ const piWebUiPatches = [
 	},
 	{
 		// ToolMessage: a global "collapse all tool calls" mode (header +/- button, sidepanel.ts). Collapsed
-		// cards render as one compact row; clicking a row expands just that card.
+		// cards render as one compact row (status dot, tool name, one-line summary of the arguments); clicking
+		// a row expands that card, clicking the row above an expanded card collapses it again.
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]Messages\.js$/,
 		imports: [],
 		replacements: [
 			{
 				find: "    render() {\n        const toolName = this.tool?.name || this.toolCall.name;\n",
 				replace:
-					"    render() {\n        const toolName = this.tool?.name || this.toolCall.name;\n" +
-					"        if (globalThis.__sgToolCallsCollapsed === true && !this.sgForceExpanded) {\n" +
-					"            const status = this.aborted ? 'aborted' : this.result ? (this.result.isError ? 'error' : 'done') : (this.isStreaming || this.pending) ? 'running' : 'done';\n" +
-					"            const dot = status === 'error' || status === 'aborted' ? 'bg-destructive' : status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-green-600';\n" +
-					"            let summary = '';\n" +
-					"            try { const a = typeof this.toolCall.arguments === 'string' ? JSON.parse(this.toolCall.arguments) : this.toolCall.arguments; const t = a && (a.title || a.description || a.url || a.command || a.path || a.name); if (typeof t === 'string') summary = t; } catch {}\n" +
-					'            return html `<button class="sg-tool-collapsed w-full text-left px-2.5 py-1.5 border border-border rounded-md bg-card text-xs text-muted-foreground flex items-center gap-2 hover:text-foreground" title="Expand this tool call" @click=${() => { this.sgForceExpanded = true; this.requestUpdate(); }}><span class="inline-block w-2 h-2 rounded-full shrink-0 ${dot}"></span><span class="font-medium shrink-0">${toolName}</span><span class="truncate">${summary}</span></button>`;\n' +
-					"        }\n",
+					"    sgSummary() {\n" +
+					"        try {\n" +
+					"            const a = typeof this.toolCall.arguments === 'string' ? JSON.parse(this.toolCall.arguments) : this.toolCall.arguments;\n" +
+					"            if (!a || typeof a !== 'object') return '';\n" +
+					"            for (const k of ['title', 'description', 'command', 'code', 'path', 'url', 'query', 'pattern', 'prompt', 'message', 'text', 'item', 'name', 'skill', 'selector', 'file']) {\n" +
+					"                const v = a[k];\n" +
+					"                if (typeof v !== 'string' || !v.trim()) continue;\n" +
+					"                const lines = v.split('\\n').map((l) => l.trim()).filter(Boolean);\n" +
+					"                return lines.find((l) => !l.startsWith('%%') && !l.startsWith('#') && !l.startsWith('//')) || lines[0] || '';\n" +
+					"            }\n" +
+					"            return Object.entries(a).filter(([, v]) => v != null && typeof v !== 'object' && String(v).trim()).map(([k, v]) => k + '=' + String(v).trim()).join('  ');\n" +
+					"        } catch { return ''; }\n" +
+					"    }\n" +
+					"    sgRow(expanded) {\n" +
+					"        const toolName = this.tool?.name || this.toolCall.name;\n" +
+					"        const status = this.aborted ? 'aborted' : this.result ? (this.result.isError ? 'error' : 'done') : (this.isStreaming || this.pending) ? 'running' : 'done';\n" +
+					"        const dot = status === 'error' || status === 'aborted' ? 'bg-destructive' : status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-green-600';\n" +
+					'        return html `<button class="sg-tool-collapsed w-full text-left px-2.5 py-1.5 border border-border rounded-md bg-card text-xs text-muted-foreground flex items-center gap-2 hover:text-foreground" title=${expanded ? \'Collapse this tool call\' : \'Expand this tool call\'} @click=${() => { this.sgForceExpanded = !expanded; this.requestUpdate(); }}><span class="inline-block w-2 h-2 rounded-full shrink-0 ${dot}"></span><span class="font-medium shrink-0">${toolName}</span><span class="truncate min-w-0 flex-1 font-mono opacity-80">${this.sgSummary()}</span><span class="shrink-0 w-3 text-center">${expanded ? \'\u2212\' : \'+\'}</span></button>`;\n' +
+					"    }\n" +
+					"    render() {\n" +
+					"        if (globalThis.__sgToolCallsCollapsed !== true) return this.sgRenderFull();\n" +
+					"        if (!this.sgForceExpanded) return this.sgRow(false);\n" +
+					'        return html `<div class="space-y-1">${this.sgRow(true)}${this.sgRenderFull()}</div>`;\n' +
+					"    }\n" +
+					"    sgRenderFull() {\n        const toolName = this.tool?.name || this.toolCall.name;\n",
 			},
 		],
 	},
