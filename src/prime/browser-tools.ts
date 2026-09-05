@@ -3,7 +3,11 @@
  * session's WebSocket; these run it with the extension's own powers (tabs, capture, user scripts,
  * cookies) and answer with an AgentToolResult-shaped { content, details }.
  */
+import { CUSTOM_INSTRUCTIONS_SETTING } from "../sidepanel.js";
+import { getSitegeistStorage } from "../storage/app-storage.js";
+import { CUSTOM_INSTRUCTIONS_UPDATED_SETTING, pushInstructions } from "../sync.js";
 import { AskUserWhichElementTool } from "../tools/ask-user-which-element.js";
+import { skillTool } from "../tools/skill.js";
 import type { Json } from "./prime-client.js";
 import { isJson } from "./prime-client.js";
 
@@ -137,8 +141,11 @@ async function evalJs(args: Json, windowId: number): Promise<BrowserToolResult> 
 	const id = requireTabId(tab);
 	await bringToFront(tab, args);
 	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 30_000, 1_000), 170_000);
+	// Same as the Browser agent's browserjs(): matching site skills are injected ahead of the code.
+	const skills = args.skills === false || !tab.url ? [] : await getSitegeistStorage().skills.getSkillsForUrl(tab.url);
+	const skillLibrary = skills.map((sk) => sk.library).join("\n\n");
 	// Body of an async function; the result is JSON-serialised in-page so odd objects cannot break the bridge.
-	const wrapped = `(async () => { const __r = await (async () => { ${code}\n })(); try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); } })()`;
+	const wrapped = `(async () => { ${skillLibrary}\n const __r = await (async () => { ${code}\n })(); try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); } })()`;
 	const raw = await Promise.race([
 		runUserScript(id, wrapped),
 		new Promise<never>((_, reject) =>
@@ -147,7 +154,10 @@ async function evalJs(args: Json, windowId: number): Promise<BrowserToolResult> 
 	]);
 	const out = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
 	const limited = out.length > 60_000 ? `${out.slice(0, 60_000)}\n[truncated: ${out.length} chars]` : out;
-	return { content: [{ type: "text", text: limited }], details: { tabId: id, url: tab.url } };
+	return {
+		content: [{ type: "text", text: limited }],
+		details: { tabId: id, url: tab.url, skillsInjected: skills.map((sk) => sk.name) },
+	};
 }
 
 function waitForLoad(tabId: number, timeoutMs: number): Promise<void> {
@@ -316,6 +326,42 @@ async function pickElement(args: Json, windowId: number): Promise<BrowserToolRes
 	}
 }
 
+/** The Browser agent's own skill tool (create/update/list/get/delete site skills; the store syncs to the R730). */
+async function manageSkill(args: Json): Promise<BrowserToolResult> {
+	// skillTool validates/uses the fields it knows; the schema is mirrored on the prime side.
+	const result = await skillTool.execute("prime", args as Parameters<typeof skillTool.execute>[1]);
+	return { content: result.content, details: result.details };
+}
+
+/** Custom instructions = the user-editable part of sitegeist's system prompt (Settings → Instructions); synced. */
+async function manageInstructions(args: Json): Promise<BrowserToolResult> {
+	const settings = getSitegeistStorage().settings;
+	const current = ((await settings.get<string>(CUSTOM_INSTRUCTIONS_SETTING)) ?? "").trim();
+	if (args.command === "get")
+		return {
+			content: [{ type: "text", text: current || "(no custom instructions set)" }],
+			details: { text: current },
+		};
+	if (args.command === "set") {
+		const next = (str(args.text) ?? "").trim();
+		if (next === current) return text("Custom instructions unchanged.");
+		await settings.set(CUSTOM_INSTRUCTIONS_SETTING, next);
+		const updatedAt = new Date().toISOString();
+		await settings.set(CUSTOM_INSTRUCTIONS_UPDATED_SETTING, updatedAt);
+		await pushInstructions(next, updatedAt);
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Custom instructions saved (${next.length} chars) and synced; the Browser agent sees them on its next new or reopened session.`,
+				},
+			],
+			details: { chars: next.length, updatedAt },
+		};
+	}
+	return text("browser_instructions: command must be get or set");
+}
+
 export async function handleBrowserCall(tool: string, args: Json, windowId: number): Promise<BrowserToolResult> {
 	switch (tool) {
 		case "browser_tabs":
@@ -334,6 +380,10 @@ export async function handleBrowserCall(tool: string, args: Json, windowId: numb
 			return uploadFile(args, windowId);
 		case "browser_pick_element":
 			return pickElement(args, windowId);
+		case "browser_skill":
+			return manageSkill(args);
+		case "browser_instructions":
+			return manageInstructions(args);
 		default:
 			return text(`unknown browser tool: ${tool}`);
 	}
