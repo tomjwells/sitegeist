@@ -480,9 +480,14 @@ export class PrimeRemoteAgent extends Agent {
 		this.remote.pendingToolCalls = new Set();
 	}
 
+	/**
+	 * Model list from the bridge session's own registry. On a brand-new chat the session is created
+	 * here (cheap: the bridge spawns it once and the first prompt reuses it), so the picker works
+	 * before any message has been sent.
+	 */
 	async availableModels(): Promise<Model<any>[]> {
-		if (!this.primeSessionId) return [];
-		const data = await primeRpc(this.primeSessionId, { type: "get_available_models" });
+		const sessionId = await this.ensureSession("browser session");
+		const data = await primeRpc(sessionId, { type: "get_available_models" });
 		return Array.isArray(data.models) ? data.models.filter(isModel) : [];
 	}
 

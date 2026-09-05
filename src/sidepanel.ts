@@ -48,6 +48,7 @@ import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { PrimeModelPicker } from "./prime/PrimeModelPicker.js";
 import { isPrimeSessionId, PRIME_PROVIDER, PrimeRemoteAgent, stripBrowserContext } from "./prime/prime-agent.js";
+import type { PrimeAttachment } from "./prime/prime-client.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import { DebuggerTool } from "./tools/debugger.js";
@@ -458,13 +459,13 @@ const createAgent = async (
 			getModel("anthropic", "claude-sonnet-4-6") ??
 			defaultModel;
 		if (!placeholder) throw new Error("No model available for the prime placeholder");
-		const prime = new PrimeRemoteAgent({
+		const prime: PrimeRemoteAgent = new PrimeRemoteAgent({
 			sessionId: primeSessionId,
 			model: placeholder,
 			thinkingLevel: initialState?.thinkingLevel ?? "high",
 			messages: initialState?.messages ?? [],
 			windowId: currentWindowId,
-			tabContext: async () => {
+			tabContext: async (): Promise<string> => {
 				const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
 				const where =
 					tab?.url && !tab.url.startsWith("chrome-extension://")
@@ -475,14 +476,14 @@ const createAgent = async (
 					matching.length > 0
 						? ` Sitegeist skills for this page (auto-injected into browser_eval; browser_skill get <name> for docs): ${matching.map((sk) => `${sk.name} — ${sk.shortDescription}`).join("; ")}.`
 						: "";
-				const first = prime.state.messages.length === 0;
+				const first: boolean = prime.state.messages.length === 0;
 				return first
 					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools bring their tab to the front so Tom can watch; pass background:true only if he asks you to work quietly. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Site runbooks: before driving a site with browser_* tools, agent_wiki_read main-pi-agent → 'Site runbooks — how to drive specific sites from the sitegeist panel' (page 01a06f49-71c8-7c6a-9b17-ddd04df32bc1) and reuse its selectors/flow; after you work out a NEW site or task (selectors, flow, verification), append a dated section to that page in the same turn so next time it is one call. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts). Reply in the chat; keep answers tight.${skillsLine} [/sitegeist browser context]`
 					: `[sitegeist browser context] ${where}.${skillsLine} [/sitegeist browser context]`;
 			},
 		});
 		prime.onStatusChange = () => renderApp();
-		prime.onAttachments = async (items) => {
+		prime.onAttachments = async (items: PrimeAttachment[]) => {
 			// telegram_attach in a browser session: the artifacts panel is the destination. Text-like files
 			// are decoded, binaries stay base64 (what ImageArtifact/PdfArtifact/GenericArtifact expect).
 			const panel = chatPanel.artifactsPanel;
@@ -609,12 +610,16 @@ const createAgent = async (
 		onModelSelect: async () => {
 			if (isPrimeAgent(agent)) {
 				const prime = agent;
-				const models = await prime.availableModels().catch((err) => {
+				let models: Model<any>[] = [];
+				let failure = "";
+				try {
+					models = await prime.availableModels();
+				} catch (err) {
+					failure = err instanceof Error ? err.message : String(err);
 					console.warn("[prime] model list failed", err);
-					return [];
-				});
+				}
 				if (models.length === 0) {
-					alert("prime-agent model list unavailable (send a first message to start the session, then retry)");
+					alert(`prime-agent model list unavailable${failure ? `: ${failure}` : ""}`);
 					return;
 				}
 				PrimeModelPicker.open(models, prime.remoteModel, (model) => {
