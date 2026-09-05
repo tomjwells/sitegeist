@@ -264,21 +264,36 @@ async function uploadFile(args: Json, windowId: number): Promise<BrowserToolResu
 	};
 }
 
-/** Sitegeist's own element picker (overlay in the active tab; Tom clicks; abort after timeoutMs). */
+/** Sitegeist's own element picker (overlay in the tab; Tom clicks; abort after timeoutMs). */
 async function pickElement(args: Json, windowId: number): Promise<BrowserToolResult> {
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
+	// The picker injects into the active tab of the panel's window: make sure that is this tab and that
+	// the window is in front, otherwise the overlay waits on a page Tom is not looking at.
 	if (!tab.active) await chrome.tabs.update(id, { active: true });
+	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	const controller = new AbortController();
 	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 120_000, 5_000), 175_000);
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const where = `tab ${id} "${tab.title ?? ""}" ${tab.url ?? ""}`;
 	try {
 		const result = await new AskUserWhichElementTool().execute(
 			"prime",
 			{ message: str(args.message) },
 			controller.signal,
 		);
-		return { content: result.content, details: { tabId: id, url: tab.url, element: result.details } };
+		return {
+			content: [{ type: "text", text: `Tom picked an element on ${where}:\n` }, ...result.content],
+			details: { tabId: id, url: tab.url, element: result.details },
+		};
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		if (controller.signal.aborted) {
+			return text(
+				`browser_pick_element: no element was picked within ${Math.round(timeoutMs / 1000)} s (picker overlay was shown on ${where}; ask Tom whether he saw the banner, or retry with the right tabId).`,
+			);
+		}
+		return text(`browser_pick_element failed on ${where}: ${message}`);
 	} finally {
 		clearTimeout(timer);
 	}
