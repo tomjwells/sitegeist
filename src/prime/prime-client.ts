@@ -102,9 +102,26 @@ export async function primeStop(sessionId: string): Promise<void> {
 
 // ---- event socket -----------------------------------------------------------------------------
 
+export interface PrimeAttachment {
+	id: string;
+	filename: string;
+	mime: string;
+	bytes: number;
+	caption: string;
+	dataBase64: string;
+}
+
+const isAttachment = (v: unknown): v is PrimeAttachment =>
+	isJson(v) &&
+	typeof v.id === "string" &&
+	typeof v.filename === "string" &&
+	typeof v.mime === "string" &&
+	typeof v.dataBase64 === "string";
+
 export interface PrimeSocketHandlers {
 	onEvents: (events: Json[], offset: number) => void;
 	onBrowserCall: (id: string, tool: string, args: Json) => void;
+	onAttachments: (items: PrimeAttachment[]) => void;
 	onStatus: (status: "connecting" | "open" | "closed", detail?: string) => void;
 }
 
@@ -166,6 +183,9 @@ export class PrimeSocket {
 			if (events.length > 0) this.handlers.onEvents(events, this.offset);
 		} else if (msg.type === "browser_call" && typeof msg.id === "string" && typeof msg.tool === "string") {
 			this.handlers.onBrowserCall(msg.id, msg.tool, isJson(msg.args) ? msg.args : {});
+		} else if (msg.type === "attachments" && Array.isArray(msg.items)) {
+			const items = msg.items.filter(isAttachment);
+			if (items.length > 0) this.handlers.onAttachments(items);
 		} else if (msg.type === "relay_error") {
 			console.warn("[prime] relay error:", msg.message);
 		}
@@ -173,6 +193,10 @@ export class PrimeSocket {
 
 	send(payload: Json): void {
 		if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(payload));
+	}
+
+	ackAttachments(ids: string[]): void {
+		this.send({ type: "attachments_ack", ids });
 	}
 
 	replyBrowserCall(id: string, ok: boolean, result: unknown, error?: string): void {

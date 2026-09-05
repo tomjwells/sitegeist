@@ -472,11 +472,42 @@ const createAgent = async (
 						: "Active tab: (none)";
 				const first = prime.state.messages.length === 0;
 				return first
-					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element). If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts). Reply in the chat; keep answers tight.`
+					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element). To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts). Reply in the chat; keep answers tight.`
 					: `[sitegeist browser context] ${where}`;
 			},
 		});
 		prime.onStatusChange = () => renderApp();
+		prime.onAttachments = async (items) => {
+			// telegram_attach in a browser session: the artifacts panel is the destination. Text-like files
+			// are decoded, binaries stay base64 (what ImageArtifact/PdfArtifact/GenericArtifact expect).
+			const panel = chatPanel.artifactsPanel;
+			if (!panel) throw new Error("artifacts panel not ready");
+			for (const item of items) {
+				const bytes = Uint8Array.from(atob(item.dataBase64), (c) => c.charCodeAt(0));
+				const textLike =
+					/^(text\/|application\/(json|xml|javascript|x-yaml|yaml|csv))/.test(item.mime) ||
+					/\.(html?|md|markdown|svg|txt|json|csv|tsv|js|ts|css|xml|ya?ml|log)$/i.test(item.filename);
+				const content = textLike ? new TextDecoder().decode(bytes) : item.dataBase64;
+				const command = panel.artifacts.has(item.filename) ? "rewrite" : "create";
+				const result = await panel.tool.execute(`prime-attach-${item.id}`, {
+					command,
+					filename: item.filename,
+					content,
+				});
+				const summary = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+				if (/^Error/.test(summary)) throw new Error(summary);
+				// Record it the way pi-web-ui expects so the panel is rebuilt from history on reload
+				prime.appendMessage({
+					role: "artifact",
+					action: command === "create" ? "create" : "update",
+					filename: item.filename,
+					content,
+					title: item.caption || undefined,
+					timestamp: new Date().toISOString(),
+				});
+			}
+			renderApp();
+		};
 		agent = prime;
 	} else {
 		agent = new Agent({

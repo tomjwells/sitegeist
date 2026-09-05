@@ -18,6 +18,7 @@ import { PRIME_PROVIDER } from "./constants.js";
 import {
 	isJson,
 	type Json,
+	type PrimeAttachment,
 	PrimeSocket,
 	primeCreateSession,
 	primeHydrate,
@@ -30,6 +31,8 @@ export { isPrimeSessionId, PRIME_PROVIDER, PRIME_SESSION_PREFIX } from "./consta
 export type PrimeStatus = "idle" | "creating" | "connecting" | "open" | "closed" | "error";
 
 const LLM_ROLES = new Set(["user", "assistant", "toolResult"]);
+/** Kept alongside the bridge history: artifact messages let pi-web-ui rebuild the artifacts panel on reload. */
+const isArtifactMessage = (m: AgentMessage): boolean => m.role === "artifact";
 const AGENT_EVENT_TYPES = new Set([
 	"agent_start",
 	"agent_end",
@@ -73,6 +76,8 @@ export class PrimeRemoteAgent extends Agent {
 	/** The real remote model (provider intact) — `state.model` is the display view. */
 	remoteModel: Model<any> | undefined;
 	onStatusChange: ((status: PrimeStatus) => void) | undefined;
+	/** Files the agent queued with telegram_attach; the side panel turns them into artifacts. */
+	onAttachments: ((items: PrimeAttachment[]) => Promise<void>) | undefined;
 
 	private readonly remote: AgentState;
 	private readonly remoteListeners = new Set<(e: AgentEvent) => void>();
@@ -112,7 +117,7 @@ export class PrimeRemoteAgent extends Agent {
 			model: primeModelView(opts.model),
 			thinkingLevel: opts.thinkingLevel,
 			tools: [],
-			messages: (opts.messages ?? []).filter((m) => LLM_ROLES.has(m.role)),
+			messages: (opts.messages ?? []).filter((m) => LLM_ROLES.has(m.role) || isArtifactMessage(m)),
 			isStreaming: false,
 			streamMessage: null,
 			pendingToolCalls: new Set(),
@@ -155,7 +160,8 @@ export class PrimeRemoteAgent extends Agent {
 		try {
 			const h = await primeHydrate(this.primeSessionId);
 			this.applyRemoteState(h.state);
-			this.remote.messages = toAgentMessages(h.messages);
+			const artifacts = this.remote.messages.filter(isArtifactMessage);
+			this.remote.messages = [...toAgentMessages(h.messages), ...artifacts];
 			this.openSocket(h.offset);
 			this.emitRemote({ type: "agent_end", messages: [] });
 		} catch (err) {
@@ -199,6 +205,7 @@ export class PrimeRemoteAgent extends Agent {
 		this.socket = new PrimeSocket(this.primeSessionId, offset, {
 			onEvents: (events) => this.applyEvents(events),
 			onBrowserCall: (id, tool, args) => void this.runBrowserCall(id, tool, args),
+			onAttachments: (items) => void this.receiveAttachments(items),
 			onStatus: (status, detail) => this.setStatus(status, detail ?? ""),
 		});
 		void this.socket.connect();
@@ -210,6 +217,23 @@ export class PrimeRemoteAgent extends Agent {
 			this.socket?.replyBrowserCall(id, true, result);
 		} catch (err) {
 			this.socket?.replyBrowserCall(id, false, undefined, err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	private readonly deliveredAttachmentIds = new Set<string>();
+
+	private async receiveAttachments(all: PrimeAttachment[]): Promise<void> {
+		if (!this.onAttachments) return;
+		// The relay pushes on connect and after each turn; the same queue entry can arrive twice before the ack lands.
+		const items = all.filter((i) => !this.deliveredAttachmentIds.has(i.id));
+		if (items.length === 0) return;
+		for (const i of items) this.deliveredAttachmentIds.add(i.id);
+		try {
+			await this.onAttachments(items);
+			this.socket?.ackAttachments(items.map((i) => i.id));
+		} catch (err) {
+			for (const i of items) this.deliveredAttachmentIds.delete(i.id);
+			console.error("[prime] attachment delivery failed", err);
 		}
 	}
 
