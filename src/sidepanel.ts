@@ -31,6 +31,7 @@ import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
 import { InstructionsTab } from "./dialogs/InstructionsTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
+import { catalogProviders, isCatalogProvider } from "./models-registry.js";
 import "./components/SessionsSidebar.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
@@ -65,7 +66,7 @@ import {
 import * as port from "./utils/port.js";
 import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
-import { syncWithServer } from "./sync.js";
+import { proxyToken, syncWithServer } from "./sync.js";
 import { tutorials } from "./tutorials.js";
 
 // Register custom message renderers
@@ -216,17 +217,23 @@ async function selectDefaultModelForAvailableProvider() {
 	}
 }
 
+/**
+ * Providers the Browser agent can use: those served by the proxy catalog (callable with the shared proxy
+ * token - the proxy injects the real credential, see /upstream on cors-proxy) plus any the user holds a
+ * key/login for.
+ */
 async function getProvidersWithKeys(): Promise<string[]> {
-	const providers = await storage.providerKeys.list();
-	const result: string[] = [];
-	for (const provider of providers) {
+	const result = new Set<string>();
+	if (await proxyToken()) for (const provider of catalogProviders()) result.add(provider);
+	for (const provider of await storage.providerKeys.list()) {
 		const key = await storage.providerKeys.get(provider);
-		if (key) result.push(provider);
+		if (key) result.add(provider);
 	}
-	return result;
+	return Array.from(result);
 }
 
 async function hasAnyApiKey(): Promise<boolean> {
+	if ((await proxyToken()) && catalogProviders().length > 0) return true;
 	const providers = await storage.providerKeys.list();
 	return providers.length > 0;
 }
@@ -254,7 +261,9 @@ async function updateAuthLabel() {
 	}
 	const provider = agent.state.model.provider;
 	const stored = await storage.providerKeys.get(provider);
-	if (!stored) {
+	if (isCatalogProvider(provider) && (await proxyToken())) {
+		authLabel = "via proxy";
+	} else if (!stored) {
 		authLabel = "";
 	} else if (isOAuthCredentials(stored)) {
 		authLabel = "subscription";
@@ -532,6 +541,12 @@ const createAgent = async (
 				return (await storage.settings.get<string>("proxy.url")) || undefined;
 			}),
 			getApiKey: async (provider: string) => {
+				// Catalog providers are called through the proxy (their baseUrl points at /upstream/<provider>);
+				// the shared proxy token is the credential, the proxy swaps in the real one.
+				if (isCatalogProvider(provider)) {
+					const token = await proxyToken();
+					if (token) return token;
+				}
 				const stored = await storage.providerKeys.get(provider);
 				if (!stored) return undefined;
 				const proxyEnabled = await storage.settings.get<boolean>("proxy.enabled");

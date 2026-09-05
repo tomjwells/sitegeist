@@ -9,6 +9,7 @@ import {
 	DEFAULT_SYNC_URL,
 	pushInstructions,
 	SYNC_AUTH_SETTING,
+	SYNC_TOKEN_SETTING,
 	SYNC_URL_SETTING,
 	type SyncResult,
 	syncWithServer,
@@ -26,6 +27,7 @@ export class InstructionsTab extends SettingsTab {
 	@state() private catalogUrl = "";
 	@state() private syncUrl = "";
 	@state() private syncAuth = true;
+	@state() private syncToken = "";
 	@state() private saved = false;
 	@state() private syncStatus = "";
 	private saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -41,6 +43,14 @@ export class InstructionsTab extends SettingsTab {
 		this.catalogUrl = (await settings.get<string>(MODEL_CATALOG_URL_SETTING)) ?? DEFAULT_MODEL_CATALOG_URL;
 		this.syncUrl = (await settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL;
 		this.syncAuth = (await settings.get<boolean>(SYNC_AUTH_SETTING)) !== false;
+		this.syncToken = (await settings.get<string>(SYNC_TOKEN_SETTING)) ?? "";
+	}
+
+	private onSyncTokenInput(e: Event) {
+		this.syncToken = (e.target as HTMLInputElement).value;
+		this.saved = false;
+		clearTimeout(this.saveTimer);
+		this.saveTimer = setTimeout(() => this.save(), 400);
 	}
 
 	private async onSyncAuthChange(e: Event) {
@@ -84,6 +94,7 @@ export class InstructionsTab extends SettingsTab {
 		await settings.set(CUSTOM_INSTRUCTIONS_SETTING, text);
 		await settings.set(MODEL_CATALOG_URL_SETTING, this.catalogUrl.trim());
 		await settings.set(SYNC_URL_SETTING, this.syncUrl.trim());
+		await settings.set(SYNC_TOKEN_SETTING, this.syncToken.trim());
 		if (text !== previous) {
 			const updatedAt = new Date().toISOString();
 			await settings.set(CUSTOM_INSTRUCTIONS_UPDATED_SETTING, updatedAt);
@@ -132,6 +143,17 @@ export class InstructionsTab extends SettingsTab {
 						@click=${() => this.syncNow()}
 					>${i18n("Sync now")}</button>
 				</div>
+				<div class="pt-1 text-sm font-medium text-foreground">${i18n("Proxy token")}</div>
+				<p class="text-xs text-muted-foreground">
+					${i18n("Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.")}
+				</p>
+				<input
+					type="password"
+					autocomplete="off"
+					class="w-full px-3 py-2 text-sm text-foreground bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
+					.value=${this.syncToken}
+					@input=${(e: Event) => this.onSyncTokenInput(e)}
+				/>
 				<label class="flex items-start gap-2 text-xs text-muted-foreground">
 					<input type="checkbox" class="mt-0.5" .checked=${this.syncAuth} @change=${(e: Event) => this.onSyncAuthChange(e)} />
 					<span>${i18n("Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.")}</span>

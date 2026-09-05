@@ -116,6 +116,8 @@ declare module "@mariozechner/mini-lit" {
 		Recent: string;
 		"No matching sessions": string;
 		Close: string;
+		"Proxy token": string;
+		"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.": string;
 	}
 }
 
@@ -237,6 +239,9 @@ const sitegeistTranslations = {
 		Recent: "Recent",
 		"No matching sessions": "No matching sessions",
 		Close: "Close",
+		"Proxy token": "Proxy token",
+		"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.":
+			"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.",
 	},
 	de: {
 		"Permission request failed": "Berechtigungsanfrage fehlgeschlagen",
@@ -357,6 +362,9 @@ const sitegeistTranslations = {
 		Recent: "Zuletzt",
 		"No matching sessions": "Keine passenden Sitzungen",
 		Close: "Schließen",
+		"Proxy token": "Proxy-Token",
+		"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.":
+			"Gemeinsames Geheimnis, das der Proxy verlangt. Es öffnet den Sync-Speicher und erlaubt dem Browser-Agenten, jedes Modell im Katalog über die Zugangsdaten des Proxys aufzurufen - kein Login pro Anbieter nötig. Modelle gelten nach erneutem Öffnen des Panels.",
 	},
 };
 

@@ -16,6 +16,12 @@ export const DEFAULT_SYNC_URL = "https://cors-proxy.tjw-private/sitegeist";
 export const CUSTOM_INSTRUCTIONS_UPDATED_SETTING = "customInstructionsUpdatedAt";
 /** Also mirror provider logins (API keys / OAuth tokens) to the sync server. Default on. */
 export const SYNC_AUTH_SETTING = "sync.auth";
+/** Shared token the proxy requires on /sitegeist/* and /upstream/* (Settings → Instructions → Proxy token). */
+export const SYNC_TOKEN_SETTING = "sync.token";
+
+export async function proxyToken(): Promise<string> {
+	return ((await getSitegeistStorage().settings.get<string>(SYNC_TOKEN_SETTING)) ?? "").trim();
+}
 
 const TIMEOUT_MS = 8000;
 
@@ -95,9 +101,12 @@ async function baseUrl(): Promise<string | undefined> {
 async function request(method: string, path: string, body?: unknown): Promise<Response | undefined> {
 	const base = await baseUrl();
 	if (!base) return undefined;
-	const init: RequestInit = { method, signal: AbortSignal.timeout(TIMEOUT_MS) };
+	const headers: Record<string, string> = {};
+	const token = await proxyToken();
+	if (token) headers.authorization = `Bearer ${token}`;
+	const init: RequestInit = { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) };
 	if (body !== undefined) {
-		init.headers = { "content-type": "application/json" };
+		headers["content-type"] = "application/json";
 		init.body = JSON.stringify(body);
 	}
 	return fetch(`${base}${path}`, init);

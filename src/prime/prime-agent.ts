@@ -13,6 +13,7 @@ import {
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import { convertAttachments, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
+import { catalogProviders, getModels as registryModels } from "../models-registry.js";
 import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
 import { PRIME_PROVIDER } from "./constants.js";
 import {
@@ -486,6 +487,9 @@ export class PrimeRemoteAgent extends Agent {
 	 * before any message has been sent.
 	 */
 	async availableModels(): Promise<Model<any>[]> {
+		// The proxy catalog IS prime's registry (one source of truth), so no session is needed to list it.
+		const fromCatalog = catalogProviders().flatMap((p) => registryModels(p));
+		if (fromCatalog.length > 0) return fromCatalog;
 		const sessionId = await this.ensureSession("browser session");
 		const data = await primeRpc(sessionId, { type: "get_available_models" });
 		return Array.isArray(data.models) ? data.models.filter(isModel) : [];

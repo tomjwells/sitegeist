@@ -4,7 +4,7 @@
  * The relay holds the bridge token; the browser only ever talks to the private cors-proxy host.
  */
 import { getSitegeistStorage } from "../storage/app-storage.js";
-import { DEFAULT_SYNC_URL, SYNC_URL_SETTING } from "../sync.js";
+import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "../sync.js";
 
 export type Json = Record<string, unknown>;
 export const isJson = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -18,8 +18,11 @@ export async function primeBaseUrl(): Promise<string> {
 
 async function request(method: "GET" | "POST", path: string, body?: Json): Promise<Json> {
 	const base = await primeBaseUrl();
-	const init: RequestInit = { method, signal: AbortSignal.timeout(TIMEOUT_MS) };
-	if (body) init.headers = { "content-type": "application/json" };
+	const headers: Record<string, string> = {};
+	const token = await proxyToken();
+	if (token) headers.authorization = `Bearer ${token}`;
+	if (body) headers["content-type"] = "application/json";
+	const init: RequestInit = { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) };
 	if (body) init.body = JSON.stringify(body);
 	const res = await fetch(`${base}${path}`, init);
 	let parsed: unknown;
@@ -143,7 +146,9 @@ export class PrimeSocket {
 	async connect(): Promise<void> {
 		if (this.closed) return;
 		const base = await primeBaseUrl();
-		const url = `${base.replace(/^http/, "ws")}/sessions/${encodeURIComponent(this.sessionId)}/ws?offset=${this.offset}`;
+		// Browsers cannot set headers on a WebSocket handshake, so the token travels as a query parameter.
+		const token = await proxyToken();
+		const url = `${base.replace(/^http/, "ws")}/sessions/${encodeURIComponent(this.sessionId)}/ws?offset=${this.offset}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
 		this.handlers.onStatus("connecting");
 		const ws = new WebSocket(url);
 		this.ws = ws;

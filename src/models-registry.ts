@@ -81,26 +81,38 @@ function isModelLike(value: unknown): value is AnyModel {
 	);
 }
 
+/** Providers whose model list came from the catalog (the proxy's callable set) rather than the bundle. */
+const catalogProviderSet = new Set<string>();
+
+export function catalogProviders(): string[] {
+	return Array.from(catalogProviderSet);
+}
+
+export function isCatalogProvider(provider: string): boolean {
+	return catalogProviderSet.has(provider);
+}
+
 /**
- * Merge a catalog ({ provider: { modelId: Model } }) into the registry. Existing entries are replaced
- * (prices/limits get refreshed), unknown providers are added, entries with an unsupported api or a
- * malformed shape are skipped. Returns how many models were registered.
+ * Load a catalog ({ provider: { modelId: Model } }) into the registry. The catalog is the single source
+ * of truth for what is callable, so for every provider it lists the bundled models are REPLACED by the
+ * catalog's (a bundled entry the proxy cannot serve would only be a dead picker row). Providers the
+ * catalog does not mention keep their bundled list (they need the user's own key). Entries with an
+ * unsupported api or a malformed shape are skipped. Returns how many models were registered.
  */
 export function registerModels(catalog: unknown): number {
 	if (typeof catalog !== "object" || catalog === null) return 0;
 	let count = 0;
 	for (const [provider, models] of Object.entries(catalog as Record<string, unknown>)) {
 		if (typeof models !== "object" || models === null) continue;
+		const providerModels = new Map<string, AnyModel>();
 		for (const [id, model] of Object.entries(models as Record<string, unknown>)) {
 			if (!isModelLike(model) || !SUPPORTED_APIS.has(model.api) || model.provider !== provider) continue;
-			let providerModels = modelRegistry.get(provider);
-			if (!providerModels) {
-				providerModels = new Map();
-				modelRegistry.set(provider, providerModels);
-			}
 			providerModels.set(id, model);
 			count++;
 		}
+		if (providerModels.size === 0) continue;
+		modelRegistry.set(provider, providerModels);
+		catalogProviderSet.add(provider);
 	}
 	return count;
 }
