@@ -47,7 +47,7 @@ import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/Welcom
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { PrimeModelPicker } from "./prime/PrimeModelPicker.js";
-import { isPrimeSessionId, PRIME_PROVIDER, PrimeRemoteAgent } from "./prime/prime-agent.js";
+import { isPrimeSessionId, PRIME_PROVIDER, PrimeRemoteAgent, stripBrowserContext } from "./prime/prime-agent.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import { DebuggerTool } from "./tools/debugger.js";
@@ -477,8 +477,8 @@ const createAgent = async (
 						: "";
 				const first = prime.state.messages.length === 0;
 				return first
-					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools bring their tab to the front so Tom can watch; pass background:true only if he asks you to work quietly. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Site runbooks: before driving a site with browser_* tools, agent_wiki_read main-pi-agent → 'Site runbooks — how to drive specific sites from the sitegeist panel' (page 01a06f49-71c8-7c6a-9b17-ddd04df32bc1) and reuse its selectors/flow; after you work out a NEW site or task (selectors, flow, verification), append a dated section to that page in the same turn so next time it is one call. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts). Reply in the chat; keep answers tight.${skillsLine}`
-					: `[sitegeist browser context] ${where}.${skillsLine}`;
+					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools bring their tab to the front so Tom can watch; pass background:true only if he asks you to work quietly. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Site runbooks: before driving a site with browser_* tools, agent_wiki_read main-pi-agent → 'Site runbooks — how to drive specific sites from the sitegeist panel' (page 01a06f49-71c8-7c6a-9b17-ddd04df32bc1) and reuse its selectors/flow; after you work out a NEW site or task (selectors, flow, verification), append a dated section to that page in the same turn so next time it is one call. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts). Reply in the chat; keep answers tight.${skillsLine} [/sitegeist browser context]`
+					: `[sitegeist browser context] ${where}.${skillsLine} [/sitegeist browser context]`;
 			},
 		});
 		prime.onStatusChange = () => renderApp();
@@ -809,15 +809,21 @@ const renderApp = () => {
 						onClick: () => newSession(),
 						title: "New Session",
 					})}
-					${Select({
-						value: agentKind,
-						options: AGENT_KIND_OPTIONS,
-						onChange: (value: string) => void switchAgentKind(value === "prime" ? "prime" : "browser"),
-						size: "sm",
-						variant: "ghost",
-						fitContent: true,
-						className: "text-xs",
-					})}
+					${
+						// Agent is a choice for a brand-new session only (Tom, 2026-09-05): once anything has been sent the
+						// session is bound to its harness, so the control disappears (the model label still says prime/local).
+						!currentSessionId && !agent?.state.messages.some((m) => m.role === "user")
+							? Select({
+									value: agentKind,
+									options: AGENT_KIND_OPTIONS,
+									onChange: (value: string) => void switchAgentKind(value === "prime" ? "prime" : "browser"),
+									size: "sm",
+									variant: "ghost",
+									fitContent: true,
+									className: "text-xs",
+								})
+							: ""
+					}
 					${
 						isPrimeAgent(agent)
 							? html`<span
@@ -1238,6 +1244,11 @@ async function initApp() {
 			currentSessionId = sessionIdFromUrl;
 			const metadata = await storage.sessions.getMetadata(sessionIdFromUrl);
 			currentTitle = metadata?.title || "";
+			if (currentTitle.startsWith("[sitegeist browser context]")) {
+				// titles saved before the context prefix was stripped from prime user messages
+				currentTitle = generateTitle(stripBrowserContext(sessionData.messages));
+				if (currentTitle) void storage.sessions.updateTitle(sessionIdFromUrl, currentTitle);
+			}
 
 			await createAgent(
 				{

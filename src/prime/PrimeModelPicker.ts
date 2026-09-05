@@ -36,6 +36,8 @@ export class PrimeModelPicker extends DialogBase {
 			list.push(m);
 			groups.set(m.provider, list);
 		}
+		const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+		for (const list of groups.values()) list.sort((a, b) => byName.compare(a.name || a.id, b.name || b.id));
 		return html`
 			<div class="flex flex-col h-full">
 				<div class="p-3 border-b border-border">
@@ -57,14 +59,15 @@ export class PrimeModelPicker extends DialogBase {
 							${models.map((m) => {
 								const isCurrent = this.current?.id === m.id && this.current?.provider === m.provider;
 								return html`<button
-									class="w-full text-left px-2 py-1.5 rounded text-sm hover:bg-secondary ${isCurrent ? "bg-secondary font-medium" : ""}"
+									class="w-full flex items-baseline gap-2 text-left px-2 py-1.5 rounded text-sm text-foreground hover:bg-secondary ${isCurrent ? "bg-secondary font-medium" : ""}"
 									@click=${() => {
 										this.onSelect?.(m);
 										this.close();
 									}}
 								>
-									<span>${m.name || m.id}</span>
-									<span class="text-[11px] text-muted-foreground ml-2">${m.id}${m.reasoning ? " · thinking" : ""}</span>
+									<span class="truncate">${m.name || m.id}</span>
+									<span class="text-[11px] text-muted-foreground font-mono truncate">${m.id}</span>
+									${isCurrent ? html`<span class="ml-auto text-[10px] uppercase tracking-wide text-primary">current</span>` : ""}
 								</button>`;
 							})}
 						`,

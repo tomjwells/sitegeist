@@ -1,10 +1,18 @@
 import type { Model } from "@mariozechner/pi-ai";
-import { PRIME_PROVIDER } from "./prime/constants.js";
 import { supportsXhigh } from "./models-registry.js";
+import { PRIME_PROVIDER } from "./prime/constants.js";
 
 /** Canonical ladder; models that publish a thinkingLevelMap (e.g. Fable: off/xhigh/max) get exactly those rungs. */
 const ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const LABELS: Record<string, string> = { off: "Off", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
+const LABELS: Record<string, string> = {
+	off: "Off",
+	minimal: "Minimal",
+	low: "Low",
+	medium: "Medium",
+	high: "High",
+	xhigh: "XHigh",
+	max: "Max",
+};
 
 export interface ThinkingOption {
 	value: string;
@@ -33,5 +41,7 @@ export function thinkingOptionsFor(model: Model<any> | null | undefined, current
 		const i = (ORDER as readonly string[]).indexOf(v);
 		return i === -1 ? ORDER.length : i;
 	};
-	return [...new Set(values)].sort((a, b) => rank(a) - rank(b)).map((value) => ({ value, label: LABELS[value] ?? value }));
+	return [...new Set(values)]
+		.sort((a, b) => rank(a) - rank(b))
+		.map((value) => ({ value, label: LABELS[value] ?? value }));
 }

@@ -57,7 +57,30 @@ export function primeModelView(model: Model<any>): Model<any> {
 
 const isAgentMessage = (v: unknown): v is AgentMessage => isJson(v) && typeof v.role === "string";
 const toAgentMessages = (list: unknown[]): AgentMessage[] =>
-	list.filter(isAgentMessage).filter((m) => LLM_ROLES.has(m.role));
+	stripBrowserContext(list.filter(isAgentMessage).filter((m) => LLM_ROLES.has(m.role)));
+
+// The side panel prepends "[sitegeist browser context] … [/sitegeist browser context]" to what Tom typed so
+// prime knows the tab/tools; that is for the model, not for the transcript or the session title.
+const CONTEXT_RE = /^\[sitegeist browser context\][\s\S]*?(?:\[\/sitegeist browser context\]|\n\n)\s*/;
+function stripContextText(text: string): string {
+	return text.replace(CONTEXT_RE, "");
+}
+/** Returns the messages with the browser-context preamble removed from user text (no-op for other roles). */
+export function stripBrowserContext(messages: AgentMessage[]): AgentMessage[] {
+	return messages.map((m) => {
+		if (m.role !== "user") return m;
+		const content = m.content;
+		if (typeof content === "string")
+			return CONTEXT_RE.test(content) ? { ...m, content: stripContextText(content) } : m;
+		let changed = false;
+		const next = content.map((c) => {
+			if (c.type !== "text" || !CONTEXT_RE.test(c.text)) return c;
+			changed = true;
+			return { ...c, text: stripContextText(c.text) };
+		});
+		return changed ? { ...m, content: next } : m;
+	});
+}
 
 function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
 	if (a.role !== b.role) return false;
@@ -299,8 +322,9 @@ export class PrimeRemoteAgent extends Agent {
 		}
 	}
 
-	private appendRemoteMessage(message: AgentMessage): void {
-		if (!LLM_ROLES.has(message.role)) return;
+	private appendRemoteMessage(incoming: AgentMessage): void {
+		if (!LLM_ROLES.has(incoming.role)) return;
+		const message = incoming.role === "user" ? (stripBrowserContext([incoming])[0] ?? incoming) : incoming;
 		const messages = this.remote.messages;
 		if (message.role === "user" && this.optimisticUser) {
 			const idx = messages.lastIndexOf(this.optimisticUser);

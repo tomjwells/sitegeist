@@ -32,6 +32,7 @@ export class SessionsSidebar extends LitElement {
 	@state() private locks: Record<string, number> = {};
 	@state() private windowId: number | undefined;
 	@state() private query = "";
+	@state() private agentFilter: "all" | "browser" | "prime" = "all";
 	@state() private dragIndex: number | undefined;
 	@state() private dropIndex: number | undefined;
 
@@ -105,8 +106,12 @@ export class SessionsSidebar extends LitElement {
 
 	private filtered(): SessionMetadata[] {
 		const q = this.query.trim();
-		if (!q) return this.sessions;
-		return new Fuse(this.sessions, {
+		const pool =
+			this.agentFilter === "all"
+				? this.sessions
+				: this.sessions.filter((s) => s.id.startsWith("sg-") === (this.agentFilter === "prime"));
+		if (!q) return pool;
+		return new Fuse(pool, {
 			keys: ["title", "preview"],
 			threshold: 0.4,
 			ignoreLocation: true,
@@ -213,6 +218,16 @@ export class SessionsSidebar extends LitElement {
 							}}
 							class="w-full px-2 py-1 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
 						/>
+						<div class="flex gap-1 pt-1.5">
+							${(["all", "browser", "prime"] as const).map(
+								(f) => html`<button
+									class="px-2 py-0.5 rounded text-[11px] ${this.agentFilter === f ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary/50"}"
+									@click=${() => {
+										this.agentFilter = f;
+									}}
+								>${f === "all" ? "All" : f === "browser" ? "Browser agent" : "prime-agent"}</button>`,
+							)}
+						</div>
 					</div>
 					<div class="flex-1 overflow-y-auto px-1 pb-2">
 						${
