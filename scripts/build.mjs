@@ -36,9 +36,32 @@ const modelsRegistryPlugin = {
 	},
 };
 
+// The composer's thinking dropdown is hardcoded to Off..High inside pi-web-ui's MessageEditor; swap the
+// array for src/thinking-options.ts so models with their own rungs (Fable: off/xhigh/max in prime-agent
+// sessions) and XHigh-capable models get the right list. Fails the build loudly if upstream changes shape.
+const thinkingOptionsPlugin = {
+	name: "thinking-options",
+	setup(build) {
+		build.onLoad({ filter: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageEditor\.js$/ }, async (args) => {
+			const { readFile } = await import("node:fs/promises");
+			const source = await readFile(args.path, "utf8");
+			const start = source.indexOf("options: [\n                    { value: \"off\"");
+			const end = source.indexOf("],", start);
+			if (start === -1 || end === -1) throw new Error("thinking-options: MessageEditor.js no longer matches the expected options array");
+			const helper = join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/");
+			const contents =
+				`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(helper)};\n` +
+				source.slice(0, start) +
+				'options: __thinkingOptionsFor(this.currentModel, this.thinkingLevel).map((o) => ({ value: o.value, label: i18n(o.label), icon: icon(Brain, "sm") }))' +
+				source.slice(end + 1);
+			return { contents, loader: "js", resolveDir: dirname(args.path) };
+		});
+	},
+};
+
 const buildOptions = {
 	absWorkingDir: packageRoot,
-	plugins: [modelsRegistryPlugin],
+	plugins: [modelsRegistryPlugin, thinkingOptionsPlugin],
 	entryPoints,
 	bundle: true,
 	outdir: outDir,
