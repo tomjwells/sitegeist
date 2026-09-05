@@ -81,6 +81,26 @@ const piWebUiPatches = [
 		],
 	},
 	{
+		// ToolMessage: a global "collapse all tool calls" mode (header +/- button, sidepanel.ts). Collapsed
+		// cards render as one compact row; clicking a row expands just that card.
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]Messages\.js$/,
+		imports: [],
+		replacements: [
+			{
+				find: "    render() {\n        const toolName = this.tool?.name || this.toolCall.name;\n",
+				replace:
+					"    render() {\n        const toolName = this.tool?.name || this.toolCall.name;\n" +
+					"        if (globalThis.__sgToolCallsCollapsed === true && !this.sgForceExpanded) {\n" +
+					"            const status = this.aborted ? 'aborted' : this.result ? (this.result.isError ? 'error' : 'done') : (this.isStreaming || this.pending) ? 'running' : 'done';\n" +
+					"            const dot = status === 'error' || status === 'aborted' ? 'bg-destructive' : status === 'running' ? 'bg-yellow-500 animate-pulse' : 'bg-green-600';\n" +
+					"            let summary = '';\n" +
+					"            try { const a = typeof this.toolCall.arguments === 'string' ? JSON.parse(this.toolCall.arguments) : this.toolCall.arguments; const t = a && (a.title || a.description || a.url || a.command || a.path || a.name); if (typeof t === 'string') summary = t; } catch {}\n" +
+					'            return html `<button class="sg-tool-collapsed w-full text-left px-2.5 py-1.5 border border-border rounded-md bg-card text-xs text-muted-foreground flex items-center gap-2 hover:text-foreground" title="Expand this tool call" @click=${() => { this.sgForceExpanded = true; this.requestUpdate(); }}><span class="inline-block w-2 h-2 rounded-full shrink-0 ${dot}"></span><span class="font-medium shrink-0">${toolName}</span><span class="truncate">${summary}</span></button>`;\n' +
+					"        }\n",
+			},
+		],
+	},
+	{
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]AgentInterface\.js$/,
 		imports: [],
 		replacements: [

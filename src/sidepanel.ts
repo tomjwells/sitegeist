@@ -23,7 +23,7 @@ import {
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { History, Plus, Settings } from "lucide";
+import { History, Minus, Plus, Settings } from "lucide";
 import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
@@ -141,6 +141,9 @@ let currentSessionId: string | undefined;
 let currentTitle = "";
 let isEditingTitle = false;
 let sessionsSidebarOpen = false;
+/** Header +/-: collapse every tool call to a one-line row, or expand them all (incl. their inner sections). */
+let toolCallsCollapsed = false;
+export const TOOL_CALLS_COLLAPSED_SETTING = "ui.toolCallsCollapsed";
 let agent: Agent;
 let chatPanel: ChatPanel;
 /** Which brain drives the current session: the in-browser agent (default) or a relay agent id ("prime" = main-pi, or a worker). */
@@ -943,6 +946,13 @@ const renderApp = () => {
 								? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>`
 								: ""
 					}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(toolCallsCollapsed ? Plus : Minus, "sm"),
+						onClick: () => applyToolCallsCollapsed(!toolCallsCollapsed),
+						title: toolCallsCollapsed ? "Expand all tool calls" : "Collapse all tool calls",
+					})}
 					<theme-toggle></theme-toggle>
 					${Button({
 						variant: "ghost",
@@ -981,6 +991,33 @@ const renderApp = () => {
 	`;
 
 	render(appHtml, document.body);
+};
+
+const applyToolCallsCollapsed = (collapsed: boolean) => {
+	toolCallsCollapsed = collapsed;
+	globalThis.__sgToolCallsCollapsed = collapsed;
+	void storage.settings.set(TOOL_CALLS_COLLAPSED_SETTING, collapsed);
+	for (const el of document.querySelectorAll("tool-message")) {
+		const card = el as HTMLElement & { sgForceExpanded?: boolean; requestUpdate?: () => void };
+		card.sgForceExpanded = false;
+		card.requestUpdate?.();
+	}
+	if (!collapsed) {
+		// Expand all = also open every card's own collapsible section (renderCollapsibleHeader pattern + expandable-section)
+		requestAnimationFrame(() => {
+			for (const content of document.querySelectorAll("tool-message div.overflow-hidden.transition-all")) {
+				if (!content.classList.contains("max-h-0")) continue;
+				content.classList.remove("max-h-0");
+				content.classList.add("max-h-[2000px]", "mt-3");
+				const header = content.previousElementSibling;
+				header?.querySelector(".chevron-up")?.classList.remove("hidden");
+				header?.querySelector(".chevrons-up-down")?.classList.add("hidden");
+			}
+			for (const section of document.querySelectorAll("expandable-section"))
+				(section as HTMLElement & { expanded?: boolean }).expanded = true;
+		});
+	}
+	renderApp();
 };
 
 const toggleSessionsSidebar = (open: boolean) => {
@@ -1232,6 +1269,8 @@ async function initApp() {
 	await syncWithServer();
 
 	sessionsSidebarOpen = (await storage.settings.get<boolean>(SESSIONS_SIDEBAR_OPEN_SETTING)) === true;
+	toolCallsCollapsed = (await storage.settings.get<boolean>(TOOL_CALLS_COLLAPSED_SETTING)) === true;
+	globalThis.__sgToolCallsCollapsed = toolCallsCollapsed;
 
 	// Agent dropdown: main-pi + worker prime sidecars the relay knows about
 	await refreshAgentOptions();
