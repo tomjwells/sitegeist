@@ -7,6 +7,7 @@ import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { FolderCog, Pin, PinOff, Plus, Trash2, X } from "lucide";
 import { SitegeistSessionListDialog } from "../dialogs/SessionListDialog.js";
+import { agentIdFromSessionId, isPrimeSessionId, MAIN_AGENT_ID } from "../prime/constants.js";
 import * as port from "../utils/port.js";
 import "../utils/i18n-extension.js";
 
@@ -32,7 +33,8 @@ export class SessionsSidebar extends LitElement {
 	@state() private locks: Record<string, number> = {};
 	@state() private windowId: number | undefined;
 	@state() private query = "";
-	@state() private agentFilter: "all" | "browser" | "prime" = "all";
+	/** "all", "browser", or a relay agent id (prime / worker). */
+	@state() private agentFilter = "all";
 	@state() private dragIndex: number | undefined;
 	@state() private dropIndex: number | undefined;
 
@@ -104,12 +106,24 @@ export class SessionsSidebar extends LitElement {
 		return new Date(iso).toLocaleDateString();
 	}
 
+	private agentOf(sessionId: string): string {
+		return isPrimeSessionId(sessionId) ? agentIdFromSessionId(sessionId) : "browser";
+	}
+
+	/** All, Browser agent, then every relay agent that has at least one session. */
+	private filterOptions(): string[] {
+		const agents = Array.from(
+			new Set(this.sessions.map((s) => this.agentOf(s.id)).filter((a) => a !== "browser")),
+		).sort();
+		return ["all", "browser", ...agents];
+	}
+
 	private filtered(): SessionMetadata[] {
 		const q = this.query.trim();
 		const pool =
 			this.agentFilter === "all"
 				? this.sessions
-				: this.sessions.filter((s) => s.id.startsWith("sg-") === (this.agentFilter === "prime"));
+				: this.sessions.filter((s) => this.agentOf(s.id) === this.agentFilter);
 		if (!q) return pool;
 		return new Fuse(pool, {
 			keys: ["title", "preview"],
@@ -159,7 +173,7 @@ export class SessionsSidebar extends LitElement {
 					<div class="text-sm text-foreground truncate" title=${session.title}>${session.title}</div>
 					<div class="text-[11px] text-muted-foreground truncate">
 						${this.formatDate(session.lastModified)} · ${session.messageCount} ${i18n("messages")} · $${session.usage.cost.total.toFixed(2)}
-						${session.id.startsWith("sg-") ? html` · <span class="text-primary/80">prime</span>` : ""}
+						${isPrimeSessionId(session.id) ? html` · <span class="text-primary/80">${this.agentOf(session.id)}</span>` : ""}
 						${current ? html` · <span class="text-primary">${i18n("Current")}</span>` : ""}
 						${locked ? html` · <span class="text-destructive">${i18n("Locked")}</span>` : ""}
 					</div>
@@ -219,13 +233,13 @@ export class SessionsSidebar extends LitElement {
 							class="w-full px-2 py-1 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
 						/>
 						<div class="flex gap-1 pt-1.5">
-							${(["all", "browser", "prime"] as const).map(
+							${this.filterOptions().map(
 								(f) => html`<button
 									class="px-2 py-0.5 rounded text-[11px] ${this.agentFilter === f ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary/50"}"
 									@click=${() => {
 										this.agentFilter = f;
 									}}
-								>${f === "all" ? "All" : f === "browser" ? "Browser agent" : "prime-agent"}</button>`,
+								>${f === "all" ? "All" : f === "browser" ? "Browser agent" : f === MAIN_AGENT_ID ? "prime-agent" : f}</button>`,
 							)}
 						</div>
 					</div>

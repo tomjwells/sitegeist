@@ -48,8 +48,14 @@ import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/Welcom
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { PrimeModelPicker } from "./prime/PrimeModelPicker.js";
-import { isPrimeSessionId, PRIME_PROVIDER, PrimeRemoteAgent, stripBrowserContext } from "./prime/prime-agent.js";
-import type { PrimeAttachment } from "./prime/prime-client.js";
+import {
+	agentIdFromSessionId,
+	isPrimeSessionId,
+	MAIN_AGENT_ID,
+	PrimeRemoteAgent,
+	stripBrowserContext,
+} from "./prime/prime-agent.js";
+import { type PrimeAttachment, primeAgents } from "./prime/prime-client.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import { DebuggerTool } from "./tools/debugger.js";
@@ -137,13 +143,27 @@ let isEditingTitle = false;
 let sessionsSidebarOpen = false;
 let agent: Agent;
 let chatPanel: ChatPanel;
-/** Which brain drives the current session: the in-browser agent (default) or a prime-agent session on the R730. */
-type AgentKind = "browser" | "prime";
+/** Which brain drives the current session: the in-browser agent (default) or a relay agent id ("prime" = main-pi, or a worker). */
+type AgentKind = string;
 let agentKind: AgentKind = "browser";
-const AGENT_KIND_OPTIONS = [
+let agentOptions: { value: string; label: string }[] = [
 	{ value: "browser", label: "Browser agent" },
-	{ value: "prime", label: "prime-agent" },
+	{ value: MAIN_AGENT_ID, label: "prime-agent" },
 ];
+const agentLabelFor = (id: string): string => agentOptions.find((o) => o.value === id)?.label ?? id;
+/** Refresh the agent dropdown from the relay (main-pi + worker prime sidecars); keeps the static pair on failure. */
+const refreshAgentOptions = async (): Promise<void> => {
+	try {
+		const list = await primeAgents();
+		if (list.length === 0) return;
+		agentOptions = [
+			{ value: "browser", label: "Browser agent" },
+			...list.map((a) => ({ value: a.id, label: a.ok ? a.label : `${a.label} (offline)` })),
+		];
+	} catch (err) {
+		console.warn("[prime] agent list unavailable", err);
+	}
+};
 const isPrimeAgent = (a: Agent | undefined): a is PrimeRemoteAgent => a instanceof PrimeRemoteAgent;
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
@@ -459,8 +479,8 @@ const createAgent = async (
 		defaultModel = getModel("anthropic", "claude-sonnet-4-6");
 	}
 
-	if (kind === "prime") {
-		// Brain on the R730 (prime bridge session), hands in this browser. The bridge reports the real
+	if (kind !== "browser") {
+		// Brain on the R730 (a prime bridge session: main-pi or a worker sidecar), hands in this browser. The bridge reports the real
 		// model/thinking on create/hydrate; the placeholder only has to be a valid Model until then.
 		const placeholder =
 			initialState?.model ??
@@ -469,6 +489,8 @@ const createAgent = async (
 			defaultModel;
 		if (!placeholder) throw new Error("No model available for the prime placeholder");
 		const prime: PrimeRemoteAgent = new PrimeRemoteAgent({
+			agentId: kind,
+			agentLabel: agentLabelFor(kind),
 			sessionId: primeSessionId,
 			model: placeholder,
 			thinkingLevel: initialState?.thinkingLevel ?? "high",
@@ -486,6 +508,12 @@ const createAgent = async (
 						? ` Sitegeist skills for this page (auto-injected into browser_eval; browser_skill get <name> for docs): ${matching.map((sk) => `${sk.name} — ${sk.shortDescription}`).join("; ")}.`
 						: "";
 				const first: boolean = prime.state.messages.length === 0;
+				if (kind !== MAIN_AGENT_ID) {
+					// Worker sidecars do not have the browser-tools extension (yet): chat only, but they should know where Tom is.
+					return first
+						? `[sitegeist browser context] Tom is talking to you from the sitegeist-dev side panel in his browser (not Telegram). ${where}. You have no browser tools in this session - do not claim to see or act on the page; ask Tom to paste what matters or use your normal tools. Reply in the chat; keep answers tight.${skillsLine} [/sitegeist browser context]`
+						: `[sitegeist browser context] ${where}. [/sitegeist browser context]`;
+				}
 				return first
 					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools bring their tab to the front so Tom can watch; pass background:true only if he asks you to work quietly. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Site runbooks: before driving a site with browser_* tools, agent_wiki_read main-pi-agent → 'Site runbooks — how to drive specific sites from the sitegeist panel' (page 01a06f49-71c8-7c6a-9b17-ddd04df32bc1) and reuse its selectors/flow; after you work out a NEW site or task (selectors, flow, verification), append a dated section to that page in the same turn so next time it is one call. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts). Reply in the chat; keep answers tight.${skillsLine} [/sitegeist browser context]`
 					: `[sitegeist browser context] ${where}.${skillsLine} [/sitegeist browser context]`;
@@ -789,7 +817,7 @@ const loadSession = (sessionId: string) => {
 const newSession = (kind: AgentKind = "browser") => {
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
-	url.search = kind === "prime" ? "?new=true&agent=prime" : "?new=true";
+	url.search = kind !== "browser" ? `?new=true&agent=${encodeURIComponent(kind)}` : "?new=true";
 	window.location.href = url.toString();
 };
 
@@ -835,8 +863,8 @@ const renderApp = () => {
 						!currentSessionId && !agent?.state.messages.some((m) => m.role === "user")
 							? Select({
 									value: agentKind,
-									options: AGENT_KIND_OPTIONS,
-									onChange: (value: string) => void switchAgentKind(value === "prime" ? "prime" : "browser"),
+									options: agentOptions,
+									onChange: (value: string) => void switchAgentKind(value),
 									size: "sm",
 									variant: "ghost",
 									fitContent: true,
@@ -911,7 +939,7 @@ const renderApp = () => {
 				<div class="flex items-center gap-1 px-2">
 					${
 						isPrimeAgent(agent)
-							? html`<span class="text-[10px] text-muted-foreground truncate max-w-[160px]" title="${PRIME_PROVIDER} · ${agent.remoteModel?.provider ?? ""}/${agent.state.model.id} on the R730">${PRIME_PROVIDER} · ${agent.state.model.id}</span>`
+							? html`<span class="text-[10px] text-muted-foreground truncate max-w-[160px]" title="${agent.agentLabel} · ${agent.remoteModel?.provider ?? ""}/${agent.state.model.id} on the R730">${agent.agentLabel} · ${agent.state.model.id}</span>`
 							: agent
 								? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>`
 								: ""
@@ -1206,6 +1234,9 @@ async function initApp() {
 
 	sessionsSidebarOpen = (await storage.settings.get<boolean>(SESSIONS_SIDEBAR_OPEN_SETTING)) === true;
 
+	// Agent dropdown: main-pi + worker prime sidecars the relay knows about
+	await refreshAgentOptions();
+
 	// Create ChatPanel
 	chatPanel = new ChatPanel();
 
@@ -1218,7 +1249,8 @@ async function initApp() {
 	const urlParams = new URLSearchParams(window.location.search);
 	let sessionIdFromUrl = urlParams.get("session");
 	const isNewSession = urlParams.get("new") === "true";
-	const requestedKind: AgentKind = urlParams.get("agent") === "prime" ? "prime" : "browser";
+	const requestedAgent = urlParams.get("agent");
+	const requestedKind: AgentKind = requestedAgent && /^[a-z0-9]+$/.test(requestedAgent) ? requestedAgent : "browser";
 
 	// If no session in URL and not explicitly creating new, try to load the most recent session
 	if (!sessionIdFromUrl && !isNewSession && storage.sessions) {
@@ -1279,7 +1311,7 @@ async function initApp() {
 					tools: [],
 				},
 				true,
-				isPrimeSessionId(sessionIdFromUrl) ? "prime" : "browser",
+				isPrimeSessionId(sessionIdFromUrl) ? agentIdFromSessionId(sessionIdFromUrl) : "browser",
 				isPrimeSessionId(sessionIdFromUrl) ? sessionIdFromUrl : undefined,
 			);
 

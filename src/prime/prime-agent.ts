@@ -15,7 +15,7 @@ import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import { convertAttachments, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
 import { catalogProviders, getModels as registryModels } from "../models-registry.js";
 import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
-import { PRIME_PROVIDER } from "./constants.js";
+import { MAIN_AGENT_ID, PRIME_PROVIDER } from "./constants.js";
 import {
 	isJson,
 	type Json,
@@ -27,7 +27,13 @@ import {
 	primeRpc,
 } from "./prime-client.js";
 
-export { isPrimeSessionId, PRIME_PROVIDER, PRIME_SESSION_PREFIX } from "./constants.js";
+export {
+	agentIdFromSessionId,
+	isPrimeSessionId,
+	MAIN_AGENT_ID,
+	PRIME_PROVIDER,
+	PRIME_SESSION_PREFIX,
+} from "./constants.js";
 
 export type PrimeStatus = "idle" | "creating" | "connecting" | "open" | "closed" | "error";
 
@@ -94,6 +100,8 @@ function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
 }
 
 export class PrimeRemoteAgent extends Agent {
+	readonly agentId: string;
+	readonly agentLabel: string;
 	primeSessionId: string | undefined;
 	status: PrimeStatus = "idle";
 	statusDetail = "";
@@ -112,6 +120,9 @@ export class PrimeRemoteAgent extends Agent {
 	private createInFlight: Promise<string> | undefined;
 
 	constructor(opts: {
+		/** Relay agent id: "prime" (main-pi) or a worker id such as "quantcoach". */
+		agentId?: string;
+		agentLabel?: string;
 		sessionId?: string;
 		model: Model<any>;
 		thinkingLevel: ThinkingLevel;
@@ -132,6 +143,8 @@ export class PrimeRemoteAgent extends Agent {
 				throw new Error("PrimeRemoteAgent never streams locally");
 			},
 		});
+		this.agentId = opts.agentId ?? MAIN_AGENT_ID;
+		this.agentLabel = opts.agentLabel ?? (this.agentId === MAIN_AGENT_ID ? "prime-agent" : this.agentId);
 		this.primeSessionId = opts.sessionId;
 		this.windowId = opts.windowId;
 		this.tabContext = opts.tabContext;
@@ -182,7 +195,7 @@ export class PrimeRemoteAgent extends Agent {
 		if (!this.primeSessionId) return;
 		this.setStatus("connecting");
 		try {
-			const h = await primeHydrate(this.primeSessionId);
+			const h = await primeHydrate(this.agentId, this.primeSessionId);
 			this.applyRemoteState(h.state);
 			const artifacts = this.remote.messages.filter(isArtifactMessage);
 			this.remote.messages = [...toAgentMessages(h.messages), ...artifacts];
@@ -198,7 +211,7 @@ export class PrimeRemoteAgent extends Agent {
 		if (this.primeSessionId) return this.primeSessionId;
 		if (!this.createInFlight) {
 			this.setStatus("creating");
-			this.createInFlight = primeCreateSession(name).then(({ sessionId, state }) => {
+			this.createInFlight = primeCreateSession(this.agentId, name).then(({ sessionId, state }) => {
 				this.primeSessionId = sessionId;
 				this.applyRemoteState(state);
 				this.openSocket(0);
@@ -226,7 +239,7 @@ export class PrimeRemoteAgent extends Agent {
 	private openSocket(offset: number): void {
 		if (!this.primeSessionId) return;
 		this.socket?.close();
-		this.socket = new PrimeSocket(this.primeSessionId, offset, {
+		this.socket = new PrimeSocket(this.agentId, this.primeSessionId, offset, {
 			onEvents: (events) => this.applyEvents(events),
 			onBrowserCall: (id, tool, args) => void this.runBrowserCall(id, tool, args),
 			onBrowserCancel: (id) => void cancelBrowserCall(id),
@@ -375,6 +388,7 @@ export class PrimeRemoteAgent extends Agent {
 		}
 		try {
 			await primePrompt(
+				this.agentId,
 				sessionId,
 				outbound,
 				imageBlocks.length ? (imageBlocks as unknown as Json[]) : undefined,
@@ -430,7 +444,9 @@ export class PrimeRemoteAgent extends Agent {
 
 	override abort(): void {
 		if (!this.primeSessionId) return;
-		void primeRpc(this.primeSessionId, { type: "abort" }).catch((err) => console.warn("[prime] abort failed", err));
+		void primeRpc(this.agentId, this.primeSessionId, { type: "abort" }).catch((err) =>
+			console.warn("[prime] abort failed", err),
+		);
 	}
 
 	override async waitForIdle(): Promise<void> {
@@ -442,16 +458,18 @@ export class PrimeRemoteAgent extends Agent {
 		this.remoteModel = m;
 		this.remote.model = primeModelView(m);
 		if (this.primeSessionId) {
-			void primeRpc(this.primeSessionId, { type: "set_model", provider: m.provider, modelId: m.id }).catch((err) =>
-				console.warn("[prime] set_model failed", err),
-			);
+			void primeRpc(this.agentId, this.primeSessionId, {
+				type: "set_model",
+				provider: m.provider,
+				modelId: m.id,
+			}).catch((err) => console.warn("[prime] set_model failed", err));
 		}
 	}
 
 	override setThinkingLevel(l: ThinkingLevel): void {
 		this.remote.thinkingLevel = l;
 		if (this.primeSessionId) {
-			void primeRpc(this.primeSessionId, { type: "set_thinking_level", level: l }).catch((err) =>
+			void primeRpc(this.agentId, this.primeSessionId, { type: "set_thinking_level", level: l }).catch((err) =>
 				console.warn("[prime] set_thinking_level failed", err),
 			);
 		}
@@ -487,18 +505,22 @@ export class PrimeRemoteAgent extends Agent {
 	 * before any message has been sent.
 	 */
 	async availableModels(): Promise<Model<any>[]> {
-		// The proxy catalog IS prime's registry (one source of truth), so no session is needed to list it.
-		const fromCatalog = catalogProviders().flatMap((p) => registryModels(p));
-		if (fromCatalog.length > 0) return fromCatalog;
+		// For main-pi the proxy catalog IS its registry (one source of truth), so no session is needed.
+		// Workers have their own credentials/registries: ask their session.
+		if (this.agentId === MAIN_AGENT_ID) {
+			const fromCatalog = catalogProviders().flatMap((p) => registryModels(p));
+			if (fromCatalog.length > 0) return fromCatalog;
+		}
 		const sessionId = await this.ensureSession("browser session");
-		const data = await primeRpc(sessionId, { type: "get_available_models" });
+		const data = await primeRpc(this.agentId, sessionId, { type: "get_available_models" });
 		return Array.isArray(data.models) ? data.models.filter(isModel) : [];
 	}
 
 	async rename(name: string): Promise<void> {
 		if (!this.primeSessionId) return;
-		await primeRpc(this.primeSessionId, { type: "set_session_name", name: `sitegeist / ${name}` }).catch(
-			() => undefined,
-		);
+		await primeRpc(this.agentId, this.primeSessionId, {
+			type: "set_session_name",
+			name: `sitegeist / ${name}`,
+		}).catch(() => undefined);
 	}
 }

@@ -11,13 +11,36 @@ export const isJson = (v: unknown): v is Json => typeof v === "object" && v !== 
 
 const TIMEOUT_MS = 90_000;
 
-export async function primeBaseUrl(): Promise<string> {
+export async function primeBaseUrl(agentId: string): Promise<string> {
 	const sync = ((await getSitegeistStorage().settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL).trim();
-	return `${sync.replace(/\/$/, "")}/prime`;
+	return `${sync.replace(/\/$/, "")}/agents/${encodeURIComponent(agentId)}`;
 }
 
-async function request(method: "GET" | "POST", path: string, body?: Json): Promise<Json> {
-	const base = await primeBaseUrl();
+export interface PrimeAgentInfo {
+	id: string;
+	label: string;
+	ok: boolean;
+}
+
+/** Agents the relay can drive (main-pi + worker prime sidecars), with a liveness flag each. */
+export async function primeAgents(): Promise<PrimeAgentInfo[]> {
+	const sync = ((await getSitegeistStorage().settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL).trim();
+	const token = await proxyToken();
+	const res = await fetch(`${sync.replace(/\/$/, "")}/agents`, {
+		headers: token ? { authorization: `Bearer ${token}` } : {},
+		signal: AbortSignal.timeout(10_000),
+	});
+	if (!res.ok) throw new Error(`prime relay GET /agents -> ${res.status}`);
+	const body: unknown = await res.json();
+	const list = isJson(body) && Array.isArray(body.agents) ? body.agents : [];
+	return list.filter(
+		(a): a is PrimeAgentInfo =>
+			isJson(a) && typeof a.id === "string" && typeof a.label === "string" && typeof a.ok === "boolean",
+	);
+}
+
+async function request(agentId: string, method: "GET" | "POST", path: string, body?: Json): Promise<Json> {
+	const base = await primeBaseUrl(agentId);
 	const headers: Record<string, string> = {};
 	const token = await proxyToken();
 	if (token) headers.authorization = `Bearer ${token}`;
@@ -45,8 +68,8 @@ export interface PrimeHealth {
 	connectedBrowsers: string[];
 }
 
-export async function primeHealth(): Promise<PrimeHealth> {
-	const r = await request("GET", "/health");
+export async function primeHealth(agentId: string): Promise<PrimeHealth> {
+	const r = await request(agentId, "GET", "/health");
 	return {
 		ok: r.ok === true,
 		bridge: isJson(r.bridge) ? (r.bridge as PrimeHealth["bridge"]) : undefined,
@@ -56,8 +79,8 @@ export async function primeHealth(): Promise<PrimeHealth> {
 	};
 }
 
-export async function primeCreateSession(name: string): Promise<{ sessionId: string; state: Json }> {
-	const r = await request("POST", "/sessions", { name });
+export async function primeCreateSession(agentId: string, name: string): Promise<{ sessionId: string; state: Json }> {
+	const r = await request(agentId, "POST", "/sessions", { name });
 	if (typeof r.sessionId !== "string") throw new Error("prime relay: session create returned no id");
 	return { sessionId: r.sessionId, state: isJson(r.state) ? r.state : {} };
 }
@@ -68,8 +91,8 @@ export interface PrimeHydration {
 	messages: Json[];
 }
 
-export async function primeHydrate(sessionId: string): Promise<PrimeHydration> {
-	const r = await request("GET", `/sessions/${encodeURIComponent(sessionId)}`);
+export async function primeHydrate(agentId: string, sessionId: string): Promise<PrimeHydration> {
+	const r = await request(agentId, "GET", `/sessions/${encodeURIComponent(sessionId)}`);
 	if (r.ok !== true) throw new Error("prime relay: session is not available (bridge could not start it)");
 	return {
 		offset: typeof r.offset === "number" ? r.offset : 0,
@@ -79,6 +102,7 @@ export async function primeHydrate(sessionId: string): Promise<PrimeHydration> {
 }
 
 export async function primePrompt(
+	agentId: string,
 	sessionId: string,
 	message: string,
 	images?: Json[],
@@ -87,11 +111,11 @@ export async function primePrompt(
 	const body: Json = { message };
 	if (images && images.length > 0) body.images = images;
 	if (streamingBehavior) body.streamingBehavior = streamingBehavior;
-	return request("POST", `/sessions/${encodeURIComponent(sessionId)}/prompt`, body);
+	return request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/prompt`, body);
 }
 
-export async function primeRpc(sessionId: string, command: Json): Promise<Json> {
-	const r = await request("POST", `/sessions/${encodeURIComponent(sessionId)}/rpc`, command);
+export async function primeRpc(agentId: string, sessionId: string, command: Json): Promise<Json> {
+	const r = await request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/rpc`, command);
 	const response = isJson(r.response) ? r.response : undefined;
 	if (response && response.success === false) {
 		throw new Error(typeof response.error === "string" ? response.error : `rpc ${String(command.type)} failed`);
@@ -99,8 +123,8 @@ export async function primeRpc(sessionId: string, command: Json): Promise<Json> 
 	return response && isJson(response.data) ? response.data : {};
 }
 
-export async function primeStop(sessionId: string): Promise<void> {
-	await request("POST", `/sessions/${encodeURIComponent(sessionId)}/stop`, {});
+export async function primeStop(agentId: string, sessionId: string): Promise<void> {
+	await request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/stop`, {});
 }
 
 // ---- event socket -----------------------------------------------------------------------------
@@ -138,6 +162,7 @@ export class PrimeSocket {
 	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
+		private readonly agentId: string,
 		private readonly sessionId: string,
 		private offset: number,
 		private readonly handlers: PrimeSocketHandlers,
@@ -145,7 +170,7 @@ export class PrimeSocket {
 
 	async connect(): Promise<void> {
 		if (this.closed) return;
-		const base = await primeBaseUrl();
+		const base = await primeBaseUrl(this.agentId);
 		// Browsers cannot set headers on a WebSocket handshake, so the token travels as a query parameter.
 		const token = await proxyToken();
 		const url = `${base.replace(/^http/, "ws")}/sessions/${encodeURIComponent(this.sessionId)}/ws?offset=${this.offset}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
