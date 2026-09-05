@@ -1,0 +1,218 @@
+/**
+ * Browser-side handlers for prime's browser_* tools. The relay forwards a tool call over the
+ * session's WebSocket; these run it with the extension's own powers (tabs, capture, user scripts,
+ * cookies) and answer with an AgentToolResult-shaped { content, details }.
+ */
+import type { Json } from "./prime-client.js";
+import { isJson } from "./prime-client.js";
+
+type TextBlock = { type: "text"; text: string };
+type ImageBlock = { type: "image"; data: string; mimeType: string };
+export interface BrowserToolResult {
+	content: Array<TextBlock | ImageBlock>;
+	details?: unknown;
+}
+
+const text = (t: string): BrowserToolResult => ({ content: [{ type: "text", text: t }] });
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+
+const USER_SCRIPT_WORLD = "sitegeist-prime";
+
+async function resolveTab(tabId: number | undefined, windowId: number): Promise<chrome.tabs.Tab> {
+	if (tabId !== undefined) return chrome.tabs.get(tabId);
+	const [active] = await chrome.tabs.query({ active: true, windowId });
+	if (active) return active;
+	const [anyActive] = await chrome.tabs.query({ active: true, currentWindow: true });
+	if (anyActive) return anyActive;
+	throw new Error("no active tab");
+}
+
+function requireTabId(tab: chrome.tabs.Tab): number {
+	if (tab.id === undefined) throw new Error("tab has no id");
+	return tab.id;
+}
+
+async function listTabs(): Promise<BrowserToolResult> {
+	const tabs = await chrome.tabs.query({});
+	const rows = tabs
+		.filter((t) => !(t.url ?? "").startsWith("chrome-extension://"))
+		.map((t) => ({ id: t.id, windowId: t.windowId, active: t.active, title: t.title ?? "", url: t.url ?? "" }));
+	const lines = rows.map((r) => `${r.id}\t${r.active ? "*" : " "}\t${r.title.slice(0, 80)}\t${r.url}`);
+	return { content: [{ type: "text", text: `id\tactive\ttitle\turl\n${lines.join("\n")}` }], details: { tabs: rows } };
+}
+
+async function dataUrlToResized(dataUrl: string, maxWidth: number): Promise<ImageBlock> {
+	const blob = await (await fetch(dataUrl)).blob();
+	const bitmap = await createImageBitmap(blob);
+	const scale = bitmap.width > maxWidth ? maxWidth / bitmap.width : 1;
+	const width = Math.max(1, Math.round(bitmap.width * scale));
+	const height = Math.max(1, Math.round(bitmap.height * scale));
+	const canvas = new OffscreenCanvas(width, height);
+	const ctx = canvas.getContext("2d");
+	if (!ctx) throw new Error("no 2d context");
+	ctx.drawImage(bitmap, 0, 0, width, height);
+	const out = await canvas.convertToBlob({ type: "image/png" });
+	const buf = new Uint8Array(await out.arrayBuffer());
+	let binary = "";
+	for (let i = 0; i < buf.length; i += 0x8000) binary += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+	return { type: "image", data: btoa(binary), mimeType: "image/png" };
+}
+
+async function screenshot(args: Json, windowId: number): Promise<BrowserToolResult> {
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	if (!tab.active) await chrome.tabs.update(id, { active: true });
+	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+	await new Promise((r) => setTimeout(r, tab.active ? 50 : 350));
+	const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId ?? windowId, { format: "png" });
+	const image = await dataUrlToResized(dataUrl, Math.min(Math.max(num(args.maxWidth) ?? 1280, 200), 2560));
+	return {
+		content: [{ type: "text", text: `Screenshot of tab ${id}: ${tab.title ?? ""} — ${tab.url ?? ""}` }, image],
+		details: { tabId: id, url: tab.url, title: tab.title },
+	};
+}
+
+async function runUserScript(tabId: number, code: string): Promise<unknown> {
+	try {
+		await chrome.userScripts.configureWorld({ worldId: USER_SCRIPT_WORLD, messaging: false });
+	} catch {
+		// already configured
+	}
+	// chrome.userScripts.execute awaits a returned promise (same contract as scripting.executeScript)
+	const injection: chrome.userScripts.UserScriptInjection = {
+		js: [{ code }],
+		target: { tabId, allFrames: false },
+		world: "USER_SCRIPT",
+		worldId: USER_SCRIPT_WORLD,
+		injectImmediately: true,
+	};
+	const results = await chrome.userScripts.execute(injection);
+	const first: unknown = Array.isArray(results) ? results[0] : undefined;
+	if (isJson(first) && typeof first.error === "string") throw new Error(first.error);
+	return isJson(first) ? first.result : undefined;
+}
+
+async function readPage(args: Json, windowId: number): Promise<BrowserToolResult> {
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	const mode = str(args.mode) ?? "text";
+	const maxChars = Math.min(Math.max(num(args.maxChars) ?? 40_000, 1_000), 400_000);
+	const code =
+		mode === "html"
+			? "document.documentElement.outerHTML"
+			: mode === "links"
+				? "Array.from(document.querySelectorAll('a[href]')).map(a => (a.textContent || '').trim().replace(/\\s+/g,' ').slice(0,120) + ' -> ' + a.href).join('\\n')"
+				: "(document.body && document.body.innerText) || document.documentElement.innerText || ''";
+	const raw = await runUserScript(id, code);
+	const full = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+	const truncated = full.length > maxChars;
+	const body = truncated
+		? `${full.slice(0, maxChars)}\n\n[truncated: ${full.length} chars total, showing ${maxChars}]`
+		: full;
+	return {
+		content: [{ type: "text", text: `${tab.title ?? ""} — ${tab.url ?? ""}\n\n${body}` }],
+		details: { tabId: id, url: tab.url, title: tab.title, mode, chars: full.length, truncated },
+	};
+}
+
+async function evalJs(args: Json, windowId: number): Promise<BrowserToolResult> {
+	const code = str(args.code);
+	if (!code) return text("browser_eval: `code` is required");
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 30_000, 1_000), 170_000);
+	// Body of an async function; the result is JSON-serialised in-page so odd objects cannot break the bridge.
+	const wrapped = `(async () => { const __r = await (async () => { ${code}\n })(); try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); } })()`;
+	const raw = await Promise.race([
+		runUserScript(id, wrapped),
+		new Promise<never>((_, reject) =>
+			setTimeout(() => reject(new Error(`browser_eval timed out after ${timeoutMs} ms`)), timeoutMs),
+		),
+	]);
+	const out = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+	const limited = out.length > 60_000 ? `${out.slice(0, 60_000)}\n[truncated: ${out.length} chars]` : out;
+	return { content: [{ type: "text", text: limited }], details: { tabId: id, url: tab.url } };
+}
+
+function waitForLoad(tabId: number, timeoutMs: number): Promise<void> {
+	return new Promise((resolve) => {
+		const done = () => {
+			chrome.tabs.onUpdated.removeListener(listener);
+			clearTimeout(timer);
+			resolve();
+		};
+		const listener = (id: number, info: chrome.tabs.OnUpdatedInfo) => {
+			if (id === tabId && info.status === "complete") done();
+		};
+		const timer = setTimeout(done, timeoutMs);
+		chrome.tabs.onUpdated.addListener(listener);
+	});
+}
+
+async function navigate(args: Json, windowId: number): Promise<BrowserToolResult> {
+	const url = str(args.url);
+	if (!url || !/^https?:\/\//i.test(url)) return text("browser_navigate: `url` must be an http(s) URL");
+	let tabId: number;
+	if (args.newTab === true) {
+		tabId = requireTabId(await chrome.tabs.create({ url, windowId, active: true }));
+	} else {
+		const tab = await resolveTab(num(args.tabId), windowId);
+		tabId = requireTabId(tab);
+		await chrome.tabs.update(tabId, { url, active: true });
+	}
+	await waitForLoad(tabId, 30_000);
+	await new Promise((r) => setTimeout(r, 300));
+	const after = await chrome.tabs.get(tabId);
+	return {
+		content: [{ type: "text", text: `Loaded tab ${tabId}: ${after.title ?? ""} — ${after.url ?? ""}` }],
+		details: { tabId, url: after.url, title: after.title },
+	};
+}
+
+function netscapeLine(c: chrome.cookies.Cookie): string {
+	const domain = c.domain.startsWith(".") ? c.domain : c.hostOnly ? c.domain : `.${c.domain}`;
+	const includeSubdomains = domain.startsWith(".") ? "TRUE" : "FALSE";
+	const expires = c.expirationDate ? String(Math.floor(c.expirationDate)) : "0";
+	return [domain, includeSubdomains, c.path, c.secure ? "TRUE" : "FALSE", expires, c.name, c.value].join("\t");
+}
+
+async function exportCookies(args: Json): Promise<BrowserToolResult> {
+	const domain = (str(args.domain) ?? "").trim().replace(/^\./, "").toLowerCase();
+	if (!/^[a-z0-9.-]+$/.test(domain)) return text("browser_cookies: `domain` is required (e.g. youtube.com)");
+	if (!chrome.cookies)
+		return text(
+			"browser_cookies: the extension has no `cookies` permission — reload the unpacked extension so the new manifest applies",
+		);
+	const cookies = await chrome.cookies.getAll({ domain });
+	const lines = [
+		"# Netscape HTTP Cookie File",
+		`# exported by sitegeist-dev for ${domain} at ${new Date().toISOString()}`,
+		...cookies.map(netscapeLine),
+	];
+	// The cookie text travels only in `details` (relay -> prime extension -> 0600 file); the visible
+	// result is the count, so values never land in the conversation.
+	return {
+		content: [{ type: "text", text: `${cookies.length} cookies for ${domain}` }],
+		details: { netscape: `${lines.join("\n")}\n`, count: cookies.length, domain },
+	};
+}
+
+export async function handleBrowserCall(tool: string, args: Json, windowId: number): Promise<BrowserToolResult> {
+	switch (tool) {
+		case "browser_tabs":
+			return listTabs();
+		case "browser_screenshot":
+			return screenshot(args, windowId);
+		case "browser_page":
+			return readPage(args, windowId);
+		case "browser_eval":
+			return evalJs(args, windowId);
+		case "browser_navigate":
+			return navigate(args, windowId);
+		case "browser_cookies":
+			return exportCookies(args);
+		default:
+			return text(`unknown browser tool: ${tool}`);
+	}
+}

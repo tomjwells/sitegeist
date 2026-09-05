@@ -154,6 +154,7 @@ export class SessionsSidebar extends LitElement {
 					<div class="text-sm text-foreground truncate" title=${session.title}>${session.title}</div>
 					<div class="text-[11px] text-muted-foreground truncate">
 						${this.formatDate(session.lastModified)} · ${session.messageCount} ${i18n("messages")} · $${session.usage.cost.total.toFixed(2)}
+						${session.id.startsWith("sg-") ? html` · <span class="text-primary/80">prime</span>` : ""}
 						${current ? html` · <span class="text-primary">${i18n("Current")}</span>` : ""}
 						${locked ? html` · <span class="text-destructive">${i18n("Locked")}</span>` : ""}
 					</div>

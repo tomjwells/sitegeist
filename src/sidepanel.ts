@@ -1,6 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
+import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import {
 	Agent,
@@ -45,6 +46,8 @@ import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
+import { PrimeModelPicker } from "./prime/PrimeModelPicker.js";
+import { isPrimeSessionId, PRIME_PROVIDER, PrimeRemoteAgent } from "./prime/prime-agent.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import { DebuggerTool } from "./tools/debugger.js";
@@ -132,6 +135,14 @@ let isEditingTitle = false;
 let sessionsSidebarOpen = false;
 let agent: Agent;
 let chatPanel: ChatPanel;
+/** Which brain drives the current session: the in-browser agent (default) or a prime-agent session on the R730. */
+type AgentKind = "browser" | "prime";
+let agentKind: AgentKind = "browser";
+const AGENT_KIND_OPTIONS = [
+	{ value: "browser", label: "Browser agent" },
+	{ value: "prime", label: "prime-agent" },
+];
+const isPrimeAgent = (a: Agent | undefined): a is PrimeRemoteAgent => a instanceof PrimeRemoteAgent;
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
 
@@ -375,10 +386,17 @@ const updateUrl = (sessionId: string) => {
 	window.history.replaceState({}, "", url);
 };
 
-const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true) => {
+const createAgent = async (
+	initialState?: Partial<AgentState>,
+	shouldSave = true,
+	kind: AgentKind = "browser",
+	primeSessionId?: string,
+) => {
 	if (agentUnsubscribe) {
 		agentUnsubscribe();
 	}
+	if (isPrimeAgent(agent)) agent.detach();
+	agentKind = kind;
 
 	// Mark all loaded messages as already recorded (by object identity)
 	for (const msg of initialState?.messages || []) {
@@ -431,29 +449,60 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		defaultModel = getModel("anthropic", "claude-sonnet-4-6");
 	}
 
-	agent = new Agent({
-		initialState: initialState || {
-			systemPrompt,
-			model: defaultModel,
-			thinkingLevel: "medium",
-			messages: [],
-			tools: [],
-		},
-		convertToLlm: browserMessageTransformer,
-		toolExecution: "sequential",
-		streamFn: createStreamFn(async () => {
-			const enabled = await storage.settings.get<boolean>("proxy.enabled");
-			if (!enabled) return undefined;
-			return (await storage.settings.get<string>("proxy.url")) || undefined;
-		}),
-		getApiKey: async (provider: string) => {
-			const stored = await storage.providerKeys.get(provider);
-			if (!stored) return undefined;
-			const proxyEnabled = await storage.settings.get<boolean>("proxy.enabled");
-			const proxyUrl = proxyEnabled ? (await storage.settings.get<string>("proxy.url")) || undefined : undefined;
-			return resolveApiKey(stored, provider, storage.providerKeys, proxyUrl);
-		},
-	});
+	if (kind === "prime") {
+		// Brain on the R730 (prime bridge session), hands in this browser. The bridge reports the real
+		// model/thinking on create/hydrate; the placeholder only has to be a valid Model until then.
+		const placeholder =
+			initialState?.model ??
+			getModels("anthropic").find((m) => m.id === "claude-opus-4-8") ??
+			getModel("anthropic", "claude-sonnet-4-6") ??
+			defaultModel;
+		if (!placeholder) throw new Error("No model available for the prime placeholder");
+		const prime = new PrimeRemoteAgent({
+			sessionId: primeSessionId,
+			model: placeholder,
+			thinkingLevel: initialState?.thinkingLevel ?? "high",
+			messages: initialState?.messages ?? [],
+			windowId: currentWindowId,
+			tabContext: async () => {
+				const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
+				const where =
+					tab?.url && !tab.url.startsWith("chrome-extension://")
+						? `Active tab: "${tab.title ?? ""}" ${tab.url}`
+						: "Active tab: (none)";
+				const first = prime.state.messages.length === 0;
+				return first
+					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot, browser_page, browser_eval, browser_navigate, browser_cookies. Reply in the chat; keep answers tight.`
+					: `[sitegeist browser context] ${where}`;
+			},
+		});
+		prime.onStatusChange = () => renderApp();
+		agent = prime;
+	} else {
+		agent = new Agent({
+			initialState: initialState || {
+				systemPrompt,
+				model: defaultModel,
+				thinkingLevel: "medium",
+				messages: [],
+				tools: [],
+			},
+			convertToLlm: browserMessageTransformer,
+			toolExecution: "sequential",
+			streamFn: createStreamFn(async () => {
+				const enabled = await storage.settings.get<boolean>("proxy.enabled");
+				if (!enabled) return undefined;
+				return (await storage.settings.get<string>("proxy.url")) || undefined;
+			}),
+			getApiKey: async (provider: string) => {
+				const stored = await storage.providerKeys.get(provider);
+				if (!stored) return undefined;
+				const proxyEnabled = await storage.settings.get<boolean>("proxy.enabled");
+				const proxyUrl = proxyEnabled ? (await storage.settings.get<string>("proxy.url")) || undefined : undefined;
+				return resolveApiKey(stored, provider, storage.providerKeys, proxyUrl);
+			},
+		});
+	}
 
 	await updateAuthLabel();
 
@@ -461,9 +510,11 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		agentUnsubscribe = agent.subscribe((event: AgentEvent) => {
 			const messages = agent.state.messages;
 
-			storage.settings
-				.set("lastUsedModel", agent.state.model)
-				.catch((err) => console.error("Failed to save lastUsedModel:", err));
+			if (!isPrimeAgent(agent)) {
+				storage.settings
+					.set("lastUsedModel", agent.state.model)
+					.catch((err) => console.error("Failed to save lastUsedModel:", err));
+			}
 
 			// Update auth label when model changes
 			updateAuthLabel().catch(() => {});
@@ -486,7 +537,9 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			}
 
 			if (!currentSessionId && shouldSaveSession(messages)) {
-				currentSessionId = crypto.randomUUID();
+				// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
+				currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
+				if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
 
 				port
 					.sendMessage({
@@ -518,6 +571,23 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			return await ApiKeyOrOAuthDialog.prompt(provider);
 		},
 		onModelSelect: async () => {
+			if (isPrimeAgent(agent)) {
+				const prime = agent;
+				const models = await prime.availableModels().catch((err) => {
+					console.warn("[prime] model list failed", err);
+					return [];
+				});
+				if (models.length === 0) {
+					alert("prime-agent model list unavailable (send a first message to start the session, then retry)");
+					return;
+				}
+				PrimeModelPicker.open(models, prime.remoteModel, (model) => {
+					prime.setModel(model);
+					chatPanel.agentInterface?.requestUpdate();
+					renderApp();
+				});
+				return;
+			}
 			const providers = await getProvidersWithKeys();
 			if (providers.length === 0) {
 				openApiKeysDialog();
@@ -535,7 +605,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			);
 		},
 		onBeforeSend: async () => {
-			if (!agent) return;
+			if (!agent || isPrimeAgent(agent)) return; // prime gets its page context inside the prompt itself
 
 			// Get current tab info
 			const [tab] = await chrome.tabs.query({
@@ -569,6 +639,7 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 			SessionCostDialog.open(agent.state.messages);
 		},
 		toolsFactory: (agent, _agentInterface, artifactsPanel, runtimeProvidersFactory) => {
+			if (isPrimeAgent(agent)) return []; // prime's tools run on the R730; browser hands are served over the relay socket
 			const navigateTool = new NavigateTool();
 			const selectElementTool = new AskUserWhichElementTool();
 
@@ -621,6 +692,14 @@ const createAgent = async (initialState?: Partial<AgentState>, shouldSave = true
 		},
 	});
 
+	if (isPrimeAgent(agent) && agent.primeSessionId) {
+		try {
+			await agent.attach();
+		} catch (err) {
+			console.error("[prime] attach failed", err);
+		}
+	}
+
 	// Register custom message renderers after agentInterface is available
 	if (chatPanel.agentInterface) {
 		registerWelcomeRenderer(agent, chatPanel.agentInterface);
@@ -651,11 +730,24 @@ const loadSession = (sessionId: string) => {
 	window.location.href = url.toString();
 };
 
-const newSession = () => {
-	// Navigation will disconnect port and auto-release locks
+const newSession = (kind: AgentKind = "browser") => {
+	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
-	url.search = "?new=true";
+	url.search = kind === "prime" ? "?new=true&agent=prime" : "?new=true";
 	window.location.href = url.toString();
+};
+
+/** Per-session agent choice: swap in place while the session is still empty, otherwise start a fresh one. */
+const switchAgentKind = async (kind: AgentKind) => {
+	if (kind === agentKind) return;
+	const hasUserMessage = agent?.state.messages.some((m) => m.role === "user");
+	if (hasUserMessage || currentSessionId) {
+		newSession(kind);
+		return;
+	}
+	await createAgent(undefined, true, kind);
+	if (kind === "browser" && agent) agent.appendMessage(createWelcomeMessage(tutorials));
+	renderApp();
 };
 
 // ============================================================================
@@ -678,9 +770,26 @@ const renderApp = () => {
 						variant: "ghost",
 						size: "sm",
 						children: icon(Plus, "sm"),
-						onClick: newSession,
+						onClick: () => newSession(),
 						title: "New Session",
 					})}
+					${Select({
+						value: agentKind,
+						options: AGENT_KIND_OPTIONS,
+						onChange: (value: string) => void switchAgentKind(value === "prime" ? "prime" : "browser"),
+						size: "sm",
+						variant: "ghost",
+						fitContent: true,
+						className: "text-xs",
+					})}
+					${
+						isPrimeAgent(agent)
+							? html`<span
+									class="inline-block w-2 h-2 rounded-full ${agent.status === "open" ? "bg-green-500" : agent.status === "error" || agent.status === "closed" ? "bg-red-500" : agent.status === "idle" ? "bg-muted-foreground/40" : "bg-yellow-500"}"
+									title="prime-agent: ${agent.status}${agent.statusDetail ? ` (${agent.statusDetail})` : ""}${agent.primeSessionId ? ` · ${agent.primeSessionId}` : " · session starts with the first message"}"
+								></span>`
+							: ""
+					}
 
 					${
 						currentTitle
@@ -738,7 +847,13 @@ const renderApp = () => {
 					}
 				</div>
 				<div class="flex items-center gap-1 px-2">
-					${agent ? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>` : ""}
+					${
+						isPrimeAgent(agent)
+							? html`<span class="text-[10px] text-muted-foreground truncate max-w-[160px]" title="${PRIME_PROVIDER} · ${agent.remoteModel?.provider ?? ""}/${agent.state.model.id} on the R730">${PRIME_PROVIDER} · ${agent.state.model.id}</span>`
+							: agent
+								? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>`
+								: ""
+					}
 					<theme-toggle></theme-toggle>
 					${Button({
 						variant: "ghost",
@@ -765,7 +880,7 @@ const renderApp = () => {
 					.open=${sessionsSidebarOpen}
 					.currentSessionId=${currentSessionId}
 					.onSelect=${(sessionId: string) => loadSession(sessionId)}
-					.onNew=${newSession}
+					.onNew=${() => newSession()}
 					.onDeleted=${(deletedSessionId: string) => {
 						// Only reload if the current session was deleted
 						if (deletedSessionId === currentSessionId) newSession();
@@ -1041,6 +1156,7 @@ async function initApp() {
 	const urlParams = new URLSearchParams(window.location.search);
 	let sessionIdFromUrl = urlParams.get("session");
 	const isNewSession = urlParams.get("new") === "true";
+	const requestedKind: AgentKind = urlParams.get("agent") === "prime" ? "prime" : "browser";
 
 	// If no session in URL and not explicitly creating new, try to load the most recent session
 	if (!sessionIdFromUrl && !isNewSession && storage.sessions) {
@@ -1087,13 +1203,18 @@ async function initApp() {
 			const metadata = await storage.sessions.getMetadata(sessionIdFromUrl);
 			currentTitle = metadata?.title || "";
 
-			await createAgent({
-				systemPrompt: SYSTEM_PROMPT,
-				model: sessionData.model,
-				thinkingLevel: sessionData.thinkingLevel,
-				messages: sessionData.messages,
-				tools: [],
-			});
+			await createAgent(
+				{
+					systemPrompt: SYSTEM_PROMPT,
+					model: sessionData.model,
+					thinkingLevel: sessionData.thinkingLevel,
+					messages: sessionData.messages,
+					tools: [],
+				},
+				true,
+				isPrimeSessionId(sessionIdFromUrl) ? "prime" : "browser",
+				isPrimeSessionId(sessionIdFromUrl) ? sessionIdFromUrl : undefined,
+			);
 
 			renderApp();
 			return;
@@ -1105,10 +1226,10 @@ async function initApp() {
 	}
 
 	// No session - create new agent with welcome message
-	await createAgent();
+	await createAgent(undefined, true, requestedKind);
 
-	// Add welcome message for new sessions
-	if (agent) {
+	// Add welcome message for new sessions (the browser agent's tutorial card; prime has no use for it)
+	if (agent && !isPrimeAgent(agent)) {
 		const welcomeMessage = createWelcomeMessage(tutorials);
 		agent.appendMessage(welcomeMessage);
 	}

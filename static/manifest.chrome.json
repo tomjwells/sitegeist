@@ -36,6 +36,7 @@
 		"scripting",
 		"sidePanel",
 		"userScripts",
+		"cookies",
 		"webNavigation",
 		"debugger",
 		"declarativeNetRequest"
