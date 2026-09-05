@@ -1,10 +1,13 @@
 import type { LockedSessionsMessage, LockResultMessage, SidepanelToBackgroundMessage } from "./utils/port.js";
 
-// Called when Sitegeist icon is clicked - opens sidepanel for current tab
+// Called when Sitegeist icon is clicked - opens the (window-global) side panel.
+// Open by windowId, not tabId: the panel has no tab-specific options, and Edge treats a tabId-opened
+// panel as bound to that tab - switching tabs closes/re-creates it, losing all in-panel state (open
+// artifact, scroll position). Chrome behaves the same either way. Same call the keyboard toggle uses.
 chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
-	const tabId = tab?.id;
-	if (tabId && chrome.sidePanel.open) {
-		chrome.sidePanel.open({ tabId });
+	const windowId = tab?.windowId;
+	if (windowId !== undefined && chrome.sidePanel.open) {
+		chrome.sidePanel.open({ windowId });
 	}
 });
 
