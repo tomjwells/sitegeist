@@ -29,6 +29,18 @@ async function resolveTab(tabId: number | undefined, windowId: number): Promise<
 	throw new Error("no active tab");
 }
 
+/**
+ * Tom wants to see prime working (2026-09-05): every tab-acting tool brings its tab to the front unless
+ * the caller passes background:true. The Browser agent always acted on the visible tab; this keeps that feel.
+ */
+async function bringToFront(tab: chrome.tabs.Tab, args: Json): Promise<void> {
+	if (args.background === true) return;
+	const id = tab.id;
+	if (id === undefined) return;
+	if (!tab.active) await chrome.tabs.update(id, { active: true }).catch(() => undefined);
+	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+}
+
 function requireTabId(tab: chrome.tabs.Tab): number {
 	if (tab.id === undefined) throw new Error("tab has no id");
 	return tab.id;
@@ -97,6 +109,7 @@ async function runUserScript(tabId: number, code: string): Promise<unknown> {
 async function readPage(args: Json, windowId: number): Promise<BrowserToolResult> {
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
+	await bringToFront(tab, args);
 	const mode = str(args.mode) ?? "text";
 	const maxChars = Math.min(Math.max(num(args.maxChars) ?? 40_000, 1_000), 400_000);
 	const code =
@@ -122,6 +135,7 @@ async function evalJs(args: Json, windowId: number): Promise<BrowserToolResult> 
 	if (!code) return text("browser_eval: `code` is required");
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
+	await bringToFront(tab, args);
 	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 30_000, 1_000), 170_000);
 	// Body of an async function; the result is JSON-serialised in-page so odd objects cannot break the bridge.
 	const wrapped = `(async () => { const __r = await (async () => { ${code}\n })(); try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); } })()`;
@@ -156,11 +170,13 @@ async function navigate(args: Json, windowId: number): Promise<BrowserToolResult
 	if (!url || !/^https?:\/\//i.test(url)) return text("browser_navigate: `url` must be an http(s) URL");
 	let tabId: number;
 	if (args.newTab === true) {
-		tabId = requireTabId(await chrome.tabs.create({ url, windowId, active: true }));
+		tabId = requireTabId(await chrome.tabs.create({ url, windowId, active: args.background !== true }));
 	} else {
 		const tab = await resolveTab(num(args.tabId), windowId);
 		tabId = requireTabId(tab);
-		await chrome.tabs.update(tabId, { url, active: true });
+		await chrome.tabs.update(tabId, { url, active: args.background === true ? tab.active : true });
+		if (args.background !== true && tab.windowId !== undefined)
+			await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	}
 	await waitForLoad(tabId, 30_000);
 	await new Promise((r) => setTimeout(r, 300));
@@ -211,6 +227,7 @@ async function uploadFile(args: Json, windowId: number): Promise<BrowserToolResu
 	const dropSelector = str(args.dropSelector);
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
+	await bringToFront(tab, args);
 	// Stage the base64 in the page in chunks (one giant code string is slow to inject), then assemble.
 	await runUserScript(id, "window.__sgUploadChunks = []; 'ok'");
 	for (let i = 0; i < dataBase64.length; i += UPLOAD_CHUNK) {
