@@ -306,7 +306,8 @@ export class PrimeRemoteAgent extends Agent {
 			const idx = messages.lastIndexOf(this.optimisticUser);
 			this.optimisticUser = undefined;
 			if (idx >= 0) {
-				this.remote.messages = [...messages.slice(0, idx), message, ...messages.slice(idx + 1)];
+				// Take the bridge's position: a steer sent mid-tool belongs after that tool's result, not before it.
+				this.remote.messages = [...messages.slice(0, idx), ...messages.slice(idx + 1), message];
 				return;
 			}
 		}
@@ -335,18 +336,32 @@ export class PrimeRemoteAgent extends Agent {
 		const context = await this.tabContext().catch(() => "");
 		const outbound = context ? `${context}\n\n${text}` : text;
 		const sessionId = await this.ensureSession(text.slice(0, 60) || "browser session");
+		// Sent while a turn is running = steering, like a Telegram message mid-turn: delivered at the next
+		// tool boundary (bridge streamingBehavior "steer"); the turn keeps going.
+		const steering = this.remote.isStreaming;
 		this.optimisticUser = optimistic;
 		this.remote.messages = [...this.remote.messages, optimistic];
-		this.remote.isStreaming = true;
 		this.remote.error = undefined;
-		this.emitRemote({ type: "agent_start" });
+		if (!steering) {
+			this.remote.isStreaming = true;
+			this.emitRemote({ type: "agent_start" });
+		} else {
+			this.emitRemote({ type: "turn_start" }); // nudges the UI to re-render the list
+		}
 		try {
-			await primePrompt(sessionId, outbound, imageBlocks.length ? (imageBlocks as unknown as Json[]) : undefined);
+			await primePrompt(
+				sessionId,
+				outbound,
+				imageBlocks.length ? (imageBlocks as unknown as Json[]) : undefined,
+				steering ? "steer" : undefined,
+			);
 		} catch (err) {
-			this.remote.isStreaming = false;
 			this.remote.error = err instanceof Error ? err.message : String(err);
 			this.setStatus("error", this.remote.error);
-			this.emitRemote({ type: "agent_end", messages: [] });
+			if (!steering) {
+				this.remote.isStreaming = false;
+				this.emitRemote({ type: "agent_end", messages: [] });
+			}
 			throw err;
 		}
 	}

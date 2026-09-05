@@ -36,32 +36,79 @@ const modelsRegistryPlugin = {
 	},
 };
 
-// The composer's thinking dropdown is hardcoded to Off..High inside pi-web-ui's MessageEditor; swap the
-// array for src/thinking-options.ts so models with their own rungs (Fable: off/xhigh/max in prime-agent
-// sessions) and XHigh-capable models get the right list. Fails the build loudly if upstream changes shape.
-const thinkingOptionsPlugin = {
-	name: "thinking-options",
+// Small, exact patches to pi-web-ui's compiled components (we cannot subclass what the ChatPanel
+// instantiates). Each patch is an exact-string replace that fails the build loudly if upstream changes
+// shape, so a bump of pi-web-ui never silently loses fork behaviour.
+//  - MessageEditor: thinking dropdown follows the model (src/thinking-options.ts);
+//    prime-agent sessions can send while streaming = steering (Enter or the extra send button).
+//  - AgentInterface: lets prime-agent sessions prompt while streaming (PrimeRemoteAgent turns it into a steer).
+const PRIME = 'this.currentModel?.provider === "prime"';
+const piWebUiPatches = [
+	{
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageEditor\.js$/,
+		imports: [
+			`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/"))};`,
+		],
+		replacements: [
+			{
+				find: /options: \[\n\s*\{ value: "off"[\s\S]*?\],/,
+				replace:
+					'options: __thinkingOptionsFor(this.currentModel, this.thinkingLevel).map((o) => ({ value: o.value, label: i18n(o.label), icon: icon(Brain, "sm") })),',
+			},
+			{
+				find: "if (!this.isStreaming && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {",
+				replace: `if ((!this.isStreaming || ${PRIME}) && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {`,
+			},
+			{
+				find: 'placeholder=${i18n("Type a message...")}',
+				replace: `placeholder=\${this.isStreaming && ${PRIME} ? "Steer the agent… (Enter delivers mid-turn)" : i18n("Type a message...")}`,
+			},
+			{
+				// streaming footer: prime sessions get a steer-send button next to the stop button
+				find: '${this.isStreaming\n            ? html `\n\t\t\t\t\t\t\t\t\t${Button({\n                variant: "ghost",\n                size: "icon",\n                onClick: this.onAbort,',
+				replace:
+					"${this.isStreaming\n            ? html `\n\t\t\t\t\t\t\t\t\t${" +
+					PRIME +
+					' && (this.value.trim() || this.attachments.length > 0) ? Button({ variant: "ghost", size: "icon", onClick: this.handleSend, title: "Steer: deliver this now, mid-turn", children: html `<div style="transform: rotate(-45deg)">${icon(Send, "sm")}</div>`, className: "h-8 w-8" }) : ""}\n\t\t\t\t\t\t\t\t\t${Button({\n                variant: "ghost",\n                size: "icon",\n                onClick: this.onAbort,',
+			},
+		],
+	},
+	{
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]AgentInterface\.js$/,
+		imports: [],
+		replacements: [
+			{
+				find: "if ((!input.trim() && attachments?.length === 0) || this.session?.state.isStreaming)\n            return;",
+				replace:
+					'if ((!input.trim() && attachments?.length === 0) || (this.session?.state.isStreaming && this.session?.state.model?.provider !== "prime"))\n            return;',
+			},
+		],
+	},
+];
+const piWebUiPatchPlugin = {
+	name: "pi-web-ui-patches",
 	setup(build) {
-		build.onLoad({ filter: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageEditor\.js$/ }, async (args) => {
-			const { readFile } = await import("node:fs/promises");
-			const source = await readFile(args.path, "utf8");
-			const start = source.indexOf("options: [\n                    { value: \"off\"");
-			const end = source.indexOf("],", start);
-			if (start === -1 || end === -1) throw new Error("thinking-options: MessageEditor.js no longer matches the expected options array");
-			const helper = join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/");
-			const contents =
-				`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(helper)};\n` +
-				source.slice(0, start) +
-				'options: __thinkingOptionsFor(this.currentModel, this.thinkingLevel).map((o) => ({ value: o.value, label: i18n(o.label), icon: icon(Brain, "sm") }))' +
-				source.slice(end + 1);
-			return { contents, loader: "js", resolveDir: dirname(args.path) };
-		});
+		for (const patch of piWebUiPatches) {
+			build.onLoad({ filter: patch.file }, async (args) => {
+				const { readFile } = await import("node:fs/promises");
+				let source = await readFile(args.path, "utf8");
+				for (const { find, replace } of patch.replacements) {
+					const hit = typeof find === "string" ? source.includes(find) : find.test(source);
+					if (!hit)
+						throw new Error(
+							`pi-web-ui-patches: ${args.path} no longer contains the expected snippet: ${String(find).slice(0, 80)}`,
+						);
+					source = source.replace(find, replace);
+				}
+				return { contents: `${patch.imports.join("\n")}\n${source}`, loader: "js", resolveDir: dirname(args.path) };
+			});
+		}
 	},
 };
 
 const buildOptions = {
 	absWorkingDir: packageRoot,
-	plugins: [modelsRegistryPlugin, thinkingOptionsPlugin],
+	plugins: [modelsRegistryPlugin, piWebUiPatchPlugin],
 	entryPoints,
 	bundle: true,
 	outdir: outDir,
