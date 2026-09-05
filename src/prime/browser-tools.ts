@@ -3,6 +3,7 @@
  * session's WebSocket; these run it with the extension's own powers (tabs, capture, user scripts,
  * cookies) and answer with an AgentToolResult-shaped { content, details }.
  */
+import { AskUserWhichElementTool } from "../tools/ask-user-which-element.js";
 import type { Json } from "./prime-client.js";
 import { isJson } from "./prime-client.js";
 
@@ -263,6 +264,26 @@ async function uploadFile(args: Json, windowId: number): Promise<BrowserToolResu
 	};
 }
 
+/** Sitegeist's own element picker (overlay in the active tab; Tom clicks; abort after timeoutMs). */
+async function pickElement(args: Json, windowId: number): Promise<BrowserToolResult> {
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	if (!tab.active) await chrome.tabs.update(id, { active: true });
+	const controller = new AbortController();
+	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 120_000, 5_000), 175_000);
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const result = await new AskUserWhichElementTool().execute(
+			"prime",
+			{ message: str(args.message) },
+			controller.signal,
+		);
+		return { content: result.content, details: { tabId: id, url: tab.url, element: result.details } };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 export async function handleBrowserCall(tool: string, args: Json, windowId: number): Promise<BrowserToolResult> {
 	switch (tool) {
 		case "browser_tabs":
@@ -279,6 +300,8 @@ export async function handleBrowserCall(tool: string, args: Json, windowId: numb
 			return exportCookies(args);
 		case "browser_upload_file":
 			return uploadFile(args, windowId);
+		case "browser_pick_element":
+			return pickElement(args, windowId);
 		default:
 			return text(`unknown browser tool: ${tool}`);
 	}
