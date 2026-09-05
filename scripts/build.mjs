@@ -56,6 +56,13 @@ const piWebUiPatches = [
 					'options: __thinkingOptionsFor(this.currentModel, this.thinkingLevel).map((o) => ({ value: o.value, label: i18n(o.label), icon: icon(Brain, "sm") })),',
 			},
 			{
+				// Reflect the chosen level at once: Agent.setThinkingLevel() only mutates state (no event), so the
+				// editor would keep showing the old value until something else re-rendered it.
+				find: "onChange: (value) => {\n                    this.onThinkingChange?.(value);\n                },",
+				replace:
+					"onChange: (value) => {\n                    this.thinkingLevel = value;\n                    this.onThinkingChange?.(value);\n                },",
+			},
+			{
 				find: "if (!this.isStreaming && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {",
 				replace: `if ((!this.isStreaming || ${PRIME}) && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {`,
 			},
