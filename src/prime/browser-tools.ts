@@ -248,6 +248,81 @@ async function evalJs(args: Json, windowId: number, callId: string): Promise<Bro
 	}
 }
 
+/** Raw-byte cap for browser_download: base64 must fit the relay's 32 MB websocket frame with room to spare. */
+const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+
+/** In-page normaliser: whatever the agent's code returned → { mime, bytes, base64, name }. */
+const DOWNLOAD_HELPER = `const __sgToTransfer = async (v, max) => {
+	let blob, name;
+	if (v instanceof Response) {
+		if (!v.ok) throw new Error("browser_download: response " + v.status + " " + v.statusText);
+		const cd = v.headers.get("content-disposition") || "";
+		name = (/filename\\*=(?:UTF-8'')?([^;]+)/i.exec(cd)?.[1] || /filename="?([^";]+)"?/i.exec(cd)?.[1] || "").trim();
+		if (name) { try { name = decodeURIComponent(name); } catch {} }
+		blob = await v.blob();
+	} else if (v instanceof Blob) blob = v;
+	else if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) blob = new Blob([v]);
+	else if (typeof v === "string") blob = v.startsWith("data:") ? await (await fetch(v)).blob() : new Blob([v], { type: "text/plain" });
+	else if (v && typeof v === "object" && typeof v.base64 === "string") blob = await (await fetch("data:" + (v.mime || "application/octet-stream") + ";base64," + v.base64)).blob();
+	else throw new Error("browser_download: code must return a Response, Blob, ArrayBuffer/typed array, data URL, {mime, base64} or text - got " + (v === null ? "null" : typeof v));
+	if (blob.size > max) throw new Error("browser_download: " + blob.size + " bytes exceeds the " + max + " byte limit");
+	const buf = new Uint8Array(await blob.arrayBuffer());
+	let bin = "";
+	for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+	return { mime: blob.type || "application/octet-stream", bytes: buf.length, base64: btoa(bin), name: name || undefined };
+};`;
+
+/**
+ * Browser → host file transfer (the mirror of browser_upload_file). Runs `code` in the page (or fetches
+ * `url` with the page's cookies), converts the result to bytes in-page and ships them base64 to the
+ * prime side, which writes the file. The base64 never enters the model's context.
+ */
+async function downloadFile(args: Json, windowId: number, callId: string): Promise<BrowserToolResult> {
+	const url = str(args.url);
+	const code = str(args.code);
+	if (!url && !code) return text("browser_download: `url` or `code` is required");
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	await bringToFront(tab, args);
+	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 60_000, 1_000), 170_000);
+	const world = evalWorld(args);
+	const skills = await skillLibraryFor(tab.url, args.skills !== false);
+	const key = JSON.stringify(callId);
+	const producer =
+		code ?? `const __resp = await fetch(${JSON.stringify(url)}, { credentials: "include" }); return __resp;`;
+	const body = `${DOWNLOAD_HELPER}\nreturn await __sgToTransfer(await (async () => { ${producer}\n })(), ${MAX_DOWNLOAD_BYTES});`;
+	const wrapped = wrapEval(body, skills.library, key);
+	activeCalls.set(callId, () =>
+		runUserScript(id, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`, world).then(() => undefined),
+	);
+	try {
+		const raw = await runWithTimeout(id, wrapped, key, timeoutMs, world);
+		const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+		if (!isJson(parsed) || typeof parsed.base64 !== "string" || typeof parsed.bytes !== "number")
+			return text(`browser_download: unexpected in-page result ${JSON.stringify(parsed).slice(0, 200)}`);
+		const filename = str(args.filename) ?? str(parsed.name);
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Downloaded ${parsed.bytes} bytes (${String(parsed.mime)}) from tab ${id}${filename ? ` as ${filename}` : ""}`,
+				},
+			],
+			details: {
+				tabId: id,
+				url: tab.url,
+				filename,
+				mime: parsed.mime,
+				bytes: parsed.bytes,
+				dataBase64: parsed.base64,
+				skillsInjected: skills.names,
+			},
+		};
+	} finally {
+		activeCalls.delete(callId);
+	}
+}
+
 /**
  * One tool call, many pages: the extension navigates the tab to each URL in turn, waits for load + settle,
  * runs the code, and collects `{url, finalUrl, result|error}` per page. This is the loop the agent otherwise
@@ -552,6 +627,8 @@ export async function handleBrowserCall(
 			return exportCookies(args);
 		case "browser_upload_file":
 			return uploadFile(args, windowId);
+		case "browser_download":
+			return downloadFile(args, windowId, callId);
 		case "browser_pick_element":
 			return pickElement(args, windowId, callId);
 		case "browser_skill":
