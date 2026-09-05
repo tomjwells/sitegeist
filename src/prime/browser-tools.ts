@@ -198,6 +198,71 @@ async function exportCookies(args: Json): Promise<BrowserToolResult> {
 	};
 }
 
+const UPLOAD_CHUNK = 3_000_000; // base64 chars per userScripts.execute call
+
+/** Put a file (bytes shipped from the R730) into a page: <input type=file> via DataTransfer, or a synthetic drop. */
+async function uploadFile(args: Json, windowId: number): Promise<BrowserToolResult> {
+	const dataBase64 = str(args.dataBase64);
+	if (!dataBase64) return text("browser_upload_file: no file data received");
+	const fileName = (str(args.fileName) ?? "upload.bin").replace(/[^\w.() -]/g, "_");
+	const mimeType = str(args.mimeType) ?? "application/octet-stream";
+	const selector = str(args.selector);
+	const dropSelector = str(args.dropSelector);
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	// Stage the base64 in the page in chunks (one giant code string is slow to inject), then assemble.
+	await runUserScript(id, "window.__sgUploadChunks = []; 'ok'");
+	for (let i = 0; i < dataBase64.length; i += UPLOAD_CHUNK) {
+		await runUserScript(
+			id,
+			`window.__sgUploadChunks.push(${JSON.stringify(dataBase64.slice(i, i + UPLOAD_CHUNK))}); window.__sgUploadChunks.length`,
+		);
+	}
+	const code = `(async () => {
+		const b64 = (window.__sgUploadChunks || []).join(""); delete window.__sgUploadChunks;
+		const bin = atob(b64); const bytes = new Uint8Array(bin.length);
+		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+		const file = new File([bytes], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(mimeType)} });
+		const dt = new DataTransfer(); dt.items.add(file);
+		const describe = (el) => el ? (el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (el.name ? "[name=" + el.name + "]" : "") + (el.getAttribute("aria-label") ? "[aria-label=" + el.getAttribute("aria-label") + "]" : "")) : null;
+		let input = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "null"};
+		if (input && !(input instanceof HTMLInputElement && input.type === "file")) return JSON.stringify({ ok: false, error: "selector did not match an <input type=file>: " + describe(input) });
+		if (!input) {
+			const dialog = document.querySelector('[role="dialog"]');
+			const scope = dialog || document;
+			input = scope.querySelector('input[type="file"]') || document.querySelector('input[type="file"]');
+		}
+		if (input) {
+			input.files = dt.files;
+			input.dispatchEvent(new Event("input", { bubbles: true }));
+			input.dispatchEvent(new Event("change", { bubbles: true }));
+			return JSON.stringify({ ok: true, method: "input", target: describe(input), bytes: file.size });
+		}
+		const target = ${dropSelector ? `document.querySelector(${JSON.stringify(dropSelector)})` : "(document.activeElement && document.activeElement !== document.body ? document.activeElement : document.body)"};
+		if (!target) return JSON.stringify({ ok: false, error: "no file input found and drop target selector matched nothing" });
+		for (const type of ["dragenter", "dragover", "drop"]) target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+		return JSON.stringify({ ok: true, method: "drop", target: describe(target), bytes: file.size });
+	})()`;
+	const raw = await runUserScript(id, code);
+	let parsed: unknown;
+	try {
+		parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+	} catch {
+		parsed = { ok: false, error: `unexpected page result: ${String(raw).slice(0, 200)}` };
+	}
+	if (!isJson(parsed)) return text("browser_upload_file: unexpected page result");
+	if (parsed.ok !== true) return text(`browser_upload_file failed: ${str(parsed.error) ?? "unknown error"}`);
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Attached ${fileName} (${String(parsed.bytes)} bytes, ${mimeType}) in tab ${id} via ${String(parsed.method)} → ${String(parsed.target)}. Verify the page picked it up (e.g. attachment chip visible) before relying on it.`,
+			},
+		],
+		details: { tabId: id, url: tab.url, method: parsed.method, target: parsed.target, bytes: parsed.bytes },
+	};
+}
+
 export async function handleBrowserCall(tool: string, args: Json, windowId: number): Promise<BrowserToolResult> {
 	switch (tool) {
 		case "browser_tabs":
@@ -212,6 +277,8 @@ export async function handleBrowserCall(tool: string, args: Json, windowId: numb
 			return navigate(args, windowId);
 		case "browser_cookies":
 			return exportCookies(args);
+		case "browser_upload_file":
+			return uploadFile(args, windowId);
 		default:
 			return text(`unknown browser tool: ${tool}`);
 	}
