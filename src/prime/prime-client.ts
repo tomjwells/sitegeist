@@ -121,6 +121,7 @@ const isAttachment = (v: unknown): v is PrimeAttachment =>
 export interface PrimeSocketHandlers {
 	onEvents: (events: Json[], offset: number) => void;
 	onBrowserCall: (id: string, tool: string, args: Json) => void;
+	onBrowserCancel: (id: string, reason: string) => void;
 	onAttachments: (items: PrimeAttachment[]) => void;
 	onStatus: (status: "connecting" | "open" | "closed", detail?: string) => void;
 }
@@ -183,6 +184,8 @@ export class PrimeSocket {
 			if (events.length > 0) this.handlers.onEvents(events, this.offset);
 		} else if (msg.type === "browser_call" && typeof msg.id === "string" && typeof msg.tool === "string") {
 			this.handlers.onBrowserCall(msg.id, msg.tool, isJson(msg.args) ? msg.args : {});
+		} else if (msg.type === "browser_cancel" && typeof msg.id === "string") {
+			this.handlers.onBrowserCancel(msg.id, typeof msg.reason === "string" ? msg.reason : "");
 		} else if (msg.type === "attachments" && Array.isArray(msg.items)) {
 			const items = msg.items.filter(isAttachment);
 			if (items.length > 0) this.handlers.onAttachments(items);

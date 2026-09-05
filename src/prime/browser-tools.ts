@@ -134,7 +134,16 @@ async function readPage(args: Json, windowId: number): Promise<BrowserToolResult
 	};
 }
 
-async function evalJs(args: Json, windowId: number): Promise<BrowserToolResult> {
+/** Browser calls that can be stopped mid-flight (agent abort / relay timeout), keyed by relay call id. */
+const activeCalls = new Map<string, () => Promise<void>>();
+
+export async function cancelBrowserCall(id: string): Promise<void> {
+	const cancel = activeCalls.get(id);
+	activeCalls.delete(id);
+	if (cancel) await cancel().catch(() => undefined);
+}
+
+async function evalJs(args: Json, windowId: number, callId: string): Promise<BrowserToolResult> {
 	const code = str(args.code);
 	if (!code) return text("browser_eval: `code` is required");
 	const tab = await resolveTab(num(args.tabId), windowId);
@@ -145,19 +154,54 @@ async function evalJs(args: Json, windowId: number): Promise<BrowserToolResult> 
 	const skills = args.skills === false || !tab.url ? [] : await getSitegeistStorage().skills.getSkillsForUrl(tab.url);
 	const skillLibrary = skills.map((sk) => sk.library).join("\n\n");
 	// Body of an async function; the result is JSON-serialised in-page so odd objects cannot break the bridge.
-	const wrapped = `(async () => { ${skillLibrary}\n const __r = await (async () => { ${code}\n })(); try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); } })()`;
-	const raw = await Promise.race([
-		runUserScript(id, wrapped),
-		new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error(`browser_eval timed out after ${timeoutMs} ms`)), timeoutMs),
-		),
-	]);
-	const out = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
-	const limited = out.length > 60_000 ? `${out.slice(0, 60_000)}\n[truncated: ${out.length} chars]` : out;
-	return {
-		content: [{ type: "text", text: limited }],
-		details: { tabId: id, url: tab.url, skillsInjected: skills.map((sk) => sk.name) },
-	};
+	// Cancellation: `setTimeout` is shadowed inside the wrapper so every pending wait can be cleared when the
+	// agent aborts or the relay times out (a poll loop that outlives its tool call kept re-searching Gmail,
+	// 2026-09-05); `sleep(ms)` rejects and `signal.aborted` flips for code that wants to notice.
+	const key = JSON.stringify(callId);
+	const wrapped = `(async () => {
+		const __c = { cancelled: false, timers: new Set() };
+		(window.__sgEvalCancel = window.__sgEvalCancel || {})[${key}] = () => { __c.cancelled = true; for (const t of __c.timers) window.clearTimeout(t); __c.timers.clear(); };
+		const setTimeout = (fn, ms, ...a) => { const t = window.setTimeout(fn, ms, ...a); __c.timers.add(t); return t; };
+		const sleep = (ms) => new Promise((res, rej) => { if (__c.cancelled) return rej(new Error("cancelled")); const t = window.setTimeout(() => { __c.timers.delete(t); res(); }, ms); __c.timers.add(t); });
+		const signal = { get aborted() { return __c.cancelled; } };
+		try {
+			${skillLibrary}
+			const __r = await (async () => { ${code}\n })();
+			try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); }
+		} finally { delete window.__sgEvalCancel[${key}]; }
+	})()`;
+	const cancelInPage = () =>
+		runUserScript(id, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`).then(() => undefined);
+	activeCalls.set(callId, cancelInPage);
+	let timedOut = false;
+	try {
+		const raw = await Promise.race([
+			runUserScript(id, wrapped),
+			new Promise<never>((_, reject) =>
+				setTimeout(() => {
+					timedOut = true;
+					reject(new Error(`browser_eval timed out after ${timeoutMs} ms (the page script was stopped)`));
+				}, timeoutMs),
+			),
+		]);
+		const out = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+		const limited = out.length > 60_000 ? `${out.slice(0, 60_000)}\n[truncated: ${out.length} chars]` : out;
+		const after = await chrome.tabs.get(id).catch(() => undefined);
+		const navigated = after?.url !== undefined && after.url !== tab.url;
+		const note =
+			navigated && (raw === undefined || raw === null)
+				? `\n[page navigated during the eval: ${tab.url ?? ""} → ${after.url}; the script's context was torn down so its result was lost — re-run against the new page]`
+				: navigated
+					? `\n[page navigated during the eval → ${after.url}]`
+					: "";
+		return {
+			content: [{ type: "text", text: limited + note }],
+			details: { tabId: id, url: after?.url ?? tab.url, navigated, skillsInjected: skills.map((sk) => sk.name) },
+		};
+	} finally {
+		activeCalls.delete(callId);
+		if (timedOut) await cancelInPage().catch(() => undefined);
+	}
 }
 
 function waitForLoad(tabId: number, timeoutMs: number): Promise<void> {
@@ -292,7 +336,7 @@ async function uploadFile(args: Json, windowId: number): Promise<BrowserToolResu
 }
 
 /** Sitegeist's own element picker (overlay in the tab; Tom clicks; abort after timeoutMs). */
-async function pickElement(args: Json, windowId: number): Promise<BrowserToolResult> {
+async function pickElement(args: Json, windowId: number, callId: string): Promise<BrowserToolResult> {
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
 	// The picker injects into the active tab of the panel's window: make sure that is this tab and that
@@ -323,6 +367,7 @@ async function pickElement(args: Json, windowId: number): Promise<BrowserToolRes
 		return text(`browser_pick_element failed on ${where}: ${message}`);
 	} finally {
 		clearTimeout(timer);
+		activeCalls.delete(callId);
 	}
 }
 
@@ -362,7 +407,12 @@ async function manageInstructions(args: Json): Promise<BrowserToolResult> {
 	return text("browser_instructions: command must be get or set");
 }
 
-export async function handleBrowserCall(tool: string, args: Json, windowId: number): Promise<BrowserToolResult> {
+export async function handleBrowserCall(
+	tool: string,
+	args: Json,
+	windowId: number,
+	callId: string,
+): Promise<BrowserToolResult> {
 	switch (tool) {
 		case "browser_tabs":
 			return listTabs();
@@ -371,7 +421,7 @@ export async function handleBrowserCall(tool: string, args: Json, windowId: numb
 		case "browser_page":
 			return readPage(args, windowId);
 		case "browser_eval":
-			return evalJs(args, windowId);
+			return evalJs(args, windowId, callId);
 		case "browser_navigate":
 			return navigate(args, windowId);
 		case "browser_cookies":
@@ -379,7 +429,7 @@ export async function handleBrowserCall(tool: string, args: Json, windowId: numb
 		case "browser_upload_file":
 			return uploadFile(args, windowId);
 		case "browser_pick_element":
-			return pickElement(args, windowId);
+			return pickElement(args, windowId, callId);
 		case "browser_skill":
 			return manageSkill(args);
 		case "browser_instructions":

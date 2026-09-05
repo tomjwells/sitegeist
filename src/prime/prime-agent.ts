@@ -13,7 +13,7 @@ import {
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import { convertAttachments, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
-import { handleBrowserCall } from "./browser-tools.js";
+import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
 import { PRIME_PROVIDER } from "./constants.js";
 import {
 	isJson,
@@ -205,6 +205,7 @@ export class PrimeRemoteAgent extends Agent {
 		this.socket = new PrimeSocket(this.primeSessionId, offset, {
 			onEvents: (events) => this.applyEvents(events),
 			onBrowserCall: (id, tool, args) => void this.runBrowserCall(id, tool, args),
+			onBrowserCancel: (id) => void cancelBrowserCall(id),
 			onAttachments: (items) => void this.receiveAttachments(items),
 			onStatus: (status, detail) => this.setStatus(status, detail ?? ""),
 		});
@@ -213,7 +214,7 @@ export class PrimeRemoteAgent extends Agent {
 
 	private async runBrowserCall(id: string, tool: string, args: Json): Promise<void> {
 		try {
-			const result = await handleBrowserCall(tool, args, this.windowId);
+			const result = await handleBrowserCall(tool, args, this.windowId, id);
 			this.socket?.replyBrowserCall(id, true, result);
 		} catch (err) {
 			this.socket?.replyBrowserCall(id, false, undefined, err instanceof Error ? err.message : String(err));
