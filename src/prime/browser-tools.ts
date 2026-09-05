@@ -90,18 +90,22 @@ async function screenshot(args: Json, windowId: number): Promise<BrowserToolResu
 	};
 }
 
-async function runUserScript(tabId: number, code: string): Promise<unknown> {
+type EvalWorld = "USER_SCRIPT" | "MAIN";
+
+async function runUserScript(tabId: number, code: string, world: EvalWorld = "USER_SCRIPT"): Promise<unknown> {
 	try {
 		await chrome.userScripts.configureWorld({ worldId: USER_SCRIPT_WORLD, messaging: false });
 	} catch {
 		// already configured
 	}
-	// chrome.userScripts.execute awaits a returned promise (same contract as scripting.executeScript)
+	// chrome.userScripts.execute awaits a returned promise (same contract as scripting.executeScript).
+	// MAIN world = the page's own JS context (page globals/APIs visible, e.g. YouTube's movie_player),
+	// at the price of running under the page's CSP; the default USER_SCRIPT world is CSP-exempt but DOM-only.
 	const injection: chrome.userScripts.UserScriptInjection = {
 		js: [{ code }],
 		target: { tabId, allFrames: false },
-		world: "USER_SCRIPT",
-		worldId: USER_SCRIPT_WORLD,
+		world,
+		...(world === "USER_SCRIPT" ? { worldId: USER_SCRIPT_WORLD } : {}),
 		injectImmediately: true,
 	};
 	const results = await chrome.userScripts.execute(injection);
@@ -143,22 +147,12 @@ export async function cancelBrowserCall(id: string): Promise<void> {
 	if (cancel) await cancel().catch(() => undefined);
 }
 
-async function evalJs(args: Json, windowId: number, callId: string): Promise<BrowserToolResult> {
-	const code = str(args.code);
-	if (!code) return text("browser_eval: `code` is required");
-	const tab = await resolveTab(num(args.tabId), windowId);
-	const id = requireTabId(tab);
-	await bringToFront(tab, args);
-	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 30_000, 1_000), 170_000);
-	// Same as the Browser agent's browserjs(): matching site skills are injected ahead of the code.
-	const skills = args.skills === false || !tab.url ? [] : await getSitegeistStorage().skills.getSkillsForUrl(tab.url);
-	const skillLibrary = skills.map((sk) => sk.library).join("\n\n");
+function wrapEval(code: string, skillLibrary: string, key: string): string {
 	// Body of an async function; the result is JSON-serialised in-page so odd objects cannot break the bridge.
 	// Cancellation: `setTimeout` is shadowed inside the wrapper so every pending wait can be cleared when the
 	// agent aborts or the relay times out (a poll loop that outlives its tool call kept re-searching Gmail,
 	// 2026-09-05); `sleep(ms)` rejects and `signal.aborted` flips for code that wants to notice.
-	const key = JSON.stringify(callId);
-	const wrapped = `(async () => {
+	return `(async () => {
 		const __c = { cancelled: false, timers: new Set() };
 		(window.__sgEvalCancel = window.__sgEvalCancel || {})[${key}] = () => { __c.cancelled = true; for (const t of __c.timers) window.clearTimeout(t); __c.timers.clear(); };
 		const setTimeout = (fn, ms, ...a) => { const t = window.setTimeout(fn, ms, ...a); __c.timers.add(t); return t; };
@@ -170,38 +164,168 @@ async function evalJs(args: Json, windowId: number, callId: string): Promise<Bro
 			try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); }
 		} finally { delete window.__sgEvalCancel[${key}]; }
 	})()`;
-	const cancelInPage = () =>
-		runUserScript(id, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`).then(() => undefined);
-	activeCalls.set(callId, cancelInPage);
+}
+
+async function skillLibraryFor(
+	url: string | undefined,
+	enabled: boolean,
+): Promise<{ names: string[]; library: string }> {
+	const skills = !enabled || !url ? [] : await getSitegeistStorage().skills.getSkillsForUrl(url);
+	return { names: skills.map((sk) => sk.name), library: skills.map((sk) => sk.library).join("\n\n") };
+}
+
+/** Runs wrapped code in a tab with a hard timeout; on timeout the in-page cancel hook is fired. */
+async function runWithTimeout(
+	tabId: number,
+	wrapped: string,
+	key: string,
+	timeoutMs: number,
+	world: EvalWorld,
+): Promise<unknown> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	let timedOut = false;
 	try {
-		const raw = await Promise.race([
-			runUserScript(id, wrapped),
-			new Promise<never>((_, reject) =>
-				setTimeout(() => {
+		return await Promise.race([
+			runUserScript(tabId, wrapped, world),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
 					timedOut = true;
 					reject(new Error(`browser_eval timed out after ${timeoutMs} ms (the page script was stopped)`));
-				}, timeoutMs),
-			),
+				}, timeoutMs);
+			}),
 		]);
+	} finally {
+		clearTimeout(timer);
+		if (timedOut)
+			await runUserScript(tabId, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`, world).catch(() => undefined);
+	}
+}
+
+function evalWorld(args: Json): EvalWorld {
+	return str(args.world)?.toLowerCase() === "main" ? "MAIN" : "USER_SCRIPT";
+}
+
+async function evalJs(args: Json, windowId: number, callId: string): Promise<BrowserToolResult> {
+	const code = str(args.code);
+	if (!code) return text("browser_eval: `code` is required");
+	if (Array.isArray(args.urls) && args.urls.length > 0) return evalAcrossUrls(args, code, windowId, callId);
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	await bringToFront(tab, args);
+	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 30_000, 1_000), 170_000);
+	const world = evalWorld(args);
+	// Same as the Browser agent's browserjs(): matching site skills are injected ahead of the code.
+	const skills = await skillLibraryFor(tab.url, args.skills !== false);
+	const key = JSON.stringify(callId);
+	const wrapped = wrapEval(code, skills.library, key);
+	activeCalls.set(callId, () =>
+		runUserScript(id, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`, world).then(() => undefined),
+	);
+	try {
+		const raw = await runWithTimeout(id, wrapped, key, timeoutMs, world);
 		const out = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
 		const limited = out.length > 60_000 ? `${out.slice(0, 60_000)}\n[truncated: ${out.length} chars]` : out;
 		const after = await chrome.tabs.get(id).catch(() => undefined);
 		const navigated = after?.url !== undefined && after.url !== tab.url;
 		const note =
 			navigated && (raw === undefined || raw === null)
-				? `\n[page navigated during the eval: ${tab.url ?? ""} → ${after.url}; the script's context was torn down so its result was lost — re-run against the new page]`
+				? `\n[page navigated during the eval: ${tab.url ?? ""} → ${after.url}; the script's context was torn down so its result was lost — re-run against the new page, or pass \`urls\` to let the extension drive the navigation]`
 				: navigated
 					? `\n[page navigated during the eval → ${after.url}]`
 					: "";
 		return {
 			content: [{ type: "text", text: limited + note }],
-			details: { tabId: id, url: after?.url ?? tab.url, navigated, skillsInjected: skills.map((sk) => sk.name) },
+			details: {
+				tabId: id,
+				url: after?.url ?? tab.url,
+				navigated,
+				world: world === "MAIN" ? "main" : "isolated",
+				skillsInjected: skills.names,
+			},
 		};
 	} finally {
 		activeCalls.delete(callId);
-		if (timedOut) await cancelInPage().catch(() => undefined);
 	}
+}
+
+/**
+ * One tool call, many pages: the extension navigates the tab to each URL in turn, waits for load + settle,
+ * runs the code, and collects `{url, finalUrl, result|error}` per page. This is the loop the agent otherwise
+ * has to fake with deferred navigations and one tool call per page (the YouTube mark-watched run, 2026-09-05).
+ */
+async function evalAcrossUrls(args: Json, code: string, windowId: number, callId: string): Promise<BrowserToolResult> {
+	const urls = (args.urls as unknown[]).filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u));
+	if (urls.length === 0) return text("browser_eval: `urls` must contain http(s) URLs");
+	if (urls.length > 200) return text(`browser_eval: at most 200 urls per call (got ${urls.length}); split the batch`);
+	const tab = await resolveTab(num(args.tabId), windowId);
+	const id = requireTabId(tab);
+	await bringToFront(tab, args);
+	const perPageMs = Math.min(Math.max(num(args.timeoutMs) ?? 30_000, 1_000), 170_000);
+	const settleMs = Math.min(Math.max(num(args.settleMs) ?? 1_500, 0), 30_000);
+	const world = evalWorld(args);
+	const state = { cancelled: false, key: "" };
+	activeCalls.set(callId, async () => {
+		state.cancelled = true;
+		if (state.key)
+			await runUserScript(id, `window.__sgEvalCancel?.[${state.key}]?.(); 'cancelled'`, world).catch(
+				() => undefined,
+			);
+	});
+	const results: Json[] = [];
+	const injected = new Set<string>();
+	try {
+		for (const [i, url] of urls.entries()) {
+			if (state.cancelled) {
+				results.push({ url, error: "cancelled before this page" });
+				continue;
+			}
+			const row: Json = { url };
+			try {
+				await chrome.tabs.update(id, { url });
+				await waitForLoad(id, 30_000);
+				if (settleMs) await new Promise((r) => setTimeout(r, settleMs));
+				const loaded = await chrome.tabs.get(id);
+				row.finalUrl = loaded.url ?? url;
+				row.title = loaded.title ?? "";
+				const skills = await skillLibraryFor(loaded.url, args.skills !== false);
+				for (const n of skills.names) injected.add(n);
+				state.key = JSON.stringify(`${callId}:${i}`);
+				const raw = await runWithTimeout(
+					id,
+					wrapEval(code, skills.library, state.key),
+					state.key,
+					perPageMs,
+					world,
+				);
+				row.result = typeof raw === "string" ? (JSON.parse(raw) as Json) : ((raw ?? null) as Json);
+			} catch (err) {
+				row.error = err instanceof Error ? err.message : String(err);
+			}
+			results.push(row);
+		}
+	} finally {
+		activeCalls.delete(callId);
+	}
+	const errors = results.filter((r) => r.error !== undefined).length;
+	const out = JSON.stringify(results);
+	const limited =
+		out.length > 120_000 ? `${out.slice(0, 120_000)}\n[truncated: ${out.length} chars — return less per page]` : out;
+	return {
+		content: [
+			{
+				type: "text",
+				text: `${results.length} pages, ${errors} errors${state.cancelled ? " (cancelled)" : ""}\n${limited}`,
+			},
+		],
+		details: {
+			tabId: id,
+			pages: results.length,
+			errors,
+			cancelled: state.cancelled,
+			world: world === "MAIN" ? "main" : "isolated",
+			skillsInjected: [...injected],
+		},
+	};
 }
 
 function waitForLoad(tabId: number, timeoutMs: number): Promise<void> {
