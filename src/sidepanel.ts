@@ -74,6 +74,7 @@ import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
 import { proxyToken, syncWithServer } from "./sync.js";
 import { tutorials } from "./tutorials.js";
+import { selectionToMarkdown } from "./utils/selection-markdown.js";
 
 // Register custom message renderers
 registerNavigationRenderer();
@@ -94,6 +95,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		}
 		return true; // Keep channel open for async response
 	}
+});
+
+// Context menu "Copy as Markdown" (item created in background.ts): every open side panel hears the click,
+// so act only when this window is the one clicked in and actually has a selection.
+chrome.contextMenus?.onClicked.addListener((info, tab) => {
+	if (info.menuItemId !== "sg-copy-markdown") return;
+	if (tab && tab.windowId >= 0 && tab.windowId !== currentWindowId) return;
+	const selection = window.getSelection();
+	if (!selection || selection.isCollapsed) return;
+	const markdown = selectionToMarkdown(selection) || info.selectionText || "";
+	if (!markdown) return;
+	navigator.clipboard.writeText(markdown).catch((err) => console.error("[Sidepanel] Copy as Markdown failed:", err));
 });
 
 // ============================================================================

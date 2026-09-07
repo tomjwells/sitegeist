@@ -11,6 +11,19 @@ chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
 	}
 });
 
+// Right-click on selected text inside the side panel → "Copy as Markdown" (handled in sidepanel.ts, which
+// owns the selection). Menu items persist in the browser, so (re)create them once per install/update.
+chrome.runtime.onInstalled.addListener(() => {
+	chrome.contextMenus.removeAll(() => {
+		chrome.contextMenus.create({
+			id: "sg-copy-markdown",
+			title: "Copy as Markdown",
+			contexts: ["selection"],
+			documentUrlPatterns: [chrome.runtime.getURL("sidepanel.html*")],
+		});
+	});
+});
+
 // Listen for messages from userScripts (overlay in page)
 console.log("[Background] onUserScriptMessage available:", !!chrome.runtime.onUserScriptMessage);
 if (chrome.runtime.onUserScriptMessage) {
