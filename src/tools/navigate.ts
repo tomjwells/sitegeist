@@ -324,13 +324,8 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			throw new Error(`Tab ${numericTabId} not found`);
 		}
 
-		// Activate the tab
+		// Activate the tab (in its own window; never take window focus - that yanks Tom out of whatever he is typing in)
 		await chrome.tabs.update(numericTabId, { active: true });
-
-		// Focus the window containing the tab
-		if (tab.windowId) {
-			await chrome.windows.update(tab.windowId, { focused: true });
-		}
 
 		const finalUrl = tab.url || "";
 		const title = tab.title || "Untitled";

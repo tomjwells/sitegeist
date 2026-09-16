@@ -34,15 +34,17 @@ async function resolveTab(tabId: number | undefined, windowId: number): Promise<
 }
 
 /**
- * Tom wants to see prime working (2026-09-05): every tab-acting tool brings its tab to the front unless
- * the caller passes background:true. The Browser agent always acted on the visible tab; this keeps that feel.
+ * Tom wants to see prime working (2026-09-05): every tab-acting tool switches its window to its tab unless
+ * the caller passes background:true. It never takes window focus (2026-09-16: focusing the window yanked Tom
+ * out of Telegram / another browser window mid-typing on every tool call); focus:true is an explicit opt-in.
  */
 async function bringToFront(tab: chrome.tabs.Tab, args: Json): Promise<void> {
 	if (args.background === true) return;
 	const id = tab.id;
 	if (id === undefined) return;
 	if (!tab.active) await chrome.tabs.update(id, { active: true }).catch(() => undefined);
-	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+	if (args.focus === true && tab.windowId !== undefined)
+		await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 }
 
 function requireTabId(tab: chrome.tabs.Tab): number {
@@ -79,10 +81,17 @@ async function dataUrlToResized(dataUrl: string, maxWidth: number): Promise<Imag
 async function screenshot(args: Json, windowId: number): Promise<BrowserToolResult> {
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
-	if (!tab.active) await chrome.tabs.update(id, { active: true });
-	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+	await bringToFront(tab, { ...args, background: false });
 	await new Promise((r) => setTimeout(r, tab.active ? 50 : 350));
-	const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId ?? windowId, { format: "png" });
+	let dataUrl: string;
+	try {
+		dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId ?? windowId, { format: "png" });
+	} catch (error) {
+		// captureVisibleTab needs the window on screen; we no longer pull it forward ourselves.
+		return text(
+			`browser_screenshot: capture failed (${error instanceof Error ? error.message : String(error)}). The window is probably minimized or fully covered - retry with focus:true (brings the window forward, interrupts Tom) or use browser_page for the text.`,
+		);
+	}
 	const image = await dataUrlToResized(dataUrl, Math.min(Math.max(num(args.maxWidth) ?? 1280, 200), 2560));
 	return {
 		content: [{ type: "text", text: `Screenshot of tab ${id}: ${tab.title ?? ""} — ${tab.url ?? ""}` }, image],
@@ -428,7 +437,7 @@ async function navigate(args: Json, windowId: number): Promise<BrowserToolResult
 		const tab = await resolveTab(num(args.tabId), windowId);
 		tabId = requireTabId(tab);
 		await chrome.tabs.update(tabId, { url, active: args.background === true ? tab.active : true });
-		if (args.background !== true && tab.windowId !== undefined)
+		if (args.background !== true && args.focus === true && tab.windowId !== undefined)
 			await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	}
 	await waitForLoad(tabId, 30_000);
