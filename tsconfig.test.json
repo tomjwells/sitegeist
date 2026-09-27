@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.build.json",
+	"compilerOptions": {
+		"rootDir": ".",
+		"noUncheckedIndexedAccess": true,
+		"types": ["node", "chrome"],
+		"allowJs": true,
+		"checkJs": false,
+		"allowImportingTsExtensions": true
+	},
+	"include": ["tests/**/*.ts", "src/storage/prompt-drafts.ts", "scripts/build.mjs"]
+}

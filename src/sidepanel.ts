@@ -58,6 +58,12 @@ import {
 import { type PrimeAttachment, primeAgents } from "./prime/prime-client.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
+import {
+	clearPromptDraft,
+	configurePromptDraft,
+	DRAFT_STORAGE_WARNING_EVENT,
+	promotePromptDraft,
+} from "./storage/prompt-drafts.js";
 import { DebuggerTool } from "./tools/debugger.js";
 import { ExtractImageTool, registerExtractImageRenderer } from "./tools/extract-image.js";
 import { AskUserWhichElementTool, skillTool } from "./tools/index.js";
@@ -154,6 +160,11 @@ let currentSessionId: string | undefined;
 let currentTitle = "";
 let isEditingTitle = false;
 let sessionsSidebarOpen = false;
+let draftStorageWarning = false;
+window.addEventListener(DRAFT_STORAGE_WARNING_EVENT, () => {
+	draftStorageWarning = true;
+	renderApp();
+});
 /** Header +/-: collapse every tool call to a one-line row, or expand them all (incl. their inner sections). */
 let toolCallsCollapsed = false;
 export const TOOL_CALLS_COLLAPSED_SETTING = "ui.toolCallsCollapsed";
@@ -442,6 +453,7 @@ const createAgent = async (
 		agentUnsubscribe();
 	}
 	if (isPrimeAgent(agent)) agent.detach();
+	configurePromptDraft(currentWindowId, currentSessionId);
 	agentKind = kind;
 
 	// Mark all loaded messages as already recorded (by object identity)
@@ -642,6 +654,7 @@ const createAgent = async (
 			if (!currentSessionId && shouldSaveSession(messages)) {
 				// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
 				currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
+				promotePromptDraft(currentWindowId, currentSessionId);
 				if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
 
 				port
@@ -838,6 +851,7 @@ const loadSession = (sessionId: string) => {
 };
 
 const newSession = (kind: AgentKind = "browser") => {
+	clearPromptDraft(currentWindowId); // Explicit New starts empty; saved-chat drafts remain separate.
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
 	url.search = kind !== "browser" ? `?new=true&agent=${encodeURIComponent(kind)}` : "?new=true";
@@ -993,6 +1007,7 @@ const renderApp = () => {
 				</div>
 			</div>
 
+			${draftStorageWarning ? html`<div role="alert" class="px-3 py-2 text-xs text-destructive">Draft saving is unavailable on this device. Copy your unfinished prompt before closing the panel.</div>` : ""}
 			<!-- Chat Panel + sessions sidebar overlay -->
 			<div class="relative flex-1 min-h-0 flex flex-col">
 				${chatPanel}
@@ -1002,6 +1017,7 @@ const renderApp = () => {
 					.onSelect=${(sessionId: string) => loadSession(sessionId)}
 					.onNew=${() => newSession()}
 					.onDeleted=${(deletedSessionId: string) => {
+						clearPromptDraft(currentWindowId, deletedSessionId);
 						// Only reload if the current session was deleted
 						if (deletedSessionId === currentSessionId) newSession();
 					}}

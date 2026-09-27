@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve unfinished prompt text locally per window and chat when the side panel is recreated or reloaded; browser-tab switches never change the draft key.
+- Restore prompt text after a rejected send, and do not erase a newer draft typed while send preparation was pending.
+
 ## [1.0.0] - 2026-03-15
 
 ### Added

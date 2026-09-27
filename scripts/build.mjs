@@ -20,9 +20,6 @@ const entryPoints = {
 	background: join(packageRoot, "src/background.ts"),
 };
 
-rmSync(outDir, { recursive: true, force: true });
-mkdirSync(outDir, { recursive: true });
-
 // Swap pi-ai's static model registry for src/models-registry.ts (same API, mutable) so a fresh model
 // catalog can be merged in at runtime. Catches pi-ai's own relative imports of ./models.js as well as
 // the package entry point re-export.
@@ -48,8 +45,19 @@ const piWebUiPatches = [
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageEditor\.js$/,
 		imports: [
 			`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/"))};`,
+			`import { connectPromptDraft, disconnectPromptDraft, rememberPromptDraft } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
 		],
 		replacements: [
+			{
+				find: '        this._value = val;\n        this.requestUpdate("value", oldValue);',
+				replace:
+					'        this._value = val;\n        rememberPromptDraft(this, val);\n        this.requestUpdate("value", oldValue);',
+			},
+			{
+				find: "    firstUpdated() {\n",
+				replace:
+					"    connectedCallback() {\n        super.connectedCallback();\n        connectPromptDraft(this);\n    }\n    disconnectedCallback() {\n        disconnectPromptDraft(this);\n        super.disconnectedCallback();\n    }\n    firstUpdated() {\n",
+			},
 			{
 				find: /options: \[\n\s*\{ value: "off"[\s\S]*?\],/,
 				replace:
@@ -143,17 +151,33 @@ const piWebUiPatches = [
 	},
 	{
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]AgentInterface\.js$/,
-		imports: [],
+		imports: [
+			`import { beginPromptSubmission, restoreRejectedPrompt } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
+		],
 		replacements: [
 			{
 				find: "if ((!input.trim() && attachments?.length === 0) || this.session?.state.isStreaming)\n            return;",
 				replace:
 					'if ((!input.trim() && attachments?.length === 0) || (this.session?.state.isStreaming && this.session?.state.model?.provider !== "prime"))\n            return;',
 			},
+			{
+				find: '        this._messageEditor.value = "";\n        this._messageEditor.attachments = [];',
+				replace:
+					"        const draftSubmission = beginPromptSubmission(this._messageEditor, input);\n        if (this._messageEditor.attachments === attachments) this._messageEditor.attachments = [];",
+			},
+			{
+				find: "        // Compose message with attachments if any\n",
+				replace: "        try {\n        // Compose message with attachments if any\n",
+			},
+			{
+				find: "            await this.session?.prompt(input);\n        }\n    }",
+				replace:
+					"            await this.session?.prompt(input);\n        }\n        } catch (error) {\n            restoreRejectedPrompt(draftSubmission);\n            if (attachments && this._messageEditor.attachments.length === 0) this._messageEditor.attachments = attachments;\n            throw error;\n        }\n    }",
+			},
 		],
 	},
 ];
-const piWebUiPatchPlugin = {
+export const piWebUiPatchPlugin = {
 	name: "pi-web-ui-patches",
 	setup(build) {
 		for (const patch of piWebUiPatches) {
@@ -243,6 +267,8 @@ const copyStatic = () => {
 };
 
 const run = async () => {
+	rmSync(outDir, { recursive: true, force: true });
+	mkdirSync(outDir, { recursive: true });
 	if (isWatch) {
 		const ctx = await context(buildOptions);
 		await ctx.watch();
@@ -272,7 +298,9 @@ const run = async () => {
 	}
 };
 
-run().catch((error) => {
-	console.error(error);
-	process.exitCode = 1;
-});
+if (process.argv[1] === __filename) {
+	run().catch((error) => {
+		console.error(error);
+		process.exitCode = 1;
+	});
+}
