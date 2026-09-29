@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- prime-agent sessions: files attached in the composer (PDF, DOCX, images, ...) are shipped to the agent's host as files (relay `/sessions/:id/files` -> bridge `/files`) and the prompt names their saved paths in a `[sitegeist attachments]` block, instead of pasting the document's extracted text into the prompt. The agent can read the file itself or `browser_upload_file` it into a page (e.g. a CV into a job-application form). The chat bubble shows the attachment tiles (or a one-line "Attached: ..." after a reload); a failed upload falls back to the extracted text. Unit tests: `npm run test:attachments`.
+
 ### Fixed
 
 - Preserve unfinished prompt text locally per window and chat when the side panel is recreated or reloaded; browser-tab switches never change the draft key.

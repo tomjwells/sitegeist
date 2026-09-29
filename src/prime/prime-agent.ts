@@ -12,8 +12,9 @@ import {
 	type ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
-import { convertAttachments, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
+import type { Attachment, UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
 import { catalogProviders, getModels as registryModels } from "../models-registry.js";
+import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
 import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
 import { MAIN_AGENT_ID, PRIME_PROVIDER } from "./constants.js";
 import {
@@ -25,6 +26,7 @@ import {
 	primeHydrate,
 	primePrompt,
 	primeRpc,
+	primeUploadFile,
 } from "./prime-client.js";
 
 export {
@@ -69,21 +71,31 @@ const toAgentMessages = (list: unknown[]): AgentMessage[] =>
 // The side panel prepends "[sitegeist browser context] … [/sitegeist browser context]" to what Tom typed so
 // prime knows the tab/tools; that is for the model, not for the transcript or the session title.
 const CONTEXT_RE = /^\[sitegeist browser context\][\s\S]*?(?:\[\/sitegeist browser context\]|\n\n)\s*/;
-function stripContextText(text: string): string {
-	return text.replace(CONTEXT_RE, "");
+// Files attached in the panel are shipped to the agent's host and listed for the model as
+// "[sitegeist attachments] … [/sitegeist attachments]" (paths + handling notes, attachments-text.ts). The
+// transcript shows the attachment tiles instead (or a one-line "Attached: …" once the tiles are gone, e.g.
+// after a reload).
+const attachmentsOf = (m: AgentMessage): Attachment[] | undefined => {
+	const list = (m as { attachments?: unknown }).attachments;
+	return Array.isArray(list) && list.length > 0 ? (list as Attachment[]) : undefined;
+};
+function displayText(text: string, hasTiles: boolean): string {
+	return compactAttachmentsText(text.replace(CONTEXT_RE, ""), hasTiles).trim();
 }
-/** Returns the messages with the browser-context preamble removed from user text (no-op for other roles). */
+const needsDisplayFix = (text: string): boolean => CONTEXT_RE.test(text) || hasAttachmentsBlock(text);
+/** Returns the messages with the browser-context preamble and attachments block removed from user text (no-op for other roles). */
 export function stripBrowserContext(messages: AgentMessage[]): AgentMessage[] {
 	return messages.map((m) => {
 		if (m.role !== "user") return m;
+		const hasTiles = attachmentsOf(m) !== undefined;
 		const content = m.content;
 		if (typeof content === "string")
-			return CONTEXT_RE.test(content) ? { ...m, content: stripContextText(content) } : m;
+			return needsDisplayFix(content) ? { ...m, content: displayText(content, hasTiles) } : m;
 		let changed = false;
 		const next = content.map((c) => {
-			if (c.type !== "text" || !CONTEXT_RE.test(c.text)) return c;
+			if (c.type !== "text" || !needsDisplayFix(c.text)) return c;
 			changed = true;
-			return { ...c, text: stripContextText(c.text) };
+			return { ...c, text: displayText(c.text, hasTiles) };
 		});
 		return changed ? { ...m, content: next } : m;
 	});
@@ -338,17 +350,23 @@ export class PrimeRemoteAgent extends Agent {
 
 	private appendRemoteMessage(incoming: AgentMessage): void {
 		if (!LLM_ROLES.has(incoming.role)) return;
-		const message = incoming.role === "user" ? (stripBrowserContext([incoming])[0] ?? incoming) : incoming;
 		const messages = this.remote.messages;
-		if (message.role === "user" && this.optimisticUser) {
-			const idx = messages.lastIndexOf(this.optimisticUser);
+		if (incoming.role === "user" && this.optimisticUser) {
+			const optimistic = this.optimisticUser;
+			const idx = messages.lastIndexOf(optimistic);
 			this.optimisticUser = undefined;
 			if (idx >= 0) {
+				// The bridge echoes text only; keep the attachment tiles from the optimistic bubble so the
+				// transcript still shows what Tom attached.
+				const tiles = attachmentsOf(optimistic);
+				const withTiles = tiles ? ({ ...incoming, attachments: tiles } as AgentMessage) : incoming;
+				const message = stripBrowserContext([withTiles])[0] ?? withTiles;
 				// Take the bridge's position: a steer sent mid-tool belongs after that tool's result, not before it.
 				this.remote.messages = [...messages.slice(0, idx), ...messages.slice(idx + 1), message];
 				return;
 			}
 		}
+		const message = incoming.role === "user" ? (stripBrowserContext([incoming])[0] ?? incoming) : incoming;
 		const last = messages[messages.length - 1];
 		if (last && sameMessage(last, message)) return; // hydrate/stream overlap
 		this.remote.messages = [...messages, message];
@@ -369,11 +387,15 @@ export class PrimeRemoteAgent extends Agent {
 	}
 
 	override async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
-		const { text, imageBlocks, optimistic } = this.composePrompt(input, images);
-		if (!text.trim() && imageBlocks.length === 0) return;
+		const { text, imageBlocks, attachments, optimistic } = this.composePrompt(input, images);
+		if (!text.trim() && imageBlocks.length === 0 && attachments.length === 0) return;
 		const context = await this.tabContext().catch(() => "");
-		const outbound = context ? `${context}\n\n${text}` : text;
-		const sessionId = await this.ensureSession(text.slice(0, 60) || "browser session");
+		const sessionId = await this.ensureSession(text.slice(0, 60) || attachments[0]?.fileName || "browser session");
+		// Attachments become files on the agent's host BEFORE the prompt goes out, so the prompt can name
+		// their paths (the model reads/uploads the file; no extracted-text dump).
+		const filesSection = attachments.length > 0 ? await this.shipAttachments(sessionId, attachments) : "";
+		const outbound = [context, text, filesSection].filter((part) => part.trim().length > 0).join("\n\n");
+		if (!outbound.trim()) return;
 		// Sent while a turn is running = steering, like a Telegram message mid-turn: delivered at the next
 		// tool boundary (bridge streamingBehavior "steer"); the turn keeps going.
 		const steering = this.remote.isStreaming;
@@ -408,16 +430,26 @@ export class PrimeRemoteAgent extends Agent {
 	private composePrompt(
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
-	): { text: string; imageBlocks: ImageContent[]; optimistic: AgentMessage } {
+	): { text: string; imageBlocks: ImageContent[]; attachments: Attachment[]; optimistic: AgentMessage } {
 		const timestamp = Date.now();
 		if (typeof input === "string") {
 			const imageBlocks = images ?? [];
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text: input }, ...imageBlocks];
-			return { text: input, imageBlocks, optimistic: { role: "user", content, timestamp } as AgentMessage };
+			return {
+				text: input,
+				imageBlocks,
+				attachments: [],
+				optimistic: { role: "user", content, timestamp } as AgentMessage,
+			};
 		}
 		const message = Array.isArray(input) ? input[0] : input;
 		if (!message)
-			return { text: "", imageBlocks: [], optimistic: { role: "user", content: "", timestamp } as AgentMessage };
+			return {
+				text: "",
+				imageBlocks: [],
+				attachments: [],
+				optimistic: { role: "user", content: "", timestamp } as AgentMessage,
+			};
 		const parts: string[] = [];
 		const imageBlocks: ImageContent[] = [];
 		const blocks: (TextContent | ImageContent)[] = [];
@@ -426,20 +458,61 @@ export class PrimeRemoteAgent extends Agent {
 			if (c.type === "text") parts.push(c.text);
 			else imageBlocks.push(c);
 		};
+		let attachments: Attachment[] = [];
 		if (message.role === "user-with-attachments") {
 			const um = message as UserMessageWithAttachments;
 			if (typeof um.content === "string") collect({ type: "text", text: um.content });
 			else for (const c of um.content) collect(c);
-			if (um.attachments) for (const c of convertAttachments(um.attachments)) collect(c);
+			// Not pi-web-ui's convertAttachments: that pastes a PDF's extracted text into the prompt. The
+			// files go to the agent's host in prompt() and the prompt names their paths; images are also
+			// passed inline so the model can see them.
+			attachments = um.attachments ?? [];
+			for (const a of attachments) {
+				if (a.type === "image") collect({ type: "image", data: a.content, mimeType: a.mimeType });
+			}
 		} else if (message.role === "user") {
 			if (typeof message.content === "string") collect({ type: "text", text: message.content });
 			else for (const c of message.content) collect(c);
 		}
-		return {
-			text: parts.join("\n\n"),
-			imageBlocks,
-			optimistic: { role: "user", content: blocks, timestamp } as AgentMessage,
-		};
+		const optimistic: AgentMessage = {
+			role: "user",
+			content: blocks,
+			timestamp,
+			...(attachments.length > 0 ? { attachments } : {}),
+		} as AgentMessage;
+		return { text: parts.join("\n\n"), imageBlocks, attachments, optimistic };
+	}
+
+	/**
+	 * Side-panel attachments -> files on the agent's host (relay /files -> bridge /files). The bytes never
+	 * enter the prompt: the model gets paths (read it yourself, or browser_upload_file it into a page). When
+	 * an upload fails, a document's browser-extracted text is inlined after the block as the fallback so the
+	 * prompt still carries the content; an image is inline anyway.
+	 */
+	private async shipAttachments(sessionId: string, attachments: Attachment[]): Promise<string> {
+		const turnId = `sg-${Date.now().toString(36)}`;
+		const shipped = await Promise.all(
+			attachments.map(async (a) => {
+				const base = { fileName: a.fileName, mimeType: a.mimeType, size: a.size, kind: a.type };
+				try {
+					const stored = await primeUploadFile(this.agentId, sessionId, {
+						filename: a.fileName,
+						mime: a.mimeType,
+						dataBase64: a.content,
+						turnId,
+					});
+					return { ...base, path: stored.path };
+				} catch (err) {
+					console.warn("[prime] attachment upload failed", a.fileName, err);
+					return {
+						...base,
+						error: err instanceof Error ? err.message : String(err),
+						extractedText: a.extractedText,
+					};
+				}
+			}),
+		);
+		return buildAttachmentsSection(shipped);
 	}
 
 	override abort(): void {

@@ -8,5 +8,5 @@
 		"checkJs": false,
 		"allowImportingTsExtensions": true
 	},
-	"include": ["tests/**/*.ts", "src/storage/prompt-drafts.ts", "scripts/build.mjs"]
+	"include": ["tests/**/*.ts", "src/storage/prompt-drafts.ts", "src/prime/attachments-text.ts", "scripts/build.mjs"]
 }

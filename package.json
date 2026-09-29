@@ -13,7 +13,8 @@
 		"typecheck": "tsc --noEmit",
 		"check": "biome check --write . && tsc --noEmit && cd site && npm run check",
 		"prepare": "husky",
-		"test:drafts": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prompt-drafts.test.ts"
+		"test:drafts": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prompt-drafts.test.ts",
+		"test:attachments": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-attachments.test.ts"
 	},
 	"dependencies": {
 		"@mariozechner/jailjs": "^0.1.0",

@@ -114,6 +114,34 @@ export async function primePrompt(
 	return request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/prompt`, body);
 }
 
+export interface PrimeStoredFile {
+	path: string;
+	bytes: number;
+	filename: string;
+	mime: string;
+}
+
+/**
+ * Side-panel attachment -> file on the agent's host (relay /files -> bridge /files, the rail the Telegram
+ * router uses for photos/documents). Returns where the bytes landed so the prompt can name the path.
+ */
+export async function primeUploadFile(
+	agentId: string,
+	sessionId: string,
+	file: { filename: string; mime: string; dataBase64: string; turnId?: string },
+): Promise<PrimeStoredFile> {
+	const r = await request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/files`, file);
+	if (r.ok !== true || typeof r.path !== "string") {
+		throw new Error(typeof r.error === "string" ? r.error : "prime relay: file upload returned no path");
+	}
+	return {
+		path: r.path,
+		bytes: typeof r.bytes === "number" ? r.bytes : 0,
+		filename: typeof r.filename === "string" ? r.filename : file.filename,
+		mime: typeof r.mime === "string" ? r.mime : file.mime,
+	};
+}
+
 export async function primeRpc(agentId: string, sessionId: string, command: Json): Promise<Json> {
 	const r = await request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/rpc`, command);
 	const response = isJson(r.response) ? r.response : undefined;
