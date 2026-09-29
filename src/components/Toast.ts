@@ -4,6 +4,10 @@ import { customElement, property } from "lit/decorators.js";
 import { AlertCircle, CheckCircle, X } from "lucide";
 
 type ToastType = "success" | "error" | "info";
+export interface ToastAction {
+	label: string;
+	onClick: () => void;
+}
 
 @customElement("toast-notification")
 export class Toast extends LitElement {
@@ -11,6 +15,8 @@ export class Toast extends LitElement {
 	@property() type: ToastType = "info";
 	@property() duration = 3000;
 	@property({ type: Boolean }) isExiting = false;
+	/** Optional action button (e.g. "Undo"); the toast closes after it runs. */
+	@property({ attribute: false }) action: ToastAction | undefined;
 
 	private timeoutId?: number;
 
@@ -50,6 +56,17 @@ export class Toast extends LitElement {
 				<div class="min-w-[300px] max-w-[400px] flex items-center gap-3 px-4 py-3 ${bgColor} text-white rounded-lg shadow-lg border border-border">
 					${iconEl}
 					<span class="flex-1 text-sm font-medium">${this.message}</span>
+					${
+						this.action
+							? html`<button
+								class="px-2 py-0.5 text-xs font-semibold rounded bg-white/20 hover:bg-white/30 transition-colors"
+								@click=${() => {
+									this.action?.onClick();
+									this.dismiss();
+								}}
+							>${this.action.label}</button>`
+							: ""
+					}
 					<button
 						@click=${() => this.dismiss()}
 						class="hover:bg-white/20 rounded p-1 transition-colors"
@@ -68,11 +85,12 @@ export class Toast extends LitElement {
 	/**
 	 * Static method to show a toast notification
 	 */
-	static show(message: string, type: ToastType = "info", duration = 3000) {
+	static show(message: string, type: ToastType = "info", duration = 3000, action?: ToastAction) {
 		const toast = document.createElement("toast-notification") as Toast;
 		toast.message = message;
 		toast.type = type;
 		toast.duration = duration;
+		toast.action = action;
 		document.body.appendChild(toast);
 		return toast;
 	}

@@ -114,6 +114,7 @@ declare module "@mariozechner/mini-lit" {
 		"Manage sessions (import, export, bulk delete)": string;
 		Pinned: string;
 		Recent: string;
+		"This page": string;
 		"No matching sessions": string;
 		Close: string;
 		"Proxy token": string;
@@ -237,6 +238,7 @@ const sitegeistTranslations = {
 		"Manage sessions (import, export, bulk delete)": "Manage sessions (import, export, bulk delete)",
 		Pinned: "Pinned",
 		Recent: "Recent",
+		"This page": "This page",
 		"No matching sessions": "No matching sessions",
 		Close: "Close",
 		"Proxy token": "Proxy token",
@@ -360,6 +362,7 @@ const sitegeistTranslations = {
 		"Manage sessions (import, export, bulk delete)": "Sitzungen verwalten (Import, Export, Massenlöschung)",
 		Pinned: "Angeheftet",
 		Recent: "Zuletzt",
+		"This page": "Diese Seite",
 		"No matching sessions": "Keine passenden Sitzungen",
 		Close: "Schließen",
 		"Proxy token": "Proxy-Token",

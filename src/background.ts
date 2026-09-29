@@ -1,3 +1,4 @@
+import { ANCHORS_STORAGE_KEY, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
 import type { LockedSessionsMessage, LockResultMessage, SidepanelToBackgroundMessage } from "./utils/port.js";
 
 // Called when Sitegeist icon is clicked - opens the (window-global) side panel.
@@ -10,6 +11,52 @@ chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
 		chrome.sidePanel.open({ windowId });
 	}
 });
+
+// ============================================================================
+// PAGE ANCHORS BADGE (Tom, 2026-09-29): a tab whose page has a session bound to it shows a badge on
+// the toolbar icon (count of sessions) and a "Resume …" tooltip, so after a browser restart / crash
+// the session is one click away even though a closed side panel cannot open itself (sidePanel.open
+// needs a user gesture). Clicking the icon opens the panel, whose initApp loads the page's session.
+// ============================================================================
+const anchors = new AnchorsStore(chromeLocalBackend());
+const DEFAULT_ACTION_TITLE = "Click to open side panel";
+void chrome.action.setBadgeBackgroundColor({ color: "#2563eb" });
+void chrome.action.setBadgeTextColor?.({ color: "#ffffff" });
+
+async function updateAnchorBadge(tabId: number, url: string | undefined): Promise<void> {
+	const key = url ? pageKey(url) : undefined;
+	const bound = key ? await anchors.forKey(key) : [];
+	const first = bound[0];
+	try {
+		await chrome.action.setBadgeText({ tabId, text: first ? String(bound.length) : "" });
+		await chrome.action.setTitle({
+			tabId,
+			title: first
+				? `Resume in sitegeist: ${first.pageTitle || first.key}${bound.length > 1 ? ` (+${bound.length - 1} more)` : ""}`
+				: DEFAULT_ACTION_TITLE,
+		});
+	} catch {
+		/* tab closed mid-update */
+	}
+}
+
+async function refreshAllAnchorBadges(): Promise<void> {
+	const tabs = await chrome.tabs.query({ active: true });
+	await Promise.all(tabs.map((t) => (t.id !== undefined ? updateAnchorBadge(t.id, t.url) : Promise.resolve())));
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+	if (changeInfo.url || changeInfo.status === "loading") void updateAnchorBadge(tabId, changeInfo.url ?? tab.url);
+});
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+	chrome.tabs.get(tabId, (tab) => {
+		if (!chrome.runtime.lastError) void updateAnchorBadge(tabId, tab.url);
+	});
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+	if (area === "local" && changes[ANCHORS_STORAGE_KEY]) void refreshAllAnchorBadges();
+});
+void refreshAllAnchorBadges();
 
 // Right-click on selected text inside the side panel → "Copy as Markdown" (handled in sidepanel.ts, which
 // owns the selection). Menu items persist in the browser, so (re)create them once per install/update.

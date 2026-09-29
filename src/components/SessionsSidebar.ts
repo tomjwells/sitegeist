@@ -5,7 +5,8 @@ import { getAppStorage, type SessionMetadata } from "@mariozechner/pi-web-ui";
 import Fuse from "fuse.js";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { FolderCog, Pin, PinOff, Plus, Trash2, X } from "lucide";
+import { FolderCog, Link2Off, Pin, PinOff, Plus, Trash2, X } from "lucide";
+import { type AnchorBinding, AnchorsStore, chromeLocalBackend } from "../anchors/anchors.js";
 import { SitegeistSessionListDialog } from "../dialogs/SessionListDialog.js";
 import { agentIdFromSessionId, isPrimeSessionId, MAIN_AGENT_ID } from "../prime/constants.js";
 import * as port from "../utils/port.js";
@@ -27,8 +28,14 @@ export class SessionsSidebar extends LitElement {
 	@property({ attribute: false }) onNew: () => void = () => {};
 	@property({ attribute: false }) onDeleted: (sessionId: string) => void = () => {};
 	@property({ attribute: false }) onToggle: (open: boolean) => void = () => {};
+	/** Page key of the tab Tom is on (undefined = page cannot anchor); drives the "This page" section. */
+	@property({ type: String }) activeKey: string | undefined;
+	@property({ type: String }) activeTitle = "";
+	@property({ attribute: false }) onDetached: (sessionId: string, key: string) => void = () => {};
 
 	@state() private sessions: SessionMetadata[] = [];
+	@state() private anchors: AnchorBinding[] = [];
+	private readonly anchorsStore = new AnchorsStore(chromeLocalBackend());
 	@state() private pinned: string[] = [];
 	@state() private locks: Record<string, number> = {};
 	@state() private windowId: number | undefined;
@@ -45,20 +52,27 @@ export class SessionsSidebar extends LitElement {
 
 	override updated(changed: Map<string, unknown>) {
 		if (changed.has("open") && this.open) void this.refresh();
+		else if (changed.has("activeKey") && this.open) void this.refreshAnchors();
+	}
+
+	private async refreshAnchors(): Promise<void> {
+		this.anchors = await this.anchorsStore.all();
 	}
 
 	async refresh(): Promise<void> {
 		const storage = getAppStorage();
 		try {
-			const [sessions, pinned, lockResponse, win] = await Promise.all([
+			const [sessions, pinned, lockResponse, win, anchors] = await Promise.all([
 				storage.sessions.getAllMetadata(),
 				storage.settings.get<string[]>(SESSIONS_PINNED_SETTING),
 				port.sendMessage({ type: "getLockedSessions" }),
 				chrome.windows.getCurrent(),
+				this.anchorsStore.all(),
 			]);
 			this.sessions = sessions;
 			const ids = new Set(sessions.map((s) => s.id));
 			this.pinned = (pinned ?? []).filter((id) => ids.has(id));
+			this.anchors = anchors.filter((b) => ids.has(b.sessionId));
 			this.locks = lockResponse.locks || {};
 			this.windowId = win.id;
 		} catch (err) {
@@ -91,6 +105,24 @@ export class SessionsSidebar extends LitElement {
 		await getAppStorage().sessions.deleteSession(id);
 		await this.refresh();
 		this.onDeleted(id);
+	}
+
+	private async detach(sessionId: string, key: string, e: Event) {
+		e.stopPropagation();
+		await this.anchorsStore.detach(key, sessionId);
+		await this.refreshAnchors();
+		this.onDetached(sessionId, key);
+	}
+
+	/** Sessions bound to the page Tom is on, most recently used first. */
+	private forThisPage(): AnchorBinding[] {
+		const key = this.activeKey;
+		if (!key) return [];
+		return this.anchors.filter((b) => b.key === key).sort((a, b) => (a.lastActive < b.lastActive ? 1 : -1));
+	}
+
+	private pageCount(sessionId: string): number {
+		return this.anchors.filter((b) => b.sessionId === sessionId).length;
 	}
 
 	private isLocked(id: string): boolean {
@@ -135,10 +167,11 @@ export class SessionsSidebar extends LitElement {
 			.map((r) => r.item);
 	}
 
-	private row(session: SessionMetadata, pinnedIndex: number | undefined): TemplateResult {
+	private row(session: SessionMetadata, pinnedIndex: number | undefined, binding?: AnchorBinding): TemplateResult {
 		const locked = this.isLocked(session.id);
 		const current = session.id === this.currentSessionId;
 		const isPinned = pinnedIndex !== undefined;
+		const pages = this.pageCount(session.id);
 		const dropHere = isPinned && this.dropIndex === pinnedIndex && this.dragIndex !== pinnedIndex;
 		return html`
 			<div
@@ -174,11 +207,21 @@ export class SessionsSidebar extends LitElement {
 					<div class="text-[11px] text-muted-foreground truncate">
 						${this.formatDate(session.lastModified)} · ${session.messageCount} ${i18n("messages")} · $${session.usage.cost.total.toFixed(2)}
 						${isPrimeSessionId(session.id) ? html` · <span class="text-primary/80">${this.agentOf(session.id)}</span>` : ""}
+						${pages > 0 ? html` · <span title=${`Bound to ${pages} page${pages === 1 ? "" : "s"}`}>${pages} ${pages === 1 ? "page" : "pages"}</span>` : ""}
 						${current ? html` · <span class="text-primary">${i18n("Current")}</span>` : ""}
 						${locked ? html` · <span class="text-destructive">${i18n("Locked")}</span>` : ""}
 					</div>
 				</div>
 				<div class="flex gap-0.5 shrink-0 ${isPinned ? "" : "opacity-0 group-hover:opacity-100"}">
+					${
+						binding
+							? html`<button
+								class="p-1 rounded hover:bg-secondary text-muted-foreground"
+								title=${binding.pinned ? "Detach this page from the session (attached by you)" : "Detach this page from the session"}
+								@click=${(e: Event) => this.detach(session.id, binding.key, e)}
+							>${icon(Link2Off, "xs")}</button>`
+							: ""
+					}
 					<button
 						class="p-1 rounded hover:bg-secondary text-muted-foreground"
 						title=${isPinned ? i18n("Unpin") : i18n("Pin")}
@@ -201,6 +244,12 @@ export class SessionsSidebar extends LitElement {
 		const pinnedRows = this.pinned.map((id) => byId.get(id)).filter((s): s is SessionMetadata => s !== undefined);
 		const pinnedSet = new Set(this.pinned);
 		const recent = filtered.filter((s) => !pinnedSet.has(s.id));
+		const allById = new Map(this.sessions.map((s) => [s.id, s]));
+		const thisPage = this.query.trim()
+			? []
+			: this.forThisPage()
+					.map((b) => ({ b, s: allById.get(b.sessionId) }))
+					.filter((x): x is { b: AnchorBinding; s: SessionMetadata } => x.s !== undefined);
 		return html`
 			<div class="absolute inset-0 z-40 flex" @keydown=${(e: KeyboardEvent) => e.key === "Escape" && this.onToggle(false)}>
 				<div class="w-[min(320px,85%)] h-full flex flex-col bg-background border-r border-border shadow-xl">
@@ -244,6 +293,14 @@ export class SessionsSidebar extends LitElement {
 						</div>
 					</div>
 					<div class="flex-1 overflow-y-auto px-1 pb-2">
+						${
+							thisPage.length > 0
+								? html`
+									<div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-wide text-muted-foreground truncate" title=${this.activeTitle || this.activeKey || ""}>${i18n("This page")}${this.activeTitle ? ` · ${this.activeTitle}` : ""}</div>
+									${thisPage.map(({ b, s }) => this.row(s, undefined, b))}
+								`
+								: ""
+						}
 						${
 							pinnedRows.length > 0
 								? html`

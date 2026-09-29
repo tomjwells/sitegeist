@@ -23,8 +23,10 @@ import {
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { History, Minus, Plus, Settings } from "lucide";
+import { History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
+import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
 import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
+import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
@@ -194,6 +196,21 @@ const refreshAgentOptions = async (): Promise<void> => {
 const isPrimeAgent = (a: Agent | undefined): a is PrimeRemoteAgent => a instanceof PrimeRemoteAgent;
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
+/** Set once initApp has loaded a session/agent; tab events before that must not navigate the panel. */
+let appReady = false;
+
+// ============================================================================
+// PAGE ANCHORS — sessions bound to the pages they were used on (Tom, 2026-09-29)
+// ============================================================================
+const anchors = new AnchorsStore(chromeLocalBackend());
+/** The tab Tom is looking at in this window; key undefined = the page cannot anchor a session. */
+let activeTab: { key: string | undefined; url: string; title: string } | undefined;
+/** Pages bound to the current session (header attach button + auto-resume guard). */
+let currentAnchors: AnchorBinding[] = [];
+/** Tab that was active when the current turn started; bound to the session once it has an id. */
+let pendingAnchor: { url: string; title: string } | undefined;
+/** Page keys Tom overrode by hand in this panel (picked another session / New / Undo): no auto-resume there. */
+const AUTO_RESUME_SUPPRESSED_KEY = "sg.autoResumeSuppressed";
 
 // Track which skills we've shown in full (skillName -> lastUpdated timestamp)
 // Reset when a new session/agent is created
@@ -437,6 +454,133 @@ const saveSession = async () => {
 	}
 };
 
+function suppressedAutoResumeKeys(): Set<string> {
+	try {
+		const raw: unknown = JSON.parse(sessionStorage.getItem(AUTO_RESUME_SUPPRESSED_KEY) ?? "[]");
+		return new Set(Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : []);
+	} catch {
+		return new Set();
+	}
+}
+
+/** Tom chose a session by hand while on this page: stop auto-resume bouncing him back (for this panel's lifetime). */
+function suppressAutoResumeForActivePage(): void {
+	if (!activeTab?.key) return;
+	const keys = suppressedAutoResumeKeys();
+	keys.add(activeTab.key);
+	try {
+		sessionStorage.setItem(AUTO_RESUME_SUPPRESSED_KEY, JSON.stringify(Array.from(keys)));
+	} catch {
+		/* private mode / quota: auto-resume may repeat, nothing is lost */
+	}
+}
+
+/** The current session now owns this page (prompt sent from it / attached by hand): auto-resume to it is wanted again. */
+function unsuppressAutoResume(key: string): void {
+	const keys = suppressedAutoResumeKeys();
+	if (!keys.delete(key)) return;
+	try {
+		sessionStorage.setItem(AUTO_RESUME_SUPPRESSED_KEY, JSON.stringify(Array.from(keys)));
+	} catch {
+		/* see suppressAutoResumeForActivePage */
+	}
+}
+
+async function refreshActiveTab(): Promise<void> {
+	const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
+	const url = tab?.url ?? "";
+	activeTab =
+		tab && url && !url.startsWith("chrome-extension://") && !url.startsWith("moz-extension://")
+			? { key: pageKey(url), url, title: tab.title ?? "" }
+			: undefined;
+}
+
+async function refreshCurrentAnchors(): Promise<void> {
+	currentAnchors = currentSessionId ? await anchors.forSession(currentSessionId) : [];
+}
+
+const isActivePageAttached = (): boolean =>
+	activeTab?.key !== undefined && currentAnchors.some((b) => b.key === activeTab?.key);
+
+/** Header button: attach (pin) the page Tom is on to this session, or detach it. */
+async function toggleAttachActivePage(): Promise<void> {
+	if (!currentSessionId || !activeTab?.key) return;
+	if (isActivePageAttached()) {
+		await anchors.detach(activeTab.key, currentSessionId);
+		Toast.show("Page detached from this session", "info", 2500);
+	} else {
+		await anchors.record({
+			url: activeTab.url,
+			pageTitle: activeTab.title,
+			sessionId: currentSessionId,
+			pinned: true,
+		});
+		Toast.success(`Page attached to "${currentTitle || "this session"}"`, 2500);
+	}
+	await refreshCurrentAnchors();
+	renderApp();
+	refreshSessionsSidebar();
+}
+
+/** A turn started: remember the page Tom asked from; it binds once the session has an id. */
+async function captureTurnAnchor(): Promise<void> {
+	await refreshActiveTab();
+	if (activeTab?.key) pendingAnchor = { url: activeTab.url, title: activeTab.title };
+	if (currentSessionId) await flushPendingAnchor();
+}
+
+async function flushPendingAnchor(): Promise<void> {
+	if (!pendingAnchor || !currentSessionId) return;
+	const pending = pendingAnchor;
+	pendingAnchor = undefined;
+	const key = await anchors.record({ url: pending.url, pageTitle: pending.title, sessionId: currentSessionId });
+	if (key) unsuppressAutoResume(key);
+	await refreshCurrentAnchors();
+	renderApp();
+	refreshSessionsSidebar();
+}
+
+/** Most recent session bound to this page that exists, is not the current one, and is not open in another window. */
+async function resumableSessionFor(key: string): Promise<AnchorBinding | undefined> {
+	const candidates = await anchors.forKey(key);
+	if (candidates.length === 0) return undefined;
+	const [live, lockResponse] = await Promise.all([
+		storage.sessions.getAllMetadata(),
+		port.sendMessage({ type: "getLockedSessions" }),
+	]);
+	const ids = new Set(live.map((s) => s.id));
+	if (candidates.some((b) => !ids.has(b.sessionId))) void anchors.prune(ids); // bindings of deleted sessions
+	const locks = lockResponse.locks || {};
+	return candidates.find((b) => {
+		if (!ids.has(b.sessionId) || b.sessionId === currentSessionId) return false;
+		const owner = locks[b.sessionId];
+		return owner === undefined || owner === currentWindowId;
+	});
+}
+
+/** Tom switched to a page that has a session: load it (panel idle, nothing unsaved, not overridden by hand). */
+async function maybeAutoResume(): Promise<void> {
+	if (!appReady || !activeTab?.key || agent?.state.isStreaming) return;
+	if (currentAnchors.some((b) => b.key === activeTab?.key)) return; // already on this page's session
+	if (suppressedAutoResumeKeys().has(activeTab.key)) return;
+	// A first turn that has not produced an id yet (or errored) is unsaved: never navigate away from it.
+	if (!currentSessionId && agent?.state.messages.some((m) => m.role === "user")) return;
+	const target = await resumableSessionFor(activeTab.key);
+	if (!target || !activeTab?.key) return;
+	const url = new URL(window.location.href);
+	url.search = "";
+	url.searchParams.set("session", target.sessionId);
+	url.searchParams.set("resumed", activeTab.key);
+	if (currentSessionId) url.searchParams.set("from", currentSessionId);
+	window.location.href = url.toString();
+}
+
+async function onActiveTabChanged(): Promise<void> {
+	await refreshActiveTab();
+	if (appReady) renderApp();
+	await maybeAutoResume();
+}
+
 const updateUrl = (sessionId: string) => {
 	const url = new URL(window.location.href);
 	url.searchParams.set("session", sessionId);
@@ -625,6 +769,8 @@ const createAgent = async (
 		agentUnsubscribe = agent.subscribe((event: AgentEvent) => {
 			const messages = agent.state.messages;
 
+			if (event.type === "agent_start") void captureTurnAnchor();
+
 			if (!isPrimeAgent(agent)) {
 				storage.settings
 					.set("lastUsedModel", agent.state.model)
@@ -673,6 +819,7 @@ const createAgent = async (
 
 			if (currentSessionId) {
 				saveSession();
+				if (pendingAnchor) void flushPendingAnchor();
 			}
 
 			renderApp();
@@ -844,6 +991,7 @@ const createAgent = async (
 };
 
 const loadSession = (sessionId: string) => {
+	suppressAutoResumeForActivePage();
 	// Navigation will disconnect port and auto-release locks
 	const url = new URL(window.location.href);
 	url.searchParams.set("session", sessionId);
@@ -851,6 +999,7 @@ const loadSession = (sessionId: string) => {
 };
 
 const newSession = (kind: AgentKind = "browser") => {
+	suppressAutoResumeForActivePage();
 	clearPromptDraft(currentWindowId); // Explicit New starts empty; saved-chat drafts remain separate.
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
@@ -972,6 +1121,20 @@ const renderApp = () => {
 								</button>`
 							: html``
 					}
+					${
+						currentSessionId && activeTab?.key
+							? Button({
+									variant: "ghost",
+									size: "sm",
+									className: isActivePageAttached() ? "text-primary" : "text-muted-foreground",
+									children: icon(isActivePageAttached() ? Link2 : Link2Off, "sm"),
+									onClick: () => void toggleAttachActivePage(),
+									title: isActivePageAttached()
+										? `This page is attached to this session (opens it automatically). Click to detach.${currentAnchors.length > 1 ? ` Attached pages: ${currentAnchors.length}.` : ""}`
+										: `Attach this page to this session, so the session opens whenever you are on it.${currentAnchors.length > 0 ? ` Attached pages: ${currentAnchors.length}.` : ""}`,
+								})
+							: ""
+					}
 				</div>
 				<div class="flex items-center gap-1 px-2">
 					${
@@ -1014,12 +1177,18 @@ const renderApp = () => {
 				<sessions-sidebar
 					.open=${sessionsSidebarOpen}
 					.currentSessionId=${currentSessionId}
+					.activeKey=${activeTab?.key}
+					.activeTitle=${activeTab?.title ?? ""}
 					.onSelect=${(sessionId: string) => loadSession(sessionId)}
 					.onNew=${() => newSession()}
 					.onDeleted=${(deletedSessionId: string) => {
 						clearPromptDraft(currentWindowId, deletedSessionId);
+						void anchors.removeSession(deletedSessionId);
 						// Only reload if the current session was deleted
 						if (deletedSessionId === currentSessionId) newSession();
+					}}
+					.onDetached=${() => {
+						void refreshCurrentAnchors().then(() => renderApp());
 					}}
 					.onToggle=${(open: boolean) => toggleSessionsSidebar(open)}
 				></sessions-sidebar>
@@ -1077,6 +1246,9 @@ const refreshSessionsSidebar = () => {
 
 // Listen for tab updates and insert navigation messages only when agent is running
 chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
+	// Page anchors: the page Tom is on changed (URL) or got its title → header button, sidebar, auto-resume.
+	if ((changeInfo.url || changeInfo.title) && tab.active && tab.windowId === currentWindowId)
+		void onActiveTabChanged();
 	// Only care about URL changes on the active tab while agent is working
 	// Ignore chrome-extension:// URLs (extension internal pages)
 	// Ignore tool-initiated navigations (handled by the navigate tool itself)
@@ -1101,6 +1273,7 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
 	// Ignore tab activations from other windows
 	if (activeInfo.windowId !== currentWindowId) return;
+	void onActiveTabChanged();
 
 	const tab = await chrome.tabs.get(activeInfo.tabId);
 	// Ignore chrome-extension:// URLs (extension internal pages)
@@ -1326,6 +1499,43 @@ async function initApp() {
 	const isNewSession = urlParams.get("new") === "true";
 	const requestedAgent = urlParams.get("agent");
 	const requestedKind: AgentKind = requestedAgent && /^[a-z0-9]+$/.test(requestedAgent) ? requestedAgent : "browser";
+	let resumedKey = urlParams.get("resumed") ?? undefined;
+	let resumedFrom = urlParams.get("from") ?? undefined;
+	if (resumedKey !== undefined) {
+		// one-shot: a reload of the panel must not show the toast again
+		const clean = new URL(window.location.href);
+		clean.searchParams.delete("resumed");
+		clean.searchParams.delete("from");
+		window.history.replaceState({}, "", clean);
+	}
+
+	await refreshActiveTab();
+
+	// Panel opened (icon, shortcut, browser restart): the page Tom is on decides the session first.
+	if (
+		!sessionIdFromUrl &&
+		!isNewSession &&
+		storage.sessions &&
+		activeTab?.key &&
+		!suppressedAutoResumeKeys().has(activeTab.key)
+	) {
+		const bound = await resumableSessionFor(activeTab.key);
+		if (bound) {
+			const lockResponse = await port.sendMessage({
+				type: "acquireLock",
+				sessionId: bound.sessionId,
+				windowId: currentWindowId,
+			});
+			if (lockResponse.success) {
+				sessionIdFromUrl = bound.sessionId;
+				resumedKey = bound.key;
+				// Undo = what would have opened without the page match: the most recent session
+				const latest = await storage.sessions.getLatestSessionId();
+				resumedFrom = latest && latest !== bound.sessionId ? latest : undefined;
+				updateUrl(bound.sessionId);
+			}
+		}
+	}
 
 	// If no session in URL and not explicitly creating new, try to load the most recent session
 	if (!sessionIdFromUrl && !isNewSession && storage.sessions) {
@@ -1364,6 +1574,7 @@ async function initApp() {
 					const welcomeMessage = createWelcomeMessage(tutorials);
 					agent.appendMessage(welcomeMessage);
 				}
+				appReady = true;
 				renderApp();
 				return;
 			}
@@ -1390,7 +1601,16 @@ async function initApp() {
 				isPrimeSessionId(sessionIdFromUrl) ? sessionIdFromUrl : undefined,
 			);
 
+			await refreshCurrentAnchors();
+			appReady = true;
 			renderApp();
+			if (resumedKey !== undefined) {
+				const previous = resumedFrom;
+				Toast.show(`Resumed "${currentTitle || "session"}" for this page`, "success", 6000, {
+					label: "Undo",
+					onClick: () => (previous ? loadSession(previous) : newSession()),
+				});
+			}
 			return;
 		} else {
 			// Session doesn't exist, redirect to new session
@@ -1408,6 +1628,8 @@ async function initApp() {
 		agent.appendMessage(welcomeMessage);
 	}
 
+	currentAnchors = [];
+	appReady = true;
 	renderApp();
 
 	// If no API keys configured, show welcome dialog, open settings, then auto-select model
