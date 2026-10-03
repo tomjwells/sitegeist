@@ -171,7 +171,8 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 		await boot.waitForSelector("sessions-sidebar", { timeout: 30_000, state: "attached" });
 		const video = session("s-video", "Life of a Process Q&A", "2026-09-29T01:00:00.000Z");
 		const shop = session("s-shop", "Split keyboard research", "2026-09-29T02:00:00.000Z");
-		await seedSessions(boot, [video, shop]);
+		const prime = session("sg-abcdef123456", "Help me with this video.", "2026-09-27T22:25:00.000Z");
+		await seedSessions(boot, [video, shop, prime]);
 		const windowId = await boot.evaluate(async () => (await chrome.windows.getCurrent()).id);
 		assert.ok(typeof windowId === "number");
 		await boot.close();
@@ -281,6 +282,47 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 			),
 		);
 
+		// 4b. Full-text search over transcripts (sessions saved before the index existed get indexed lazily):
+		//     "keyboard" is only in the research session's transcript ("Sure: Split keyboard research"), and
+		//     pasting a session id finds that session even though the word never appears in its text.
+		const type = async (q: string) => {
+			await panel.evaluate((value) => {
+				const input = document.querySelector("sessions-sidebar input[type=text]") as HTMLInputElement | null;
+				if (!input) throw new Error("no search box");
+				input.value = value;
+				input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+			}, q);
+		};
+		await type("KEYBOARD");
+		await until(
+			() => panel.evaluate(() => document.querySelector("sessions-sidebar")?.textContent ?? ""),
+			(txt) =>
+				txt.includes("1 result") &&
+				txt.includes("Split keyboard research") &&
+				!txt.includes("Life of a Process Q&A"),
+			20_000,
+			"full-text result",
+		);
+		assert.equal(
+			await panel.evaluate(() => document.querySelector("sessions-sidebar mark")?.textContent),
+			"keyboard",
+		);
+		await type("sg-ABCDEF123456");
+		await until(
+			() => panel.evaluate(() => document.querySelector("sessions-sidebar")?.textContent ?? ""),
+			(txt) =>
+				txt.includes("1 result") && txt.includes("Help me with this video.") && txt.includes("id sg-abcdef123456"),
+			20_000,
+			"id result",
+		);
+		await type("/session_resume 01a0df45-9e92-7599-b7d2-9fbd9cfaa12e");
+		await until(
+			() => panel.evaluate(() => document.querySelector("sessions-sidebar")?.textContent ?? ""),
+			(txt) => txt.includes("No session with id 01a0df45-9e92-7599-b7d2-9fbd9cfaa12e"),
+			10_000,
+			"unknown id copy",
+		);
+		await type("");
 		// 5. Badge on the toolbar icon for the video tab (2 = nothing else bound there → "1")
 		const videoTabId = await worker.evaluate(
 			async (u) => (await chrome.tabs.query({ url: `${u}*` }))[0]?.id,

@@ -119,6 +119,9 @@ export class PrimeRemoteAgent extends Agent {
 	statusDetail = "";
 	/** The real remote model (provider intact) — `state.model` is the display view. */
 	remoteModel: Model<any> | undefined;
+	/** The harness's own session id (UUID) and jsonl path on the R730, as session-finder / Telegram show them. */
+	nativeSessionId: string | undefined;
+	nativeSessionFile: string | undefined;
 	onStatusChange: ((status: PrimeStatus) => void) | undefined;
 	/** Files the agent queued with telegram_attach; the side panel turns them into artifacts. */
 	onAttachments: ((items: PrimeAttachment[]) => Promise<void>) | undefined;
@@ -246,6 +249,8 @@ export class PrimeRemoteAgent extends Agent {
 		}
 		if (typeof state.thinkingLevel === "string") this.remote.thinkingLevel = state.thinkingLevel as ThinkingLevel;
 		if (typeof state.isStreaming === "boolean") this.remote.isStreaming = state.isStreaming;
+		if (typeof state.sessionId === "string" && state.sessionId) this.nativeSessionId = state.sessionId;
+		if (typeof state.sessionFile === "string" && state.sessionFile) this.nativeSessionFile = state.sessionFile;
 	}
 
 	private openSocket(offset: number): void {

@@ -448,6 +448,13 @@ const saveSession = async () => {
 		};
 
 		await storage.sessions.saveSession(currentSessionId, state, metadata, currentTitle);
+		// Full-text index for the sidebar search (whole transcript; prime sessions also by their R730 UUID/jsonl path)
+		const aliases = isPrimeAgent(agent)
+			? [agent.nativeSessionId, agent.nativeSessionFile].filter((v): v is string => typeof v === "string")
+			: [];
+		await storage.sessionSearch
+			.index(currentSessionId, currentTitle, state.messages, metadata.lastModified, aliases)
+			.catch((err) => console.warn("[search] index failed:", err));
 		refreshSessionsSidebar();
 	} catch (err) {
 		console.error("Failed to save session:", err);

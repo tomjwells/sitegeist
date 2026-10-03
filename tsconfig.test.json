@@ -13,6 +13,7 @@
 		"src/storage/prompt-drafts.ts",
 		"src/prime/attachments-text.ts",
 		"src/anchors/anchors.ts",
+		"src/sessions/session-search.ts",
 		"scripts/build.mjs"
 	]
 }

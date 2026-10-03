@@ -1,14 +1,22 @@
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import i18n from "@mariozechner/mini-lit/dist/i18n.js";
 import { icon } from "@mariozechner/mini-lit/dist/icons.js";
-import { getAppStorage, type SessionMetadata } from "@mariozechner/pi-web-ui";
-import Fuse from "fuse.js";
+import type { SessionMetadata } from "@mariozechner/pi-web-ui";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { FolderCog, Link2Off, Pin, PinOff, Plus, Trash2, X } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend } from "../anchors/anchors.js";
 import { SitegeistSessionListDialog } from "../dialogs/SessionListDialog.js";
 import { agentIdFromSessionId, isPrimeSessionId, MAIN_AGENT_ID } from "../prime/constants.js";
+import {
+	pastedSessionId,
+	type SearchEntry,
+	type SearchRecord,
+	type SnippetSegment,
+	searchSessions,
+	sessionsMatchingId,
+} from "../sessions/session-search.js";
+import { getSitegeistStorage } from "../storage/app-storage.js";
 import * as port from "../utils/port.js";
 import "../utils/i18n-extension.js";
 
@@ -35,6 +43,11 @@ export class SessionsSidebar extends LitElement {
 
 	@state() private sessions: SessionMetadata[] = [];
 	@state() private anchors: AnchorBinding[] = [];
+	/** Full-text index records by session id (loaded on open; older sessions indexed lazily). */
+	@state() private searchIndex = new Map<string, SearchRecord>();
+	/** Sessions still being indexed for search (count shown next to the search box). */
+	@state() private indexing = 0;
+	private indexingRun: Promise<void> | undefined;
 	private readonly anchorsStore = new AnchorsStore(chromeLocalBackend());
 	@state() private pinned: string[] = [];
 	@state() private locks: Record<string, number> = {};
@@ -60,19 +73,22 @@ export class SessionsSidebar extends LitElement {
 	}
 
 	async refresh(): Promise<void> {
-		const storage = getAppStorage();
+		const storage = getSitegeistStorage();
 		try {
-			const [sessions, pinned, lockResponse, win, anchors] = await Promise.all([
+			const [sessions, pinned, lockResponse, win, anchors, index] = await Promise.all([
 				storage.sessions.getAllMetadata(),
 				storage.settings.get<string[]>(SESSIONS_PINNED_SETTING),
 				port.sendMessage({ type: "getLockedSessions" }),
 				chrome.windows.getCurrent(),
 				this.anchorsStore.all(),
+				storage.sessionSearch.all(),
 			]);
 			this.sessions = sessions;
 			const ids = new Set(sessions.map((s) => s.id));
 			this.pinned = (pinned ?? []).filter((id) => ids.has(id));
 			this.anchors = anchors.filter((b) => ids.has(b.sessionId));
+			this.searchIndex = new Map(index.map((r) => [r.id, r]));
+			void this.ensureIndexed();
 			this.locks = lockResponse.locks || {};
 			this.windowId = win.id;
 		} catch (err) {
@@ -80,9 +96,49 @@ export class SessionsSidebar extends LitElement {
 		}
 	}
 
+	/**
+	 * Index sessions the search store does not have yet (saved before the index existed) or has a stale
+	 * copy of. One at a time, newest first, so the panel stays responsive; results appear as they land.
+	 */
+	private ensureIndexed(): Promise<void> {
+		if (this.indexingRun) return this.indexingRun;
+		const storage = getSitegeistStorage();
+		const stale = this.sessions.filter((s) => {
+			const r = this.searchIndex.get(s.id);
+			return !r || r.lastModified !== s.lastModified || r.messageCount !== s.messageCount;
+		});
+		if (stale.length === 0) return Promise.resolve();
+		this.indexing = stale.length;
+		this.indexingRun = (async () => {
+			for (const meta of stale) {
+				try {
+					const data = await storage.sessions.loadSession(meta.id);
+					if (data) {
+						const prev = this.searchIndex.get(meta.id);
+						const record = await storage.sessionSearch.index(
+							meta.id,
+							meta.title,
+							data.messages,
+							meta.lastModified,
+							prev?.aliases ?? [],
+						);
+						this.searchIndex = new Map(this.searchIndex).set(meta.id, record);
+					}
+				} catch (err) {
+					console.warn("[SessionsSidebar] indexing failed for", meta.id, err);
+				}
+				this.indexing = Math.max(0, this.indexing - 1);
+			}
+		})().finally(() => {
+			this.indexing = 0;
+			this.indexingRun = undefined;
+		});
+		return this.indexingRun;
+	}
+
 	private async savePinned(next: string[]) {
 		this.pinned = next;
-		await getAppStorage().settings.set(SESSIONS_PINNED_SETTING, next);
+		await getSitegeistStorage().settings.set(SESSIONS_PINNED_SETTING, next);
 	}
 
 	private togglePin(id: string, e: Event) {
@@ -102,7 +158,9 @@ export class SessionsSidebar extends LitElement {
 	private async deleteSession(id: string, e: Event) {
 		e.stopPropagation();
 		if (!confirm(i18n("Delete this session?"))) return;
-		await getAppStorage().sessions.deleteSession(id);
+		const storage = getSitegeistStorage();
+		await storage.sessions.deleteSession(id);
+		await storage.sessionSearch.remove(id).catch(() => undefined);
 		await this.refresh();
 		this.onDeleted(id);
 	}
@@ -150,21 +208,75 @@ export class SessionsSidebar extends LitElement {
 		return ["all", "browser", ...agents];
 	}
 
+	/** Search results computed in render (plain field, not @state: setting state during render would loop). */
+	private results: Map<string, { snippet: SnippetSegment[]; hits: number; byId: boolean }> | undefined;
+
+	/**
+	 * No query → the pool in recency order. A pasted id (sg-…, UUID, finder line, jsonl path) → sessions with
+	 * that id or alias. Otherwise exact, case-insensitive full-text search over the whole transcript + bound
+	 * pages (every term must occur), ranked by hits; sessions not yet indexed fall back to title + preview.
+	 */
 	private filtered(): SessionMetadata[] {
 		const q = this.query.trim();
 		const pool =
 			this.agentFilter === "all"
 				? this.sessions
 				: this.sessions.filter((s) => this.agentOf(s.id) === this.agentFilter);
-		if (!q) return pool;
-		return new Fuse(pool, {
-			keys: ["title", "preview"],
-			threshold: 0.4,
-			ignoreLocation: true,
-			minMatchCharLength: 2,
-		})
-			.search(q)
-			.map((r) => r.item);
+		if (!q) {
+			this.results = undefined;
+			return pool;
+		}
+		const byId = new Map(pool.map((s) => [s.id, s]));
+		const pasted = pastedSessionId(q);
+		if (pasted) {
+			const ids = sessionsMatchingId(
+				pasted,
+				pool.map((s) => ({ id: s.id, aliases: this.searchIndex.get(s.id)?.aliases })),
+			);
+			this.results = new Map(
+				ids.map((id) => [id, { snippet: [{ text: `id ${id}`, hit: false }], hits: 1, byId: true }]),
+			);
+			return ids.map((id) => byId.get(id)).filter((s): s is SessionMetadata => s !== undefined);
+		}
+		const pagesBySession = new Map<string, string[]>();
+		for (const b of this.anchors) {
+			const list = pagesBySession.get(b.sessionId) ?? [];
+			list.push(`${b.pageTitle} ${b.url}`);
+			pagesBySession.set(b.sessionId, list);
+		}
+		const entries: SearchEntry[] = pool.map((s) => {
+			const record = this.searchIndex.get(s.id);
+			return {
+				id: s.id,
+				title: s.title,
+				text: record?.text ?? s.preview,
+				extra: (pagesBySession.get(s.id) ?? []).join("\n"),
+				lastModified: s.lastModified,
+			};
+		});
+		const hits = searchSessions(q, entries);
+		this.results = new Map(hits.map((h) => [h.id, { snippet: h.snippet, hits: h.hits, byId: false }]));
+		return hits.map((h) => byId.get(h.id)).filter((s): s is SessionMetadata => s !== undefined);
+	}
+
+	private noMatchText(): string {
+		const q = this.query.trim();
+		if (!q) return i18n("No sessions yet");
+		const pasted = pastedSessionId(q);
+		if (pasted)
+			return `No session with id ${pasted} in this browser. Prime sessions are known here by their sg-… id (shown in session-finder next to the UUID); the UUID itself is only known once the panel has opened that session.`;
+		if (this.indexing > 0)
+			return `No match yet — still indexing ${this.indexing} session${this.indexing === 1 ? "" : "s"}…`;
+		return "No session contains every word (exact, case-insensitive match over the whole transcript).";
+	}
+
+	private snippet(id: string): TemplateResult | "" {
+		const r = this.results?.get(id);
+		if (!r) return "";
+		return html`<div class="text-[11px] text-muted-foreground/90 truncate" title=${r.snippet.map((s) => s.text).join("")}>
+			${r.snippet.map((s) => (s.hit ? html`<mark class="bg-yellow-300/40 text-foreground rounded-sm px-0.5">${s.text}</mark>` : s.text))}
+			${!r.byId && r.hits > 1 ? html` <span class="opacity-70">×${r.hits}</span>` : ""}
+		</div>`;
 	}
 
 	private row(session: SessionMetadata, pinnedIndex: number | undefined, binding?: AnchorBinding): TemplateResult {
@@ -211,6 +323,7 @@ export class SessionsSidebar extends LitElement {
 						${current ? html` · <span class="text-primary">${i18n("Current")}</span>` : ""}
 						${locked ? html` · <span class="text-destructive">${i18n("Locked")}</span>` : ""}
 					</div>
+					${this.snippet(session.id)}
 				</div>
 				<div class="flex gap-0.5 shrink-0 ${isPinned ? "" : "opacity-0 group-hover:opacity-100"}">
 					${
@@ -274,13 +387,18 @@ export class SessionsSidebar extends LitElement {
 					<div class="px-2 py-1.5">
 						<input
 							type="text"
-							placeholder=${i18n("Search sessions...")}
+							placeholder="Search transcripts, or paste a session id…"
 							.value=${this.query}
 							@input=${(e: InputEvent) => {
 								this.query = (e.target as HTMLInputElement).value;
 							}}
 							class="w-full px-2 py-1 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
 						/>
+						${
+							this.indexing > 0
+								? html`<div class="pt-1 text-[10px] text-muted-foreground">Indexing ${this.indexing} session${this.indexing === 1 ? "" : "s"} for search…</div>`
+								: ""
+						}
 						<div class="flex gap-1 pt-1.5">
 							${this.filterOptions().map(
 								(f) => html`<button
@@ -309,10 +427,10 @@ export class SessionsSidebar extends LitElement {
 								`
 								: ""
 						}
-						<div class="px-2 pt-2 pb-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">${i18n("Recent")}</div>
+						<div class="px-2 pt-2 pb-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">${this.query.trim() ? `${filtered.length} result${filtered.length === 1 ? "" : "s"}` : i18n("Recent")}</div>
 						${
 							recent.length === 0 && pinnedRows.length === 0
-								? html`<div class="px-2 py-4 text-center text-xs text-muted-foreground">${this.query ? i18n("No matching sessions") : i18n("No sessions yet")}</div>`
+								? html`<div class="px-2 py-4 text-center text-xs text-muted-foreground">${this.noMatchText()}</div>`
 								: recent.map((s) => this.row(s, undefined))
 						}
 					</div>

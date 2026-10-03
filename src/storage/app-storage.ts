@@ -8,6 +8,7 @@ import {
 } from "@mariozechner/pi-web-ui";
 import { CostStore } from "./stores/cost-store.js";
 import { SitegeistProviderKeysStore } from "./stores/provider-keys-store.js";
+import { SessionSearchStore } from "./stores/session-search-store.js";
 import { SitegeistSessionsStore } from "./stores/sessions-store.js";
 import { SkillsStore } from "./stores/skills-store.js";
 
@@ -17,6 +18,8 @@ import { SkillsStore } from "./stores/skills-store.js";
 export class SitegeistAppStorage extends BaseAppStorage {
 	readonly skills: SkillsStore;
 	readonly costs: CostStore;
+	/** Full-text index for the sessions sidebar search. */
+	readonly sessionSearch: SessionSearchStore;
 	/** Narrowed type of the base `providerKeys` so callers can pass `{ sync: false }`. */
 	declare readonly providerKeys: SitegeistProviderKeysStore;
 
@@ -28,6 +31,7 @@ export class SitegeistAppStorage extends BaseAppStorage {
 		const customProviders = new CustomProvidersStore();
 		const skills = new SkillsStore();
 		const costs = new CostStore();
+		const sessionSearch = new SessionSearchStore();
 
 		// 2. Gather configs from all stores
 		const configs = [
@@ -38,12 +42,13 @@ export class SitegeistAppStorage extends BaseAppStorage {
 			sessions.getConfig(),
 			skills.getConfig(),
 			costs.getConfig(),
+			sessionSearch.getConfig(),
 		];
 
 		// 3. Create backend with all configs
 		const backend = new IndexedDBStorageBackend({
 			dbName: "sitegeist-storage",
-			version: 3, // Increment version to add custom-providers store
+			version: 4, // v3 custom-providers; v4 sessions-search (full-text index, 2026-10-03)
 			stores: configs,
 		});
 
@@ -54,6 +59,7 @@ export class SitegeistAppStorage extends BaseAppStorage {
 		sessions.setBackend(backend);
 		skills.setBackend(backend);
 		costs.setBackend(backend);
+		sessionSearch.setBackend(backend);
 
 		// 5. Pass base stores to parent
 		super(settings, providerKeys, sessions, customProviders, backend);
@@ -61,6 +67,7 @@ export class SitegeistAppStorage extends BaseAppStorage {
 		// 6. Store references to sitegeist-specific stores
 		this.skills = skills;
 		this.costs = costs;
+		this.sessionSearch = sessionSearch;
 	}
 }
 

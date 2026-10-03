@@ -2,10 +2,11 @@ import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { DialogContent, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
 import i18n from "@mariozechner/mini-lit/dist/i18n.js";
-import { formatUsage, getAppStorage, type SessionData, type SessionMetadata } from "@mariozechner/pi-web-ui";
+import { formatUsage, type SessionData, type SessionMetadata } from "@mariozechner/pi-web-ui";
 import Fuse from "fuse.js";
 import { html } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { getSitegeistStorage } from "../storage/app-storage.js";
 import * as port from "../utils/port.js";
 
 type ExportedSession = {
@@ -65,7 +66,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 			this.currentWindowId = currentWindow.id;
 
 			// Load sessions (already sorted by lastModified index)
-			const storage = getAppStorage();
+			const storage = getSitegeistStorage();
 			this.sessions = await storage.sessions.getAllMetadata();
 
 			// Get lock information from background via port
@@ -88,10 +89,11 @@ export class SitegeistSessionListDialog extends DialogBase {
 		}
 
 		try {
-			const storage = getAppStorage();
+			const storage = getSitegeistStorage();
 			if (!storage.sessions) return;
 
 			await storage.sessions.deleteSession(sessionId);
+			await storage.sessionSearch.remove(sessionId).catch(() => undefined);
 			await this.loadSessionsAndLocks();
 
 			// Track deleted session
@@ -150,7 +152,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 
 	private async handleExport(sessionId?: string) {
 		try {
-			const storage = getAppStorage();
+			const storage = getSitegeistStorage();
 			if (!storage.sessions) return;
 
 			const exported: ExportedSession[] = [];
@@ -233,11 +235,12 @@ export class SitegeistSessionListDialog extends DialogBase {
 		if (!confirmed) return;
 
 		try {
-			const storage = getAppStorage();
+			const storage = getSitegeistStorage();
 			if (!storage.sessions) return;
 
 			for (const session of this.sessions) {
 				await storage.sessions.deleteSession(session.id);
+				await storage.sessionSearch.remove(session.id).catch(() => undefined);
 				this.deletedSessions.add(session.id);
 			}
 
@@ -269,11 +272,12 @@ export class SitegeistSessionListDialog extends DialogBase {
 		if (!confirmed) return;
 
 		try {
-			const storage = getAppStorage();
+			const storage = getSitegeistStorage();
 			if (!storage.sessions) return;
 
 			for (const session of oldSessions) {
 				await storage.sessions.deleteSession(session.id);
+				await storage.sessionSearch.remove(session.id).catch(() => undefined);
 				this.deletedSessions.add(session.id);
 			}
 
@@ -305,7 +309,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 					return;
 				}
 
-				const storage = getAppStorage();
+				const storage = getSitegeistStorage();
 				if (!storage.sessions) return;
 
 				// Check for duplicates

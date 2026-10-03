@@ -16,6 +16,7 @@
 		"test:drafts": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prompt-drafts.test.ts",
 		"test:attachments": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-attachments.test.ts",
 		"test:anchors": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/anchors.test.ts",
+		"test:search": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/session-search.test.ts",
 		"test:anchors:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/anchors-extension.test.ts"
 	},
 	"dependencies": {
