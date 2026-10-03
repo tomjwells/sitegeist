@@ -8,6 +8,7 @@ import {
 	type SearchEntry,
 	searchSessions,
 	sessionsMatchingId,
+	sgIdForNative,
 	snippetAround,
 } from "../src/sessions/session-search.ts";
 
@@ -208,4 +209,27 @@ test("pasted ids: sg ids, UUIDs, session-finder lines and jsonl paths resolve to
 		},
 	];
 	assert.deepEqual(sessionsMatchingId("01a0df45-9e92-7599-b7d2-9fbd9cfaa12e", withAliases), ["sg-95134e79fa34-p"]);
+});
+
+test("quoted phrases and native-id lookup", () => {
+	assert.deepEqual(queryTerms('"corne v4" vial'), ["corne v4", "vial"]);
+	assert.deepEqual(queryTerms('"Corne   V4"'), ["corne v4"]);
+	assert.deepEqual(queryTerms('"unterminated phrase'), ["unterminated", "phrase"]);
+	const entries: SearchEntry[] = [
+		{ id: "a", title: "t", text: "The Corne V4 is foostan's newer revision", lastModified: "2026-10-01T00:00:00Z" },
+		{ id: "b", title: "t", text: "corne keyboard, v4 of something else", lastModified: "2026-10-02T00:00:00Z" },
+	];
+	assert.deepEqual(
+		searchSessions('"corne v4"', entries).map((h) => h.id),
+		["a"],
+	);
+	assert.deepEqual(
+		searchSessions("corne v4", entries)
+			.map((h) => h.id)
+			.sort(),
+		["a", "b"],
+	);
+	const map = new Map([["sg-95134e79fa34", ["01a0df45-9e92-7599-b7d2-9fbd9cfaa12e"]]]);
+	assert.equal(sgIdForNative("01A0DF45-9E92-7599-B7D2-9FBD9CFAA12E", map), "sg-95134e79fa34");
+	assert.equal(sgIdForNative("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", map), undefined);
 });

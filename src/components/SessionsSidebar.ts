@@ -8,6 +8,7 @@ import { FolderCog, Link2Off, Pin, PinOff, Plus, Trash2, X } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend } from "../anchors/anchors.js";
 import { SitegeistSessionListDialog } from "../dialogs/SessionListDialog.js";
 import { agentIdFromSessionId, isPrimeSessionId, MAIN_AGENT_ID } from "../prime/constants.js";
+import { primeNativeIds } from "../prime/prime-client.js";
 import {
 	pastedSessionId,
 	type SearchEntry,
@@ -15,6 +16,7 @@ import {
 	type SnippetSegment,
 	searchSessions,
 	sessionsMatchingId,
+	sgIdForNative,
 } from "../sessions/session-search.js";
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import * as port from "../utils/port.js";
@@ -48,6 +50,10 @@ export class SessionsSidebar extends LitElement {
 	/** Sessions still being indexed for search (count shown next to the search box). */
 	@state() private indexing = 0;
 	private indexingRun: Promise<void> | undefined;
+	/** main-pi sg-… session → its harness UUIDs on the R730 (relay /native-ids), so pasted UUIDs resolve. */
+	@state() private nativeIds = new Map<string, string[]>();
+	/** false = not fetched yet or relay unreachable (then a UUID miss is not proof it is a Telegram session). */
+	private nativeIdsLoaded = false;
 	private readonly anchorsStore = new AnchorsStore(chromeLocalBackend());
 	@state() private pinned: string[] = [];
 	@state() private locks: Record<string, number> = {};
@@ -89,6 +95,7 @@ export class SessionsSidebar extends LitElement {
 			this.anchors = anchors.filter((b) => ids.has(b.sessionId));
 			this.searchIndex = new Map(index.map((r) => [r.id, r]));
 			void this.ensureIndexed();
+			void this.loadNativeIds();
 			this.locks = lockResponse.locks || {};
 			this.windowId = win.id;
 		} catch (err) {
@@ -134,6 +141,19 @@ export class SessionsSidebar extends LitElement {
 			this.indexingRun = undefined;
 		});
 		return this.indexingRun;
+	}
+
+	private async loadNativeIds(): Promise<void> {
+		try {
+			this.nativeIds = await primeNativeIds(MAIN_AGENT_ID);
+			this.nativeIdsLoaded = true;
+		} catch (err) {
+			console.warn("[SessionsSidebar] native ids unavailable (relay unreachable?)", err);
+		}
+	}
+
+	private aliasesOf(id: string): string[] {
+		return [...(this.searchIndex.get(id)?.aliases ?? []), ...(this.nativeIds.get(id) ?? [])];
 	}
 
 	private async savePinned(next: string[]) {
@@ -231,7 +251,7 @@ export class SessionsSidebar extends LitElement {
 		if (pasted) {
 			const ids = sessionsMatchingId(
 				pasted,
-				pool.map((s) => ({ id: s.id, aliases: this.searchIndex.get(s.id)?.aliases })),
+				pool.map((s) => ({ id: s.id, aliases: this.aliasesOf(s.id) })),
 			);
 			this.results = new Map(
 				ids.map((id) => [id, { snippet: [{ text: `id ${id}`, hit: false }], hits: 1, byId: true }]),
@@ -263,11 +283,17 @@ export class SessionsSidebar extends LitElement {
 		const q = this.query.trim();
 		if (!q) return i18n("No sessions yet");
 		const pasted = pastedSessionId(q);
-		if (pasted)
-			return `No session with id ${pasted} in this browser. Prime sessions are known here by their sg-… id (shown in session-finder next to the UUID); the UUID itself is only known once the panel has opened that session.`;
+		if (pasted) {
+			const sg = sgIdForNative(pasted, this.nativeIds);
+			if (sg)
+				return `${pasted} is sitegeist session ${sg}, but that session is not in this browser's list (it was started from another browser or profile).`;
+			if (/^[0-9a-f]{8}-/.test(pasted) && this.nativeIdsLoaded)
+				return `${pasted} is not a main-pi sitegeist session — it is a Telegram or CLI session (open it with /session_resume in Telegram). For a coach's sitegeist session, paste its sg-<coach>-… id.`;
+			return `No session with id ${pasted} in this browser.`;
+		}
 		if (this.indexing > 0)
 			return `No match yet — still indexing ${this.indexing} session${this.indexing === 1 ? "" : "s"}…`;
-		return "No session contains every word (exact, case-insensitive match over the whole transcript).";
+		return 'No session contains every word (exact, case-insensitive, whole transcript; use "quotes" for a phrase).';
 	}
 
 	private snippet(id: string): TemplateResult | "" {

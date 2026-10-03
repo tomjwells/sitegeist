@@ -39,13 +39,19 @@ export async function primeAgents(): Promise<PrimeAgentInfo[]> {
 	);
 }
 
-async function request(agentId: string, method: "GET" | "POST", path: string, body?: Json): Promise<Json> {
+async function request(
+	agentId: string,
+	method: "GET" | "POST",
+	path: string,
+	body?: Json,
+	timeoutMs = TIMEOUT_MS,
+): Promise<Json> {
 	const base = await primeBaseUrl(agentId);
 	const headers: Record<string, string> = {};
 	const token = await proxyToken();
 	if (token) headers.authorization = `Bearer ${token}`;
 	if (body) headers["content-type"] = "application/json";
-	const init: RequestInit = { method, headers, signal: AbortSignal.timeout(TIMEOUT_MS) };
+	const init: RequestInit = { method, headers, signal: AbortSignal.timeout(timeoutMs) };
 	if (body) init.body = JSON.stringify(body);
 	const res = await fetch(`${base}${path}`, init);
 	let parsed: unknown;
@@ -140,6 +146,24 @@ export async function primeUploadFile(
 		filename: typeof r.filename === "string" ? r.filename : file.filename,
 		mime: typeof r.mime === "string" ? r.mime : file.mime,
 	};
+}
+
+/**
+ * sg-… panel session id → the harness's own session UUIDs on the R730 (what session-finder and Telegram's
+ * /session_resume show). Main-pi only; worker agents answer with an empty map.
+ */
+export async function primeNativeIds(agentId: string): Promise<Map<string, string[]>> {
+	const r = await request(agentId, "GET", "/native-ids", undefined, 5_000);
+	const out = new Map<string, string[]>();
+	if (!isJson(r.ids)) return out;
+	for (const [sg, list] of Object.entries(r.ids)) {
+		if (Array.isArray(list))
+			out.set(
+				sg,
+				list.filter((v): v is string => typeof v === "string"),
+			);
+	}
+	return out;
 }
 
 export async function primeRpc(agentId: string, sessionId: string, command: Json): Promise<Json> {

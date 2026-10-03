@@ -100,15 +100,25 @@ export function buildSearchText(messages: AgentMessage[], title = ""): string {
 	return parts.join("\n");
 }
 
+/** Words, with "quoted phrases" kept together (as session-finder does): `"corne v4" vial` → ["corne v4", "vial"]. */
 export function queryTerms(query: string): string[] {
-	return Array.from(
-		new Set(
-			query
-				.toLowerCase()
-				.split(/\s+/)
-				.filter((t) => t.length > 0),
-		),
-	);
+	const terms: string[] = [];
+	const re = /"([^"]*)"|(\S+)/g;
+	for (let m = re.exec(query.toLowerCase()); m !== null; m = re.exec(query.toLowerCase())) {
+		const t = (m[1] ?? m[2] ?? "")
+			.replace(/\s+/g, " ")
+			.trim()
+			.replace(/^"+|"+$/g, "");
+		if (t) terms.push(t);
+	}
+	return Array.from(new Set(terms));
+}
+
+/** Which sitegeist session a pasted native id belongs to, given sg-id → native ids (relay /native-ids). */
+export function sgIdForNative(nativeId: string, nativeIds: ReadonlyMap<string, string[]>): string | undefined {
+	const needle = nativeId.toLowerCase();
+	for (const [sg, ids] of nativeIds) if (ids.some((id) => id.toLowerCase() === needle)) return sg;
+	return undefined;
 }
 
 function countOccurrences(haystack: string, needle: string, cap = 1000): number {

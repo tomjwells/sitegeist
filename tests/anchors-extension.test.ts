@@ -18,6 +18,8 @@ import { type BrowserContext, chromium, type Page, type Worker } from "playwrigh
 const root = fileURLToPath(new URL("../", import.meta.url));
 const dist = join(root, "dist-chrome");
 const chromePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const NATIVE_UUID = "01a0df45-9e92-7599-b7d2-9fbd9cfaa12e";
+const ELSEWHERE_UUID = "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d";
 
 const model = {
 	id: "claude-haiku-4-5",
@@ -75,6 +77,26 @@ async function dismissPermissionDialog(page: Page): Promise<void> {
 	await page.waitForSelector("userscripts-permission-dialog", { timeout: 15_000, state: "attached" });
 	await page.evaluate(() =>
 		document.querySelector("userscripts-permission-dialog")?.dispatchEvent(new Event("close")),
+	);
+}
+
+async function seedSetting(page: Page, key: string, value: string): Promise<void> {
+	await page.evaluate(
+		async ({ key, value }) => {
+			const db = await new Promise<IDBDatabase>((resolve, reject) => {
+				const req = indexedDB.open("sitegeist-storage");
+				req.onsuccess = () => resolve(req.result);
+				req.onerror = () => reject(req.error);
+			});
+			await new Promise<void>((resolve, reject) => {
+				const tx = db.transaction(["settings"], "readwrite");
+				tx.objectStore("settings").put(value, key);
+				tx.oncomplete = () => resolve();
+				tx.onerror = () => reject(tx.error);
+			});
+			db.close();
+		},
+		{ key, value },
 	);
 }
 
@@ -143,6 +165,23 @@ async function openPanelTab(
 
 test("built extension: sessions resume from the page they belong to", { timeout: 120_000 }, async () => {
 	const server = createServer((req, res) => {
+		if (req.url?.startsWith("/sitegeist/")) {
+			// stand-in for the cors-proxy relay (Sync URL points here): main-pi's sg-… → harness UUIDs
+			res.setHeader("content-type", "application/json");
+			if (req.url === "/sitegeist/agents/prime/native-ids") {
+				res.end(
+					JSON.stringify({
+						ok: true,
+						agent: "prime",
+						ids: { "sg-abcdef123456": [NATIVE_UUID], "sg-elsewhere00001": [ELSEWHERE_UUID] },
+					}),
+				);
+				return;
+			}
+			res.statusCode = 404;
+			res.end(JSON.stringify({ error: "not found" }));
+			return;
+		}
 		res.setHeader("content-type", "text/html");
 		res.end(
 			`<title>${req.url?.startsWith("/video") ? "The Life of a Process" : "Corne kit"}</title><h1>${req.url}</h1>`,
@@ -173,6 +212,7 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 		const shop = session("s-shop", "Split keyboard research", "2026-09-29T02:00:00.000Z");
 		const prime = session("sg-abcdef123456", "Help me with this video.", "2026-09-27T22:25:00.000Z");
 		await seedSessions(boot, [video, shop, prime]);
+		await seedSetting(boot, "sync.url", `${base}/sitegeist`);
 		const windowId = await boot.evaluate(async () => (await chrome.windows.getCurrent()).id);
 		assert.ok(typeof windowId === "number");
 		await boot.close();
@@ -315,12 +355,27 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 			20_000,
 			"id result",
 		);
-		await type("/session_resume 01a0df45-9e92-7599-b7d2-9fbd9cfaa12e");
+		// A harness UUID copied from session-finder / Telegram resolves through the relay's /native-ids map
+		await type(`/session_resume ${NATIVE_UUID}`);
 		await until(
 			() => panel.evaluate(() => document.querySelector("sessions-sidebar")?.textContent ?? ""),
-			(txt) => txt.includes("No session with id 01a0df45-9e92-7599-b7d2-9fbd9cfaa12e"),
+			(txt) => txt.includes("1 result") && txt.includes("Help me with this video."),
+			20_000,
+			"UUID resolves to the sg- session",
+		);
+		await type(ELSEWHERE_UUID);
+		await until(
+			() => panel.evaluate(() => document.querySelector("sessions-sidebar")?.textContent ?? ""),
+			(txt) => txt.includes("is sitegeist session sg-elsewhere00001, but that session is not in this browser"),
 			10_000,
-			"unknown id copy",
+			"UUID of a session from another browser",
+		);
+		await type("11111111-2222-4333-8444-555555555555");
+		await until(
+			() => panel.evaluate(() => document.querySelector("sessions-sidebar")?.textContent ?? ""),
+			(txt) => txt.includes("is not a main-pi sitegeist session — it is a Telegram or CLI session"),
+			10_000,
+			"Telegram/CLI UUID copy",
 		);
 		await type("");
 		// 5. Badge on the toolbar icon for the video tab (2 = nothing else bound there → "1")
