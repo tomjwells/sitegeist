@@ -25,6 +25,7 @@ import {
 import { html, render } from "lit";
 import { History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
+import { setFooterSession } from "./components/footer-info.js";
 import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
 import { Toast } from "./components/Toast.js";
 import { AboutTab } from "./dialogs/AboutTab.js";
@@ -196,6 +197,8 @@ const refreshAgentOptions = async (): Promise<void> => {
 const isPrimeAgent = (a: Agent | undefined): a is PrimeRemoteAgent => a instanceof PrimeRemoteAgent;
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
+/** New main-pi sessions from the panel run this unless Tom picks another model (matches the router's interactive default). */
+const PRIME_INTERACTIVE_DEFAULT_MODEL = "claude-opus-5-5";
 /** Set once initApp has loaded a session/agent; tab events before that must not navigate the panel. */
 let appReady = false;
 
@@ -661,8 +664,13 @@ const createAgent = async (
 	if (kind !== "browser") {
 		// Brain on the R730 (a prime bridge session: main-pi or a worker sidecar), hands in this browser. The bridge reports the real
 		// model/thinking on create/hydrate; the placeholder only has to be a valid Model until then.
+		// A new main-pi session runs what the picker shows: the interactive default (claude-opus-5-5, the same default
+		// the Telegram router gives new chat topics) unless Tom picks another model. Without this the bridge's
+		// automation default (claude-sonnet-5-5) silently replaced whatever the label said (2026-10-10).
+		const interactiveDefault = getModels("anthropic").find((m) => m.id === PRIME_INTERACTIVE_DEFAULT_MODEL);
 		const placeholder =
 			initialState?.model ??
+			interactiveDefault ??
 			getModels("anthropic").find((m) => m.id === "claude-opus-4-8") ??
 			getModel("anthropic", "claude-sonnet-4-6") ??
 			defaultModel;
@@ -672,6 +680,7 @@ const createAgent = async (
 			agentLabel: agentLabelFor(kind),
 			sessionId: primeSessionId,
 			model: placeholder,
+			applyInitialModel: kind === MAIN_AGENT_ID && !primeSessionId && placeholder === interactiveDefault,
 			thinkingLevel: initialState?.thinkingLevel ?? "high",
 			messages: initialState?.messages ?? [],
 			windowId: currentWindowId,
@@ -706,6 +715,10 @@ const createAgent = async (
 			},
 		});
 		prime.onStatusChange = () => renderApp();
+		prime.onNotice = (message: string) => {
+			Toast.error(message, 8000);
+			renderApp();
+		};
 		prime.onAttachments = async (items: PrimeAttachment[]) => {
 			// telegram_attach in a browser session: the artifacts panel is the destination. Text-like files
 			// are decoded, binaries stay base64 (what ImageArtifact/PdfArtifact/GenericArtifact expect).
@@ -1031,6 +1044,9 @@ const switchAgentKind = async (kind: AgentKind) => {
 // RENDER
 // ============================================================================
 const renderApp = () => {
+	// bottom-left footer: the id Tom can paste into session search / quote in a bug report
+	setFooterSession(currentSessionId ?? (isPrimeAgent(agent) ? agent.primeSessionId : undefined));
+	chatPanel?.agentInterface?.requestUpdate();
 	const appHtml = html`
 		<div class="w-full h-full flex flex-col bg-background text-foreground overflow-hidden">
 			<!-- Header -->

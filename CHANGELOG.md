@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- prime-agent sessions: a model or thinking level chosen before the first message is now applied to the new bridge session before the prompt is sent. Before, the session was created on the first send with the bridge's automation default (claude-sonnet-5-5 / high), the choice was dropped, and the label silently flipped. New main-pi sessions now default to claude-opus-5-5 (the router's interactive default) and actually run it. After applying, the panel reads the running model/level back; if the bridge refused or clamped something, a toast says so. Test: `npm run test:prime-model:extension`.
+
 ### Added
+
+- Footer, bottom left under the prompt box: `v<version> · <build sha> · <session id>` in light grey, so the build and session are visible and appear in screenshots. Click the id to copy it; it pastes straight into the sidebar search.
 
 - Sidebar search: a prime session's harness UUID (what session-finder and Telegram's `/session_resume` show) finds the sitegeist session right away — the sidebar loads the relay's `GET …/native-ids` map (main-pi `sg-…` → UUIDs) on open, instead of only knowing a UUID after the panel had opened that session. A UUID that belongs to another browser's session, or to a Telegram/CLI session, gets a specific explanation. `"Quoted phrases"` match as one term (like session-finder).
 

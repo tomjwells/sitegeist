@@ -119,6 +119,16 @@ export class PrimeRemoteAgent extends Agent {
 	statusDetail = "";
 	/** The real remote model (provider intact) — `state.model` is the display view. */
 	remoteModel: Model<any> | undefined;
+	/** Shown to Tom when a model/thinking choice could not be applied (sidepanel wires this to a toast). */
+	onNotice: ((message: string) => void) | undefined;
+	/**
+	 * Model / thinking level chosen before the bridge session existed. The session is created on the first
+	 * send with the bridge's default (claude-sonnet-5-5 / high since 2026-10-03), so these are applied right
+	 * after it is created and before the first prompt (Tom, 2026-10-10: picked opus-5-5 + XHigh, ran on
+	 * sonnet-5-5 / high, the label silently flipped).
+	 */
+	private chosenModel: Model<any> | undefined;
+	private chosenThinking: ThinkingLevel | undefined;
 	/** The harness's own session id (UUID) and jsonl path on the R730, as session-finder / Telegram show them. */
 	nativeSessionId: string | undefined;
 	nativeSessionFile: string | undefined;
@@ -145,6 +155,8 @@ export class PrimeRemoteAgent extends Agent {
 		windowId: number;
 		/** Short description of the active tab, prefixed to each prompt so prime knows where Tom is. */
 		tabContext: () => Promise<string>;
+		/** Apply `model` to the new bridge session even if Tom does not pick one (main-pi's interactive default). */
+		applyInitialModel?: boolean;
 	}) {
 		super({
 			initialState: {
@@ -164,6 +176,7 @@ export class PrimeRemoteAgent extends Agent {
 		this.windowId = opts.windowId;
 		this.tabContext = opts.tabContext;
 		this.remoteModel = opts.model;
+		if (opts.applyInitialModel && !opts.sessionId) this.chosenModel = opts.model;
 		this.remote = {
 			systemPrompt: "",
 			model: primeModelView(opts.model),
@@ -226,9 +239,10 @@ export class PrimeRemoteAgent extends Agent {
 		if (this.primeSessionId) return this.primeSessionId;
 		if (!this.createInFlight) {
 			this.setStatus("creating");
-			this.createInFlight = primeCreateSession(this.agentId, name).then(({ sessionId, state }) => {
+			this.createInFlight = primeCreateSession(this.agentId, name).then(async ({ sessionId, state }) => {
 				this.primeSessionId = sessionId;
 				this.applyRemoteState(state);
+				await this.applyChosenSettings(sessionId);
 				this.openSocket(0);
 				return sessionId;
 			});
@@ -239,6 +253,47 @@ export class PrimeRemoteAgent extends Agent {
 			this.createInFlight = undefined;
 			this.setStatus("error", err instanceof Error ? err.message : String(err));
 			throw err;
+		}
+	}
+
+	/**
+	 * Push the model / thinking level chosen before the session existed, then read back what the session really
+	 * runs (a model switch can clamp the thinking level), so the labels never claim something that is not running.
+	 */
+	private async applyChosenSettings(sessionId: string): Promise<void> {
+		const model = this.chosenModel;
+		const level = this.chosenThinking;
+		this.chosenModel = undefined;
+		this.chosenThinking = undefined;
+		if (!model && !level) return;
+		const failures: string[] = [];
+		if (model) {
+			try {
+				await primeRpc(this.agentId, sessionId, { type: "set_model", provider: model.provider, modelId: model.id });
+			} catch (err) {
+				failures.push(`model ${model.id}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+		if (level) {
+			try {
+				await primeRpc(this.agentId, sessionId, { type: "set_thinking_level", level });
+			} catch (err) {
+				failures.push(`thinking ${level}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+		try {
+			this.applyRemoteState(await primeRpc(this.agentId, sessionId, { type: "get_state" }));
+		} catch (err) {
+			console.warn("[prime] get_state after applying choices failed", err);
+		}
+		const runningModel = this.remoteModel?.id ?? "?";
+		const runningLevel = this.remote.thinkingLevel;
+		if (model && runningModel !== model.id) failures.push(`running ${runningModel} instead of ${model.id}`);
+		else if (level && runningLevel !== level)
+			failures.push(`thinking is ${runningLevel}, not ${level} (not supported by ${runningModel}?)`);
+		if (failures.length > 0) {
+			console.warn("[prime] chosen settings not fully applied", failures);
+			this.onNotice?.(`Could not apply your choice: ${failures.join("; ")}`);
 		}
 	}
 
@@ -535,22 +590,30 @@ export class PrimeRemoteAgent extends Agent {
 		// Called with a real bridge model (provider intact) from the prime model picker.
 		this.remoteModel = m;
 		this.remote.model = primeModelView(m);
-		if (this.primeSessionId) {
-			void primeRpc(this.agentId, this.primeSessionId, {
-				type: "set_model",
-				provider: m.provider,
-				modelId: m.id,
-			}).catch((err) => console.warn("[prime] set_model failed", err));
+		if (!this.primeSessionId) {
+			this.chosenModel = m; // applied when the first send creates the session
+			return;
 		}
+		void primeRpc(this.agentId, this.primeSessionId, {
+			type: "set_model",
+			provider: m.provider,
+			modelId: m.id,
+		}).catch((err) => {
+			console.warn("[prime] set_model failed", err);
+			this.onNotice?.(`Model ${m.id} was not applied: ${err instanceof Error ? err.message : String(err)}`);
+		});
 	}
 
 	override setThinkingLevel(l: ThinkingLevel): void {
 		this.remote.thinkingLevel = l;
-		if (this.primeSessionId) {
-			void primeRpc(this.agentId, this.primeSessionId, { type: "set_thinking_level", level: l }).catch((err) =>
-				console.warn("[prime] set_thinking_level failed", err),
-			);
+		if (!this.primeSessionId) {
+			this.chosenThinking = l; // applied when the first send creates the session
+			return;
 		}
+		void primeRpc(this.agentId, this.primeSessionId, { type: "set_thinking_level", level: l }).catch((err) => {
+			console.warn("[prime] set_thinking_level failed", err);
+			this.onNotice?.(`Thinking level ${l} was not applied: ${err instanceof Error ? err.message : String(err)}`);
+		});
 	}
 
 	override setSystemPrompt(): void {

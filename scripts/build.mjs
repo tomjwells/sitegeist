@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, watch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,8 +154,15 @@ const piWebUiPatches = [
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]AgentInterface\.js$/,
 		imports: [
 			`import { beginPromptSubmission, restoreRejectedPrompt } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
+			`import { footerInfo as __sgFooterInfo } from ${JSON.stringify(join(packageRoot, "src/components/footer-info.ts").replace(/\\/g, "/"))};`,
 		],
 		replacements: [
+			{
+				// bottom-left of the prompt box: build + session id (src/components/footer-info.ts)
+				find: "					${this.showThemeToggle ? html `<theme-toggle></theme-toggle>` : html ``}\n				</div>",
+				replace:
+					"					${this.showThemeToggle ? html `<theme-toggle></theme-toggle>` : html ``}\n					${__sgFooterInfo(() => this.requestUpdate())}\n				</div>",
+			},
 			{
 				find: "if ((!input.trim() && attachments?.length === 0) || this.session?.state.isStreaming)\n            return;",
 				replace:
@@ -198,6 +206,20 @@ export const piWebUiPatchPlugin = {
 	},
 };
 
+// Build identity shown bottom-left in the panel (src/components/footer-info.ts): the commit this build is from.
+function buildIdentity() {
+	const git = (args) => {
+		try {
+			return execFileSync("git", ["-C", packageRoot, ...args], { encoding: "utf8" }).trim();
+		} catch {
+			return "";
+		}
+	};
+	const sha = git(["rev-parse", "--short", "HEAD"]) || "dev";
+	const dirty = git(["status", "--porcelain", "--untracked-files=no"]).length > 0;
+	return { sha, dirty, builtAt: new Date().toISOString() };
+}
+
 const buildOptions = {
 	absWorkingDir: packageRoot,
 	plugins: [modelsRegistryPlugin, piWebUiPatchPlugin],
@@ -216,6 +238,7 @@ const buildOptions = {
 	define: {
 		"process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV ?? (isWatch ? "development" : "production")),
 		"process.env.TARGET_BROWSER": JSON.stringify(targetBrowser),
+		__SITEGEIST_BUILD__: JSON.stringify(buildIdentity()),
 		global: "globalThis",
 	},
 	inject: [join(packageRoot, "scripts/process-shim.js")],
