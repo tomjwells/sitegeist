@@ -58,7 +58,14 @@ import {
 	PrimeRemoteAgent,
 	stripBrowserContext,
 } from "./prime/prime-agent.js";
-import { type PrimeAttachment, primeAgents } from "./prime/prime-client.js";
+import {
+	type PrimeAttachment,
+	type PrimeStoredArtifact,
+	primeAgents,
+	primeDeleteArtifacts,
+	primeFetchArtifact,
+	primeListArtifacts,
+} from "./prime/prime-client.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import {
@@ -719,36 +726,73 @@ const createAgent = async (
 			Toast.error(message, 8000);
 			renderApp();
 		};
-		prime.onAttachments = async (items: PrimeAttachment[]) => {
-			// telegram_attach in a browser session: the artifacts panel is the destination. Text-like files
-			// are decoded, binaries stay base64 (what ImageArtifact/PdfArtifact/GenericArtifact expect).
+		// telegram_attach in a browser session: the artifacts panel is the destination. Text-like files are
+		// decoded, binaries stay base64 (what ImageArtifact/PdfArtifact/GenericArtifact expect). The artifact is
+		// also recorded as an "artifact" message so the panel is rebuilt from history on reload.
+		const addArtifact = async (id: string, filename: string, mime: string, dataBase64: string, caption: string) => {
 			const panel = chatPanel.artifactsPanel;
 			if (!panel) throw new Error("artifacts panel not ready");
-			for (const item of items) {
-				const bytes = Uint8Array.from(atob(item.dataBase64), (c) => c.charCodeAt(0));
-				const textLike =
-					/^(text\/|application\/(json|xml|javascript|x-yaml|yaml|csv))/.test(item.mime) ||
-					/\.(html?|md|markdown|svg|txt|json|csv|tsv|js|ts|css|xml|ya?ml|log)$/i.test(item.filename);
-				const content = textLike ? new TextDecoder().decode(bytes) : item.dataBase64;
-				const command = panel.artifacts.has(item.filename) ? "rewrite" : "create";
-				const result = await panel.tool.execute(`prime-attach-${item.id}`, {
-					command,
-					filename: item.filename,
-					content,
-				});
-				const summary = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
-				if (/^Error/.test(summary)) throw new Error(summary);
-				// Record it the way pi-web-ui expects so the panel is rebuilt from history on reload
-				prime.appendMessage({
-					role: "artifact",
-					action: command === "create" ? "create" : "update",
-					filename: item.filename,
-					content,
-					title: item.caption || undefined,
-					timestamp: new Date().toISOString(),
-				});
-			}
+			const bytes = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
+			const textLike =
+				/^(text\/|application\/(json|xml|javascript|x-yaml|yaml|csv))/.test(mime) ||
+				/\.(html?|md|markdown|svg|txt|json|csv|tsv|js|ts|css|xml|ya?ml|log)$/i.test(filename);
+			const content = textLike ? new TextDecoder().decode(bytes) : dataBase64;
+			const command = panel.artifacts.has(filename) ? "rewrite" : "create";
+			const result = await panel.tool.execute(`prime-attach-${id}`, { command, filename, content });
+			const summary = result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+			if (/^Error/.test(summary)) throw new Error(summary);
+			prime.appendMessage({
+				role: "artifact",
+				action: command === "create" ? "create" : "update",
+				filename,
+				content,
+				title: caption || undefined,
+				timestamp: new Date().toISOString(),
+			});
+		};
+		prime.onAttachments = async (items: PrimeAttachment[]) => {
+			for (const item of items) await addArtifact(item.id, item.filename, item.mime, item.dataBase64, item.caption);
+			// Save NOW. A figure usually lands after the turn's agent_end (which already saved), and nothing else
+			// saved until the next turn, so closing the panel lost it (Tom, 2026-10-11: "there was definitely an a.png").
+			await saveSession();
 			renderApp();
+		};
+		// The R730 keeps a copy of every file it sent this session (relay /artifacts). On resume, recreate any the
+		// panel does not have (lost before it was saved, or sent while the panel was closed).
+		prime.onArtifactsReconcile = async () => {
+			const sessionId = prime.primeSessionId;
+			if (!sessionId) return;
+			const panel = chatPanel.artifactsPanel;
+			if (!panel) return;
+			let stored: PrimeStoredArtifact[] = [];
+			try {
+				stored = await primeListArtifacts(prime.agentId, sessionId);
+			} catch (err) {
+				console.warn("[prime] artifact list unavailable", err);
+				return;
+			}
+			const missing = stored.filter((a) => !panel.artifacts.has(a.filename));
+			if (missing.length === 0) return;
+			let restored = 0;
+			for (const a of missing) {
+				try {
+					await addArtifact(
+						a.id,
+						a.filename,
+						a.mime,
+						await primeFetchArtifact(prime.agentId, sessionId, a.id),
+						a.caption,
+					);
+					restored++;
+				} catch (err) {
+					console.warn("[prime] artifact restore failed", a.filename, err);
+				}
+			}
+			if (restored > 0) {
+				await saveSession();
+				renderApp();
+				Toast.show(`Restored ${restored} artifact${restored === 1 ? "" : "s"} from the R730`, "info", 4000);
+			}
 		};
 		agent = prime;
 	} else {
@@ -1207,6 +1251,10 @@ const renderApp = () => {
 					.onDeleted=${(deletedSessionId: string) => {
 						clearPromptDraft(currentWindowId, deletedSessionId);
 						void anchors.removeSession(deletedSessionId);
+						if (isPrimeSessionId(deletedSessionId))
+							void primeDeleteArtifacts(agentIdFromSessionId(deletedSessionId), deletedSessionId).catch(
+								() => undefined,
+							);
 						// Only reload if the current session was deleted
 						if (deletedSessionId === currentSessionId) newSession();
 					}}

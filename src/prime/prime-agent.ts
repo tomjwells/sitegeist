@@ -135,6 +135,8 @@ export class PrimeRemoteAgent extends Agent {
 	onStatusChange: ((status: PrimeStatus) => void) | undefined;
 	/** Files the agent queued with telegram_attach; the side panel turns them into artifacts. */
 	onAttachments: ((items: PrimeAttachment[]) => Promise<void>) | undefined;
+	/** After attach(): the side panel compares the R730's stored artifacts with the panel and restores what is missing. */
+	onArtifactsReconcile: (() => Promise<void>) | undefined;
 
 	private readonly remote: AgentState;
 	private readonly remoteListeners = new Set<(e: AgentEvent) => void>();
@@ -229,6 +231,7 @@ export class PrimeRemoteAgent extends Agent {
 			this.remote.messages = [...toAgentMessages(h.messages), ...artifacts];
 			this.openSocket(h.offset);
 			this.emitRemote({ type: "agent_end", messages: [] });
+			void this.onArtifactsReconcile?.().catch((err) => console.warn("[prime] artifact reconcile failed", err));
 		} catch (err) {
 			this.setStatus("error", err instanceof Error ? err.message : String(err));
 			throw err;

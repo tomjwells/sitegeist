@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- prime-agent sessions: artifacts the agent sends (`telegram_attach` → artifacts panel) are now saved with the session the moment they arrive. Before, they were only saved with the next agent event; a figure that landed after the turn's end (the usual case) was shown but not saved, and vanished when the panel was closed or reloaded. The R730 relay now also keeps a copy of every file it delivers (per session, newest 40), and on resume the panel restores any artifact it does not have ("Restored N artifacts from the R730"). Deleting a session drops the R730 copies. Covered by `npm run test:prime-model:extension`.
+
 ### Changed
 
 - Agents are told to draw when it helps: the prime-session browser context (main-pi and every coach) and the Browser agent's system prompt now say that when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, the agent should make one and show it in the artifacts panel (prime: `telegram_attach`; Browser agent: an HTML/SVG artifact).

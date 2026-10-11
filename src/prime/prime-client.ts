@@ -166,6 +166,62 @@ export async function primeNativeIds(agentId: string): Promise<Map<string, strin
 	return out;
 }
 
+export interface PrimeStoredArtifact {
+	id: string;
+	filename: string;
+	mime: string;
+	bytes: number;
+	caption: string;
+	deliveredAt: string;
+}
+
+const isStoredArtifact = (v: unknown): v is PrimeStoredArtifact =>
+	isJson(v) &&
+	typeof v.id === "string" &&
+	typeof v.filename === "string" &&
+	typeof v.mime === "string" &&
+	typeof v.bytes === "number" &&
+	typeof v.caption === "string" &&
+	typeof v.deliveredAt === "string";
+
+/** R730 copies of the files the agent sent to this session's artifacts panel (kept by the relay on delivery). */
+export async function primeListArtifacts(agentId: string, sessionId: string): Promise<PrimeStoredArtifact[]> {
+	const r = await request(agentId, "GET", `/sessions/${encodeURIComponent(sessionId)}/artifacts`, undefined, 10_000);
+	return Array.isArray(r.artifacts) ? r.artifacts.filter(isStoredArtifact) : [];
+}
+
+/** The bytes of one stored artifact, base64 (what the artifacts panel stores for binaries). */
+export async function primeFetchArtifact(agentId: string, sessionId: string, artifactId: string): Promise<string> {
+	const base = await primeBaseUrl(agentId);
+	const headers: Record<string, string> = {};
+	const token = await proxyToken();
+	if (token) headers.authorization = `Bearer ${token}`;
+	const res = await fetch(
+		`${base}/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`,
+		{
+			headers,
+			signal: AbortSignal.timeout(30_000),
+		},
+	);
+	if (!res.ok) throw new Error(`prime relay GET artifact ${artifactId} -> ${res.status}`);
+	const bytes = new Uint8Array(await res.arrayBuffer());
+	let binary = "";
+	for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+	return btoa(binary);
+}
+
+export async function primeDeleteArtifacts(agentId: string, sessionId: string): Promise<void> {
+	const base = await primeBaseUrl(agentId);
+	const headers: Record<string, string> = {};
+	const token = await proxyToken();
+	if (token) headers.authorization = `Bearer ${token}`;
+	await fetch(`${base}/sessions/${encodeURIComponent(sessionId)}/artifacts`, {
+		method: "DELETE",
+		headers,
+		signal: AbortSignal.timeout(10_000),
+	});
+}
+
 export async function primeRpc(agentId: string, sessionId: string, command: Json): Promise<Json> {
 	const r = await request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/rpc`, command);
 	const response = isJson(r.response) ? r.response : undefined;

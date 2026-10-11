@@ -111,6 +111,52 @@ async function seedSetting(page: Page, key: string, value: string): Promise<void
 	);
 }
 
+const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+async function seedSession(
+	page: Page,
+	data: Record<string, unknown>,
+	metadata: Record<string, unknown>,
+): Promise<void> {
+	await page.evaluate(
+		async ({ data, metadata }) => {
+			const db = await new Promise<IDBDatabase>((resolve, reject) => {
+				const req = indexedDB.open("sitegeist-storage");
+				req.onsuccess = () => resolve(req.result);
+				req.onerror = () => reject(req.error);
+			});
+			await new Promise<void>((resolve, reject) => {
+				const tx = db.transaction(["sessions", "sessions-metadata"], "readwrite");
+				tx.objectStore("sessions").put(data);
+				tx.objectStore("sessions-metadata").put(metadata);
+				tx.oncomplete = () => resolve();
+				tx.onerror = () => reject(tx.error);
+			});
+			db.close();
+		},
+		{ data, metadata },
+	);
+}
+
+async function savedArtifactFilenames(page: Page, sessionId: string): Promise<string[]> {
+	return page.evaluate(async (id) => {
+		const db = await new Promise<IDBDatabase>((resolve, reject) => {
+			const req = indexedDB.open("sitegeist-storage");
+			req.onsuccess = () => resolve(req.result);
+			req.onerror = () => reject(req.error);
+		});
+		const data = await new Promise<{ messages?: Array<{ role?: string; filename?: string }> } | undefined>(
+			(resolve, reject) => {
+				const req = db.transaction(["sessions"], "readonly").objectStore("sessions").get(id);
+				req.onsuccess = () => resolve(req.result);
+				req.onerror = () => reject(req.error);
+			},
+		);
+		db.close();
+		return (data?.messages ?? []).filter((m) => m.role === "artifact").map((m) => m.filename ?? "");
+	}, sessionId);
+}
+
 async function dismissPermissionDialog(page: Page): Promise<void> {
 	await page.waitForSelector("userscripts-permission-dialog", { timeout: 15_000, state: "attached" });
 	await page.evaluate(() =>
@@ -128,6 +174,28 @@ test(
 			thinkingLevel: "high",
 		};
 		const sid = "sg-0123456789ab";
+		const oldSid = "sg-aaaaaaaaaaaa";
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const oldMessages = [
+			{ role: "user", content: "Why R squared not R?", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "See the figure in your artifacts panel." }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+				usage,
+				stopReason: "stop",
+				timestamp: 2,
+			},
+		];
 		const server = createServer(async (req, res) => {
 			const url = req.url ?? "";
 			res.setHeader("content-type", "application/json");
@@ -173,6 +241,42 @@ test(
 			}
 			if (p === `/sessions/${sid}/prompt`) {
 				res.end(JSON.stringify({ ok: true }));
+				return;
+			}
+			// A session that already ran on the R730 and sent one figure the panel never saved.
+			if (p === `/sessions/${oldSid}` && req.method === "GET") {
+				res.end(
+					JSON.stringify({
+						ok: true,
+						sessionId: oldSid,
+						offset: 0,
+						state: { ...state, isStreaming: false },
+						messages: oldMessages,
+					}),
+				);
+				return;
+			}
+			if (p === `/sessions/${oldSid}/artifacts`) {
+				res.end(
+					JSON.stringify({
+						ok: true,
+						artifacts: [
+							{
+								id: "m1abc-0011223344",
+								filename: "a.png",
+								mime: "image/png",
+								bytes: 70,
+								caption: "Why R2 not R",
+								deliveredAt: "2026-10-11T12:00:00.000Z",
+							},
+						],
+					}),
+				);
+				return;
+			}
+			if (p === `/sessions/${oldSid}/artifacts/m1abc-0011223344`) {
+				res.setHeader("content-type", "image/png");
+				res.end(Buffer.from(PNG_B64, "base64"));
 				return;
 			}
 			res.statusCode = 404;
@@ -302,6 +406,76 @@ test(
 				15_000,
 				"footer session id",
 			);
+
+			// Resume a session whose figure never made it into the panel's saved copy: the R730 copy is restored,
+			// shown in the artifacts panel, and saved with the session (Tom, 2026-10-11: lost a.png).
+			await seedSession(
+				page,
+				{
+					id: oldSid,
+					title: "Why R squared",
+					model: CATALOG["claude-opus-5-5"],
+					thinkingLevel: "high",
+					messages: oldMessages,
+					createdAt: "2026-10-11T12:00:00.000Z",
+					lastModified: "2026-10-11T12:00:00.000Z",
+				},
+				{
+					id: oldSid,
+					title: "Why R squared",
+					createdAt: "2026-10-11T12:00:00.000Z",
+					lastModified: "2026-10-11T12:00:00.000Z",
+					messageCount: 2,
+					usage,
+					modelId: "claude-opus-5-5",
+					thinkingLevel: "high",
+					preview: "Why R squared",
+				},
+			);
+			assert.deepEqual(await savedArtifactFilenames(page, oldSid), []);
+			await page.goto(`${panelUrl}?session=${oldSid}`);
+			await dismissPermissionDialog(page);
+			await until(
+				() => page.evaluate(() => document.body.innerText),
+				(t) => t.includes("Restored 1 artifact from the R730"),
+				20_000,
+				"restore toast",
+			);
+			await until(
+				() => page.evaluate(() => document.body.innerText),
+				(t) => t.includes("a.png"),
+				10_000,
+				"artifact tab",
+			);
+			await until(
+				() => savedArtifactFilenames(page, oldSid),
+				(names) => names.includes("a.png"),
+				10_000,
+				"artifact saved with the session",
+			);
+			assert.ok(
+				calls.some((c) => c.path === `/sessions/${oldSid}/artifacts/m1abc-0011223344`),
+				"fetched the stored bytes",
+			);
+			// Reload: nothing to restore any more (the saved copy has it), the panel still shows it.
+			const before = calls.length;
+			await page.goto(`${panelUrl}?session=${oldSid}`);
+			await dismissPermissionDialog(page);
+			// rebuilt from the saved copy: the panel comes back collapsed with a count ("Artifacts 1"), the tab shows when opened
+			await until(
+				() => page.evaluate(() => document.body.innerText.replace(/\s+/g, " ")),
+				(t) => /Artifacts 1\b/.test(t) || t.includes("a.png"),
+				10_000,
+				"artifact after reload",
+			);
+			await until(
+				() => Promise.resolve(calls.slice(before).some((c) => c.path === `/sessions/${oldSid}/artifacts`)),
+				(v) => v,
+				10_000,
+				"list on second attach",
+			);
+			await new Promise((r) => setTimeout(r, 1000));
+			assert.ok(!calls.slice(before).some((c) => c.path.includes("/artifacts/m1abc")), "no re-download once saved");
 		} finally {
 			await context.close();
 			server.close();
