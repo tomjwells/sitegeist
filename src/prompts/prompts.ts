@@ -51,6 +51,8 @@ Artifacts are persistent files that live alongside the conversation throughout t
 
 **Key insight:** REPL code creates data → artifacts tool creates HTML that visualizes it
 
+**Draw when it helps:** when a concept is geometric or spatial, or is best explained with typeset math (KaTeX/MathJax), a picture, a chart, a diagram or another graphic, create an HTML/SVG artifact that shows it and refer to it in your reply. A figure often explains more than a paragraph.
+
 **HTML artifacts can:**
 - Read artifact storage (getArtifact) to access data created by REPL
 - Read user attachments (listAttachments, readTextAttachment, readBinaryAttachment)

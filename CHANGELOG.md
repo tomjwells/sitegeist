@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Agents are told to draw when it helps: the prime-session browser context (main-pi and every coach) and the Browser agent's system prompt now say that when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, the agent should make one and show it in the artifacts panel (prime: `telegram_attach`; Browser agent: an HTML/SVG artifact).
+
 ### Fixed
 
 - prime-agent sessions: a model or thinking level chosen before the first message is now applied to the new bridge session before the prompt is sent. Before, the session was created on the first send with the bridge's automation default (claude-sonnet-5-5 / high), the choice was dropped, and the label silently flipped. New main-pi sessions now default to claude-opus-5-5 (the router's interactive default) and actually run it. After applying, the panel reads the running model/level back; if the bridge refused or clamped something, a toast says so. Test: `npm run test:prime-model:extension`.

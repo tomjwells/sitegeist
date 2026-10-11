@@ -275,6 +275,14 @@ test(
 			const iThink = order.indexOf("rpc:set_thinking_level=xhigh");
 			assert.ok(iModel >= 0 && iModel < iPrompt, `set_model before prompt: ${order.join(" | ")}`);
 			assert.ok(iThink >= 0 && iThink < iPrompt, `set_thinking_level before prompt: ${order.join(" | ")}`);
+			// The first prompt's browser context tells the agent to draw figures into the artifacts panel (Tom, 2026-10-11).
+			const promptBody = calls.find((c) => c.path.endsWith("/prompt"))?.body.message;
+			assert.ok(
+				typeof promptBody === "string" &&
+					promptBody.includes("Draw when it helps") &&
+					promptBody.includes("artifacts panel"),
+				"draw guidance in the browser context",
+			);
 			assert.equal(state.model, CATALOG["claude-opus-5-5"]);
 			assert.equal(state.thinkingLevel, "xhigh");
 
