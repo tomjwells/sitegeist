@@ -10,6 +10,7 @@ import {
 import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { Image as ImageIcon } from "lucide";
+import { captureTabPng, isPanelTab, targetTab } from "../utils/target-tab.js";
 
 const EXTRACT_IMAGE_DESCRIPTION = `Extract images from the current page. Returns image data that you can see and analyze.
 
@@ -155,7 +156,9 @@ async function fetchAndResizeImage(src: string, maxWidth: number): Promise<Image
 async function captureScreenshot(maxWidth: number, windowId: number): Promise<ImageContent> {
 	let dataUrl: string;
 	try {
-		dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+		// Panel in a tab: the page beside it (the window's tab in front can be the panel itself).
+		const page = isPanelTab() ? await targetTab() : undefined;
+		dataUrl = page ? await captureTabPng(page) : await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.warn(
@@ -201,7 +204,7 @@ export class ExtractImageTool implements AgentTool<typeof extractImageSchema, Ex
 			content.push({ type: "text", text: `Screenshot captured (max ${maxWidth}px width)` });
 		} else if (args.mode === "selector") {
 			if (!args.selector) throw new Error("selector is required for 'selector' mode");
-			const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+			const tab = await targetTab(); // side panel: the active tab; panel tab: the page beside it
 			if (!tab?.id) throw new Error("No active tab");
 
 			const info = await getImageInfoFromPage(tab.id, args.selector);

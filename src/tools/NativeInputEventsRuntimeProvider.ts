@@ -1,6 +1,7 @@
 import type { SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
 import { NATIVE_INPUT_EVENTS_DESCRIPTION } from "../prompts/prompts.js";
 import { hasDebuggerApi } from "../utils/browser-compat.js";
+import { targetTab } from "../utils/target-tab.js";
 import { isSyntheticAction, runSyntheticInput } from "./synthetic-input.js";
 
 /**
@@ -21,10 +22,10 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 	}
 
 	/**
-	 * Get the currently active tab ID
+	 * The tab to send input to: the page sitegeist works on (side panel: the active tab; panel tab: the page beside it)
 	 */
 	private async getActiveTabId(): Promise<number> {
-		const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+		const tab = await targetTab();
 		if (!tab?.id) {
 			throw new Error("No active tab found");
 		}

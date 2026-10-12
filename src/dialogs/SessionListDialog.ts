@@ -18,8 +18,8 @@ type ExportedSession = {
 export class SitegeistSessionListDialog extends DialogBase {
 	@state() private sessions: SessionMetadata[] = [];
 	@state() private loading = true;
-	@state() private sessionLocks: Record<string, number> = {}; // sessionId -> windowId
-	@state() private currentWindowId: number | undefined;
+	@state() private sessionLocks: Record<string, string> = {}; // sessionId -> panel that has it open
+	@state() private currentOwner: string | undefined;
 	@state() private searchQuery = "";
 	@state() private showDeleteMenu = false;
 
@@ -61,9 +61,8 @@ export class SitegeistSessionListDialog extends DialogBase {
 	private async loadSessionsAndLocks() {
 		this.loading = true;
 		try {
-			// Get current window ID
-			const currentWindow = await chrome.windows.getCurrent();
-			this.currentWindowId = currentWindow.id;
+			// This panel (side panel of a window, or a panel tab)
+			this.currentOwner = port.currentOwner();
 
 			// Load sessions (already sorted by lastModified index)
 			const storage = getSitegeistStorage();
@@ -141,13 +140,13 @@ export class SitegeistSessionListDialog extends DialogBase {
 	}
 
 	private isSessionLocked(sessionId: string): boolean {
-		const lockWindowId = this.sessionLocks[sessionId];
-		return lockWindowId !== undefined && lockWindowId !== this.currentWindowId;
+		const owner = this.sessionLocks[sessionId];
+		return owner !== undefined && owner !== this.currentOwner;
 	}
 
 	private isCurrentSession(sessionId: string): boolean {
-		const lockWindowId = this.sessionLocks[sessionId];
-		return lockWindowId !== undefined && lockWindowId === this.currentWindowId;
+		const owner = this.sessionLocks[sessionId];
+		return owner !== undefined && owner === this.currentOwner;
 	}
 
 	private async handleExport(sessionId?: string) {

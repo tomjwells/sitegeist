@@ -28,8 +28,11 @@ let currentKey: string | undefined;
 let nextRevision = 0;
 let warned = false;
 
-const draftKey = (windowId: number, sessionId?: string): string =>
-	`${PREFIX}${windowId}:${sessionId ? `session:${sessionId}` : "new"}`;
+/** Where a draft lives: the side panel's window id, or `tab<id>` for a panel opened as a tab (split view, 2026-10-12). */
+export type DraftScope = number | string;
+
+const draftKey = (scope: DraftScope, sessionId?: string): string =>
+	`${PREFIX}${scope}:${sessionId ? `session:${sessionId}` : "new"}`;
 
 function warnStorageUnavailable(): void {
 	if (warned) return;
@@ -69,17 +72,17 @@ function writeDraft(key: string, text: string, revision = ++nextRevision): Draft
 	return entry;
 }
 
-/** Set before constructing the editor. Browser tab identity must never enter this key. */
-export function configurePromptDraft(windowId: number, sessionId?: string): void {
-	currentKey = draftKey(windowId, sessionId);
+/** Set before constructing the editor. The page a tab shows must never enter this key (only the panel's own scope). */
+export function configurePromptDraft(scope: DraftScope, sessionId?: string): void {
+	currentKey = draftKey(scope, sessionId);
 }
 
 /** Move a fresh-chat draft when the first exchange gives the chat its persistent session id. */
-export function promotePromptDraft(windowId: number, sessionId: string): void {
+export function promotePromptDraft(scope: DraftScope, sessionId: string): void {
 	const previous = currentKey;
-	const next = draftKey(windowId, sessionId);
+	const next = draftKey(scope, sessionId);
 	if (!previous || previous === next) return;
-	if (previous !== draftKey(windowId)) throw new Error("Cannot migrate a saved chat's draft to another chat");
+	if (previous !== draftKey(scope)) throw new Error("Cannot migrate a saved chat's draft to another chat");
 	const entry = readDraft(previous, true);
 	writeDraft(next, entry.text, entry.revision);
 	writeDraft(previous, "");
@@ -90,8 +93,19 @@ export function promotePromptDraft(windowId: number, sessionId: string): void {
 	}
 }
 
-export function clearPromptDraft(windowId: number, sessionId?: string): void {
-	writeDraft(draftKey(windowId, sessionId), "");
+export function clearPromptDraft(scope: DraftScope, sessionId?: string): void {
+	writeDraft(draftKey(scope, sessionId), "");
+}
+
+/** A chat moved here from another panel brings its unsent text; it never replaces a draft already kept here. */
+export function seedPromptDraft(scope: DraftScope, sessionId: string | undefined, text: string): void {
+	const key = draftKey(scope, sessionId);
+	if (text && !readDraft(key, true).text) writeDraft(key, text);
+}
+
+/** The unsent text of the chat this panel shows ("" when there is none). */
+export function currentPromptDraftText(): string {
+	return currentKey ? readDraft(currentKey, true).text : "";
 }
 
 /** Called by MessageEditor.connectedCallback, including when Edge reconstructs the panel. */

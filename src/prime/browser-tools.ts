@@ -8,6 +8,7 @@ import { getSitegeistStorage } from "../storage/app-storage.js";
 import { CUSTOM_INSTRUCTIONS_UPDATED_SETTING, pushInstructions } from "../sync.js";
 import { AskUserWhichElementTool } from "../tools/ask-user-which-element.js";
 import { skillTool } from "../tools/skill.js";
+import { captureTabPng, isBesidePanel, isPanelTab, panelWindow, setAgentTab, targetTab } from "../utils/target-tab.js";
 import type { Json } from "./prime-client.js";
 import { isJson } from "./prime-client.js";
 
@@ -24,12 +25,11 @@ const str = (v: unknown): string | undefined => (typeof v === "string" ? v : und
 
 const USER_SCRIPT_WORLD = "sitegeist-prime";
 
-async function resolveTab(tabId: number | undefined, windowId: number): Promise<chrome.tabs.Tab> {
+/** No tabId: the page sitegeist works on (side panel: the active tab; panel in a tab: the page beside it). */
+async function resolveTab(tabId: number | undefined, _windowId: number): Promise<chrome.tabs.Tab> {
 	if (tabId !== undefined) return chrome.tabs.get(tabId);
-	const [active] = await chrome.tabs.query({ active: true, windowId });
-	if (active) return active;
-	const [anyActive] = await chrome.tabs.query({ active: true, currentWindow: true });
-	if (anyActive) return anyActive;
+	const target = await targetTab();
+	if (target) return target;
 	throw new Error("no active tab");
 }
 
@@ -37,12 +37,15 @@ async function resolveTab(tabId: number | undefined, windowId: number): Promise<
  * Tom wants to see prime working (2026-09-05): every tab-acting tool switches its window to its tab unless
  * the caller passes background:true. It never takes window focus (2026-09-16: focusing the window yanked Tom
  * out of Telegram / another browser window mid-typing on every tool call); focus:true is an explicit opt-in.
+ * A page already on screen beside the panel tab (split view) is left where it is: switching to it would only move
+ * the keyboard out of the chat.
  */
 async function bringToFront(tab: chrome.tabs.Tab, args: Json): Promise<void> {
 	if (args.background === true) return;
 	const id = tab.id;
 	if (id === undefined) return;
-	if (!tab.active) await chrome.tabs.update(id, { active: true }).catch(() => undefined);
+	if (!tab.active && !(await isBesidePanel(tab)))
+		await chrome.tabs.update(id, { active: true }).catch(() => undefined);
 	if (args.focus === true && tab.windowId !== undefined)
 		await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 }
@@ -52,12 +55,21 @@ function requireTabId(tab: chrome.tabs.Tab): number {
 	return tab.id;
 }
 
+/** `*` = in front of its window, `>` = the page the tools use by default when it is not in front (panel tab). */
 async function listTabs(): Promise<BrowserToolResult> {
-	const tabs = await chrome.tabs.query({});
+	const [tabs, target] = await Promise.all([chrome.tabs.query({}), targetTab()]);
 	const rows = tabs
-		.filter((t) => !(t.url ?? "").startsWith("chrome-extension://"))
-		.map((t) => ({ id: t.id, windowId: t.windowId, active: t.active, title: t.title ?? "", url: t.url ?? "" }));
-	const lines = rows.map((r) => `${r.id}\t${r.active ? "*" : " "}\t${r.title.slice(0, 80)}\t${r.url}`);
+		.filter((t) => !/^(chrome|moz)-extension:\/\//.test(t.url ?? ""))
+		.map((t) => ({
+			id: t.id,
+			windowId: t.windowId,
+			active: t.active,
+			target: t.id !== undefined && t.id === target?.id,
+			title: t.title ?? "",
+			url: t.url ?? "",
+		}));
+	const mark = (r: { active: boolean; target: boolean }): string => (r.active ? "*" : r.target ? ">" : " ");
+	const lines = rows.map((r) => `${r.id}\t${mark(r)}\t${r.title.slice(0, 80)}\t${r.url}`);
 	return { content: [{ type: "text", text: `id\tactive\ttitle\turl\n${lines.join("\n")}` }], details: { tabs: rows } };
 }
 
@@ -81,11 +93,14 @@ async function dataUrlToResized(dataUrl: string, maxWidth: number): Promise<Imag
 async function screenshot(args: Json, windowId: number): Promise<BrowserToolResult> {
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
-	await bringToFront(tab, { ...args, background: false });
-	await new Promise((r) => setTimeout(r, tab.active ? 50 : 350));
+	await bringToFront(tab, args);
+	const now = await chrome.tabs.get(id);
+	// A tab that just came to the front needs a frame painted first.
+	if (now.active) await new Promise((r) => setTimeout(r, tab.active ? 50 : 350));
 	let dataUrl: string;
 	try {
-		dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId ?? windowId, { format: "png" });
+		// Captures a tab that is not in front too (beside the panel, or background:true) without leaving it there.
+		dataUrl = await captureTabPng(now);
 	} catch (error) {
 		// captureVisibleTab needs the window on screen; we no longer pull it forward ourselves.
 		return text(
@@ -432,11 +447,16 @@ async function navigate(args: Json, windowId: number): Promise<BrowserToolResult
 	if (!url || !/^https?:\/\//i.test(url)) return text("browser_navigate: `url` must be an http(s) URL");
 	let tabId: number;
 	if (args.newTab === true) {
-		tabId = requireTabId(await chrome.tabs.create({ url, windowId, active: args.background !== true }));
+		// From a panel tab, a new tab opens behind the split view (focus:true brings it forward) and becomes the page
+		// the browser tools work on until Tom's next prompt.
+		const active = isPanelTab() ? args.focus === true : args.background !== true;
+		tabId = requireTabId(await chrome.tabs.create({ url, windowId: panelWindow() ?? windowId, active }));
+		setAgentTab(tabId);
 	} else {
 		const tab = await resolveTab(num(args.tabId), windowId);
 		tabId = requireTabId(tab);
-		await chrome.tabs.update(tabId, { url, active: args.background === true ? tab.active : true });
+		const keepInPlace = args.background === true || (await isBesidePanel(tab));
+		await chrome.tabs.update(tabId, { url, active: keepInPlace ? tab.active : true });
 		if (args.background !== true && args.focus === true && tab.windowId !== undefined)
 			await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	}
@@ -547,20 +567,18 @@ async function uploadFile(args: Json, windowId: number): Promise<BrowserToolResu
 async function pickElement(args: Json, windowId: number, callId: string): Promise<BrowserToolResult> {
 	const tab = await resolveTab(num(args.tabId), windowId);
 	const id = requireTabId(tab);
-	// The picker injects into the active tab of the panel's window: make sure that is this tab and that
-	// the window is in front, otherwise the overlay waits on a page Tom is not looking at.
-	if (!tab.active) await chrome.tabs.update(id, { active: true });
+	// Tom has to see the page to click in it: bring it to the front of its window (unless it is already on screen
+	// beside the panel tab) and the window in front, otherwise the overlay waits on a page Tom is not looking at.
+	if (!tab.active && !(await isBesidePanel(tab))) await chrome.tabs.update(id, { active: true });
 	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	const controller = new AbortController();
 	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 120_000, 5_000), 175_000);
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const where = `tab ${id} "${tab.title ?? ""}" ${tab.url ?? ""}`;
 	try {
-		const result = await new AskUserWhichElementTool().execute(
-			"prime",
-			{ message: str(args.message) },
-			controller.signal,
-		);
+		const picker = new AskUserWhichElementTool();
+		picker.tabId = id;
+		const result = await picker.execute("prime", { message: str(args.message) }, controller.signal);
 		return {
 			content: [{ type: "text", text: `Tom picked an element on ${where}:\n` }, ...result.content],
 			details: { tabId: id, url: tab.url, element: result.details },

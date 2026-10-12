@@ -1,3 +1,4 @@
+import { targetTab } from "../../utils/target-tab.js";
 import { createOverlayScript, removeOverlayScript } from "./overlay-content.js";
 
 const OVERLAY_WORLD_ID = "sitegeist-repl-overlay";
@@ -8,10 +9,7 @@ const OVERLAY_WORLD_ID = "sitegeist-repl-overlay";
  * @throws Error if no active tab is found
  */
 async function getActiveTabId(): Promise<number> {
-	const [tab] = await chrome.tabs.query({
-		active: true,
-		currentWindow: true,
-	});
+	const tab = await targetTab(); // side panel: the active tab; panel tab: the page beside it
 
 	if (!tab || !tab.id) {
 		throw new Error("No active tab found");

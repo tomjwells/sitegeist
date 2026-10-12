@@ -12,6 +12,7 @@ import { getSitegeistStorage } from "../storage/app-storage.js";
 import type { Skill } from "../storage/stores/skills-store.js";
 import { formatSkills } from "../utils/format-skills.js";
 import "../utils/i18n-extension.js";
+import { isPanelTab, setAgentTab, targetTab } from "../utils/target-tab.js";
 
 // Give up waiting for a load signal after this long (prerendered/activated pages emit none)
 const NAVIGATION_TIMEOUT_MS = 15000;
@@ -96,11 +97,8 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			}
 		}
 
-		// Get active tab for navigation actions
-		const [tab] = await chrome.tabs.query({
-			active: true,
-			currentWindow: true,
-		});
+		// The page sitegeist works on (side panel: the active tab; panel tab: the page beside it)
+		const tab = await targetTab();
 
 		if (!tab || !tab.id) {
 			throw new Error("No active tab found");
@@ -203,11 +201,14 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			throw new Error("Aborted");
 		}
 
-		const newTab = await chrome.tabs.create({ url, active: true });
+		// From a panel tab (split view) the new tab opens behind it, so the chat stays on screen; it is the page the
+		// tools work on until Tom's next prompt.
+		const newTab = await chrome.tabs.create({ url, active: !isPanelTab() });
 
 		if (!newTab.id) {
 			throw new Error("Failed to create new tab");
 		}
+		setAgentTab(newTab.id);
 
 		return this.waitForTabLoad(newTab.id, signal);
 	}
@@ -324,8 +325,10 @@ export class NavigateTool implements AgentTool<typeof navigateSchema, NavigateRe
 			throw new Error(`Tab ${numericTabId} not found`);
 		}
 
-		// Activate the tab (in its own window; never take window focus - that yanks Tom out of whatever he is typing in)
-		await chrome.tabs.update(numericTabId, { active: true });
+		// Activate the tab (in its own window; never take window focus - that yanks Tom out of whatever he is typing in).
+		// From a panel tab it becomes the page the tools work on without leaving the split view.
+		if (isPanelTab()) setAgentTab(numericTabId);
+		else await chrome.tabs.update(numericTabId, { active: true });
 
 		const finalUrl = tab.url || "";
 		const title = tab.title || "Untitled";

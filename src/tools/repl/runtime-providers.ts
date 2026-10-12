@@ -5,6 +5,7 @@ import {
 	NAVIGATE_RUNTIME_PROVIDER_DESCRIPTION,
 } from "../../prompts/prompts.js";
 import { getSitegeistStorage } from "../../storage/app-storage.js";
+import { targetTab } from "../../utils/target-tab.js";
 import type { NavigateParams, NavigateTool } from "../navigate.js";
 import { buildWrapperCode, checkUserScriptsAvailability } from "./userscripts-helpers.js";
 
@@ -115,11 +116,8 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 			return;
 		}
 
-		// Get current tab
-		const [tab] = await chrome.tabs.query({
-			active: true,
-			currentWindow: true,
-		});
+		// The page sitegeist works on (side panel: the active tab; panel tab: the page beside it)
+		const tab = await targetTab();
 
 		if (!tab || !tab.id) {
 			respond({

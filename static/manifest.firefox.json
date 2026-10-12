@@ -44,6 +44,12 @@
 				"mac": "Command+Shift+S"
 			},
 			"description": "Toggle side panel"
+		},
+		"open-beside": {
+			"suggested_key": {
+				"default": "Alt+Shift+S"
+			},
+			"description": "Open sitegeist next to this page (split view)"
 		}
 	},
 	"permissions": [

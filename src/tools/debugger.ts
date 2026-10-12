@@ -12,6 +12,7 @@ import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Bug } from "lucide";
 import { hasDebuggerApi } from "../utils/browser-compat.js";
+import { targetTab } from "../utils/target-tab.js";
 
 // ============================================================================
 // TYPES
@@ -74,11 +75,8 @@ CRITICAL: Use browserjs() and repl tool for DOM manipulation. Use this ONLY for 
 			throw new Error("Debugger command aborted");
 		}
 
-		// Get active tab
-		const [tab] = await chrome.tabs.query({
-			active: true,
-			currentWindow: true,
-		});
+		// The page sitegeist works on (side panel: the active tab; panel tab: the page beside it)
+		const tab = await targetTab();
 
 		if (!tab || !tab.id) {
 			throw new Error("No active tab found");

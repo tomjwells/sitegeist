@@ -6,6 +6,33 @@
  */
 
 // ============================================================================
+// PANEL OWNERS
+// ============================================================================
+
+/**
+ * One open sitegeist panel: the side panel / sidebar of a window ("w:<windowId>") or a panel in a normal tab, e.g. a
+ * split view beside a page ("t:<tabId>"). Session locks and the open-panel bookkeeping are per panel, so a panel tab
+ * and the side panel of the same window never share a session (2026-10-12).
+ */
+export type PanelOwner = `w:${number}` | `t:${number}`;
+
+export const sidePanelOwner = (windowId: number): PanelOwner => `w:${windowId}`;
+export const tabPanelOwner = (tabId: number): PanelOwner => `t:${tabId}`;
+
+export function parsePanelOwner(value: unknown): PanelOwner | undefined {
+	if (typeof value !== "string") return undefined;
+	const match = /^([wt]):(\d+)$/.exec(value);
+	if (!match) return undefined;
+	const id = Number(match[2]);
+	return match[1] === "w" ? sidePanelOwner(id) : tabPanelOwner(id);
+}
+
+/** The side panel's window id, for owners that are side panels. */
+export function sidePanelWindow(owner: PanelOwner): number | undefined {
+	return owner.startsWith("w:") ? Number(owner.slice(2)) : undefined;
+}
+
+// ============================================================================
 // MESSAGE INTERFACES
 // ============================================================================
 
@@ -16,7 +43,7 @@
 export interface AcquireLockMessage {
 	type: "acquireLock";
 	sessionId: string;
-	windowId: number;
+	owner: PanelOwner;
 }
 
 /**
@@ -27,7 +54,7 @@ export interface LockResultMessage {
 	type: "lockResult";
 	sessionId: string;
 	success: boolean;
-	ownerWindowId?: number; // Set if lock failed (session owned by another window)
+	owner?: PanelOwner; // Set if lock failed (session open in another panel)
 }
 
 /**
@@ -44,7 +71,7 @@ export interface GetLockedSessionsMessage {
  */
 export interface LockedSessionsMessage {
 	type: "lockedSessions";
-	locks: Record<string, number>; // sessionId -> windowId
+	locks: Record<string, PanelOwner>; // sessionId -> panel that has it open
 }
 
 // ============================================================================
@@ -94,16 +121,21 @@ export const REQUEST_TO_RESPONSE_TYPE: Record<
 // ============================================================================
 
 let port: chrome.runtime.Port | null = null;
-let currentWindowId: number | undefined;
+let currentOwnerId: PanelOwner | undefined;
 const responseHandlers = new Map<string, (msg: BackgroundToSidepanelMessage) => void>();
 
 /**
- * Initialize port system with window ID.
+ * Initialize port system with this panel's owner id.
  * Must be called before sending any messages.
  */
-export function initialize(windowId: number): void {
-	currentWindowId = windowId;
+export function initialize(owner: PanelOwner): void {
+	currentOwnerId = owner;
 	connect();
+}
+
+/** This panel's owner id (undefined before initialize). */
+export function currentOwner(): PanelOwner | undefined {
+	return currentOwnerId;
 }
 
 /**
@@ -111,12 +143,12 @@ export function initialize(windowId: number): void {
  * Background script will receive this connection via runtime.onConnect.
  */
 function connect(): chrome.runtime.Port {
-	if (!currentWindowId) {
-		throw new Error("[Port] Cannot connect: windowId not initialized");
+	if (!currentOwnerId) {
+		throw new Error("[Port] Cannot connect: panel owner not initialized");
 	}
 
 	console.log(`[Port] Connecting... (${new Date().toISOString()})`);
-	const tmpPort = chrome.runtime.connect({ name: `sidepanel:${currentWindowId}` });
+	const tmpPort = chrome.runtime.connect({ name: `sidepanel:${currentOwnerId}` });
 
 	// Set up message listener to dispatch responses
 	tmpPort.onMessage.addListener((msg: BackgroundToSidepanelMessage) => {

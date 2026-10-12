@@ -14,6 +14,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Loader2, MousePointer2 } from "lucide";
 import { ASK_USER_WHICH_ELEMENT_TOOL_DESCRIPTION } from "../prompts/prompts.js";
 import "../utils/i18n-extension.js";
+import { targetTab } from "../utils/target-tab.js";
 
 // ============================================================================
 // TYPES
@@ -526,6 +527,8 @@ export class AskUserWhichElementTool implements AgentTool<typeof selectElementSc
 	name = "ask_user_which_element";
 	description = ASK_USER_WHICH_ELEMENT_TOOL_DESCRIPTION;
 	parameters = selectElementSchema;
+	/** Pick on this tab; unset: the page sitegeist works on. */
+	tabId?: number;
 
 	async execute(
 		_toolCallId: string,
@@ -538,11 +541,8 @@ export class AskUserWhichElementTool implements AgentTool<typeof selectElementSc
 				throw new Error("Tool execution was aborted");
 			}
 
-			// Get the active tab
-			const [tab] = await chrome.tabs.query({
-				active: true,
-				currentWindow: true,
-			});
+			// The page sitegeist works on (side panel: the active tab; panel tab: the page beside it), or a given tab
+			const tab = this.tabId !== undefined ? await chrome.tabs.get(this.tabId) : await targetTab();
 
 			if (!tab || !tab.id) {
 				throw new Error("No active tab found");

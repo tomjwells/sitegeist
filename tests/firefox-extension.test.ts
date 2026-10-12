@@ -3,6 +3,9 @@
  * Covers what Firefox does differently from Chrome: unsigned permanent install, the extension sidebar opened from the
  * toolbar button, the optional userScripts permission, page scripts (isolated + page world), screenshots, the code
  * sandbox (HTML artifacts), PDFs in Firefox's own viewer, and the page-event input fallback (no debugger API).
+ * Second test: sitegeist opened next to a page (2026-10-12): the tab lands right after the page with both selected, the
+ * chat and its unsent text move along, and once Tom joins them in Zen's split view prime's browser tools work on the
+ * page beside the panel (Zen gives extensions no split ids: the visible tab / remembered page decides).
  *
  * Needs ~/.cache/sitegeist-firefox-test/zen/zen (Zen Linux x86_64, e.g. 1.23.2b = Firefox 157) and
  * ~/.cache/sitegeist-firefox-test/geckodriver (0.37+); the test is skipped when they are missing.
@@ -18,6 +21,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { syntheticInputInPage } from "../src/tools/synthetic-input.ts";
+import { imageOf, seededPrimeSession, startStandInRelay, textOf } from "./prime-relay.fixture.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist-firefox");
@@ -152,14 +156,66 @@ const skip =
 			? "dist-firefox not built (npm run build:firefox)"
 			: false;
 
+/** geckodriver + headless Zen with the unsigned build installed permanently, as Tom has it after the one-time setup. */
+async function startZen(): Promise<{ d: Driver; stop: () => Promise<void> }> {
+	const work = mkdtempSync(join(tmpdir(), "sitegeist-zen-"));
+	const xpi = join(work, "sitegeist.xpi");
+	execFileSync("zip", ["-qr", "-X", xpi, ".", "-x", "*.map"], { cwd: dist });
+	const port = 4444 + Math.floor(Math.random() * 1000);
+	const gd: ChildProcess = spawn(geckodriver, ["--port", String(port), "--allow-system-access", "--log", "warn"], {
+		stdio: "ignore",
+	});
+	const d = new Driver(`http://127.0.0.1:${port}`);
+	const stop = async (): Promise<void> => {
+		if (d.session) await d.cmd("DELETE", `/session/${d.session}`).catch(() => undefined);
+		gd.kill("SIGTERM");
+	};
+	try {
+		await until(
+			() =>
+				fetch(`${d.base}/status`).then(
+					(r) => r.ok,
+					() => false,
+				),
+			(ok) => ok,
+			15_000,
+			"geckodriver",
+		);
+		const created = await d.cmd("POST", "/session", {
+			capabilities: {
+				alwaysMatch: {
+					browserName: "firefox",
+					"moz:firefoxOptions": {
+						binary: zen,
+						args: ["-headless", "-width=1280", "-height=800"],
+						prefs: {
+							"xpinstall.signatures.required": false, // what Tom sets once in about:config
+							"extensions.webextensions.uuids": JSON.stringify({ [EXT_ID]: EXT_UUID }),
+							"extensions.webextOptionalPermissionPrompts": false, // stands in for clicking "Allow"
+						},
+					},
+				},
+			},
+		});
+		d.session = isRecord(created) && typeof created.sessionId === "string" ? created.sessionId : "";
+		assert.ok(d.session, "webdriver session");
+		// unsigned, permanent install (what clicking the .xpi link does once the pref is off)
+		const installed = await d.cmd("POST", d.s("/moz/addon/install"), {
+			addon: readFileSync(xpi).toString("base64"),
+			temporary: false,
+		});
+		assert.equal(installed, EXT_ID);
+		return { d, stop };
+	} catch (err) {
+		await stop();
+		throw err;
+	}
+}
+
 test(
 	"Firefox / Zen build: installs, opens as a sidebar, reads and drives pages, renders artifacts",
 	{ skip },
 	async () => {
-		const work = mkdtempSync(join(tmpdir(), "sitegeist-zen-"));
-		const xpi = join(work, "sitegeist.xpi");
-		execFileSync("zip", ["-qr", "-X", xpi, ".", "-x", "*.map"], { cwd: dist });
-
 		// a page for the agent to read and drive
 		const site = createServer((req, res) => {
 			res.setHeader("content-type", "text/html");
@@ -171,48 +227,9 @@ test(
 		await new Promise<void>((r) => site.listen(0, "127.0.0.1", () => r()));
 		const pageUrl = `http://127.0.0.1:${(site.address() as AddressInfo).port}/`; // listen(0) on TCP: always an AddressInfo
 
-		const port = 4444 + Math.floor(Math.random() * 1000);
-		const gd: ChildProcess = spawn(geckodriver, ["--port", String(port), "--allow-system-access", "--log", "warn"], {
-			stdio: "ignore",
-		});
-		const d = new Driver(`http://127.0.0.1:${port}`);
+		// 1. unsigned, permanent install (startZen)
+		const { d, stop } = await startZen();
 		try {
-			await until(
-				() =>
-					fetch(`${d.base}/status`).then(
-						(r) => r.ok,
-						() => false,
-					),
-				(ok) => ok,
-				15_000,
-				"geckodriver",
-			);
-			const created = await d.cmd("POST", "/session", {
-				capabilities: {
-					alwaysMatch: {
-						browserName: "firefox",
-						"moz:firefoxOptions": {
-							binary: zen,
-							args: ["-headless", "-width=1280", "-height=800"],
-							prefs: {
-								"xpinstall.signatures.required": false, // what Tom sets once in about:config
-								"extensions.webextensions.uuids": JSON.stringify({ [EXT_ID]: EXT_UUID }),
-								"extensions.webextOptionalPermissionPrompts": false, // stands in for clicking "Allow"
-							},
-						},
-					},
-				},
-			});
-			d.session = isRecord(created) && typeof created.sessionId === "string" ? created.sessionId : "";
-			assert.ok(d.session, "webdriver session");
-
-			// 1. unsigned, permanent install (what clicking the .xpi link does once the pref is off)
-			const installed = await d.cmd("POST", d.s("/moz/addon/install"), {
-				addon: readFileSync(xpi).toString("base64"),
-				temporary: false,
-			});
-			assert.equal(installed, EXT_ID);
-
 			// 2. the toolbar button toggles the sitegeist sidebar (Firefox also opens it once on install)
 			await d.context("chrome");
 			const sidebar = () =>
@@ -247,7 +264,7 @@ test(
 			assert.ok(pageTab);
 			const panelTab = await d.openTab(`${BASE}/sidepanel.html`);
 			await until(
-				() => d.run("return document.body.innerText"),
+				() => d.run(`return document.body?.innerText ?? ""`),
 				(t) => typeof t === "string" && t.includes("Grant Permission"),
 				20_000,
 				"permission dialog",
@@ -429,9 +446,193 @@ test(
 			await d.parentFrame();
 			assert.ok(panelTab);
 		} finally {
-			if (d.session) await d.cmd("DELETE", `/session/${d.session}`).catch(() => undefined);
-			gd.kill("SIGTERM");
+			await stop();
 			site.close();
 		}
 	},
 );
+
+/** Runs a script in the browser chrome (Zen's own UI code), then returns to the page context. */
+async function inChrome(d: Driver, script: string, args: unknown[] = []): Promise<unknown> {
+	await d.context("chrome");
+	try {
+		return await d.run(script, args);
+	} finally {
+		await d.context("content");
+	}
+}
+
+/** Polls a read that may fail while a page navigates (failures count as "not yet"). */
+async function untilOk<T>(read: () => Promise<T>, ok: (v: T) => boolean, timeoutMs: number, what: string): Promise<T> {
+	return until(
+		() => read().catch((): undefined => undefined),
+		(v): v is T => v !== undefined && ok(v),
+		timeoutMs,
+		what,
+	).then((v) => {
+		if (v === undefined) throw new Error(`no value for ${what}`);
+		return v;
+	});
+}
+
+const ZEN_TABS = `const w = Services.wm.getMostRecentWindow("navigator:browser"); const g = w.gBrowser;
+	const find = (part) => [...g.tabs].find((t) => t.linkedBrowser.currentURI.spec.includes(part));`;
+
+test("Zen: sitegeist opened next to the page works on that page once Tom joins the two tabs", { skip }, async () => {
+	const SID = "sg-7c2e4a9b1d3f";
+	const DRAFT = "Which claim is weakest?";
+	const seeded = seededPrimeSession(SID, "Zen reading companion");
+	const relay = await startStandInRelay(SID, seeded.messages);
+	const { base } = relay;
+	const { d, stop } = await startZen();
+	try {
+		// The pages Tom has open, and a plain panel tab standing in for the sidebar: page scripts granted, chat seeded.
+		await d.openTab(`${base}/other`);
+		await d.openTab(`${base}/article`);
+		await d.openTab(`${BASE}/sidepanel.html?new=true`);
+		await untilOk(
+			() => d.run(`return document.body?.innerText ?? ""`),
+			(t) => typeof t === "string" && t.includes("Grant Permission"),
+			20_000,
+			"permission dialog",
+		);
+		await d.click("xpath", "//button[normalize-space(.)='Grant Permission']");
+		await until(
+			() => d.runAsync(`return await chrome.permissions.contains({ permissions: ["userScripts"] });`),
+			(v) => v === true,
+			10_000,
+			"userScripts granted",
+		);
+		await d.runAsync(
+			`const [data, metadata, syncUrl] = arguments;
+			 const db = await new Promise((res, rej) => { const q = indexedDB.open("sitegeist-storage"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+			 await new Promise((res, rej) => { const tx = db.transaction(["sessions", "sessions-metadata", "settings"], "readwrite"); tx.objectStore("sessions").put(data); tx.objectStore("sessions-metadata").put(metadata); tx.objectStore("settings").put(syncUrl, "sync.url"); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+			 db.close();
+			 location.href = "sidepanel.html?session=" + data.id;`,
+			[seeded.data, seeded.metadata, `${base}/sitegeist`],
+		);
+		await untilOk(
+			() => d.run(`return document.body?.innerText ?? ""`),
+			(t) => typeof t === "string" && t.includes("ask away"),
+			30_000,
+			"chat",
+		);
+		const editor = await d.element("css selector", "message-editor textarea");
+		await d.cmd("POST", d.s(`/element/${editor}/value`), { text: DRAFT });
+
+		// Tom is on the article; "Open next to this page" in the panel.
+		const articleId = await d.runAsync(
+			`const t = (await chrome.tabs.query({})).find((x) => (x.url ?? "").startsWith(arguments[0]));
+			 await chrome.tabs.update(t.id, { active: true });
+			 return t.id;`,
+			[`${base}/article`],
+		);
+		assert.equal(typeof articleId, "number");
+		const before = new Set(await d.handles());
+		await untilOk(
+			() =>
+				d.run(
+					`const b = document.querySelector('button[title^="Open next to this page"]'); if (!b) return false; b.click(); return true;`,
+				),
+			(v) => v === true,
+			15_000,
+			"move button",
+		);
+
+		// Zen cannot be split by extensions: the panel opens as the tab right after the page, both tabs selected.
+		const handle = await until(
+			() => d.handles(),
+			(hs) => hs.some((h) => !before.has(h)),
+			15_000,
+			"panel tab",
+		).then((hs) => hs.find((h) => !before.has(h)));
+		assert.ok(handle);
+		await d.switchTo(handle);
+		const placed = await untilOk(
+			() =>
+				d.runAsync(
+					`const me = await chrome.tabs.getCurrent();
+				 const page = await chrome.tabs.get(arguments[0]);
+				 return { url: me.url, index: me.index, active: me.active, highlighted: me.highlighted, pageIndex: page.index, pageHighlighted: page.highlighted };`,
+					[articleId],
+				),
+			(v) => isRecord(v) && typeof v.url === "string",
+			15_000,
+			"panel tab info",
+		);
+		assert.ok(isRecord(placed), JSON.stringify(placed));
+		assert.ok(String(placed.url).includes(`page=${articleId}`) && String(placed.url).includes(`session=${SID}`));
+		assert.equal(placed.index, Number(placed.pageIndex) + 1, "right after the page");
+		assert.equal(placed.active, true);
+		assert.equal(placed.highlighted, true);
+		assert.equal(placed.pageHighlighted, true, "both tabs selected, ready for Join 2 Tabs");
+		// The sidebar closes after the move (here: the plain tab standing in for it), and its relay socket with it.
+		await inChrome(
+			d,
+			`const w = Services.wm.getMostRecentWindow("navigator:browser"); const g = w.gBrowser;
+			 const standIn = [...g.tabs].find((t) => { const s = t.linkedBrowser.currentURI.spec; return s.includes("sidepanel.html") && !s.includes("page="); });
+			 if (standIn) g.removeTab(standIn); return !!standIn;`,
+		);
+		await untilOk(
+			() => d.run(`return document.body?.innerText ?? ""`),
+			(t) => typeof t === "string" && t.includes("ask away") && t.includes("Join 2 Tabs"),
+			20_000,
+			"moved chat and the join hint",
+		);
+		assert.equal(await d.run(`return document.querySelector("message-editor textarea")?.value ?? ""`), DRAFT);
+		assert.ok(
+			String(await d.run(`return document.querySelector("[data-sg-beside]")?.textContent ?? ""`)).includes(
+				"Article",
+			),
+		);
+
+		// Tom joins them (right-click → "Join 2 Tabs") and types in sitegeist.
+		const joined = await inChrome(
+			d,
+			`${ZEN_TABS} w.gZenViewSplitter.splitTabs([find("/article"), find("sidepanel.html?page=")]);
+				 g.selectedTab = find("sidepanel.html?page="); return w.gZenViewSplitter.splitViewActive;`,
+		);
+		assert.equal(joined, true);
+		const selected = () => inChrome(d, `${ZEN_TABS} return g.selectedTab.linkedBrowser.currentURI.spec;`);
+		const where = async (): Promise<unknown> =>
+			JSON.parse(
+				textOf(await relay.call("browser_eval", { code: "return document.title + '|' + location.pathname" })),
+			);
+		await until(
+			async () => relay.openSockets(),
+			(n) => n === 1,
+			20_000,
+			"one relay socket",
+		);
+		assert.equal(await where(), "Article|/article");
+		assert.ok(String(await selected()).includes("sidepanel.html?page="), "the chat keeps the focus");
+		const shot = imageOf(await relay.call("browser_screenshot"));
+		assert.ok(shot, "screenshot");
+		const pixel = await d.runAsync(
+			`const img = await createImageBitmap(await (await fetch("data:image/png;base64," + arguments[0])).blob());
+			 const c = new OffscreenCanvas(img.width, img.height); const x = c.getContext("2d"); x.drawImage(img, 0, 0);
+			 return Array.from(x.getImageData(Math.floor(img.width / 2), Math.floor(img.height / 2), 1, 1).data);`,
+			[shot],
+		);
+		assert.ok(Array.isArray(pixel) && Number(pixel[0]) > 150 && Number(pixel[1]) < 60, `red page, got ${pixel}`);
+		assert.ok(String(await selected()).includes("sidepanel.html?page="), "screenshot took no focus");
+
+		// Tom clicks into the page half: same page. Tom goes to another tab: the panel is off screen, the tools stay
+		// on the page beside it (and bring the split view back, so Tom can watch).
+		await inChrome(d, `${ZEN_TABS} g.selectedTab = find("/article"); return true;`);
+		assert.equal(await d.run("return document.visibilityState"), "visible", "both halves on screen");
+		assert.equal(await where(), "Article|/article");
+		await inChrome(d, `${ZEN_TABS} g.selectedTab = find("/other"); return true;`);
+		await until(
+			() => d.run("return document.visibilityState"),
+			(v) => v === "hidden",
+			10_000,
+			"panel off screen",
+		);
+		assert.equal(await where(), "Article|/article", "the page beside the panel, not the tab Tom went to");
+		assert.ok(String(await selected()).includes("/article"), "the split view came back to the front");
+	} finally {
+		await stop();
+		relay.close();
+	}
+});

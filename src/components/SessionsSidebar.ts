@@ -56,8 +56,8 @@ export class SessionsSidebar extends LitElement {
 	private nativeIdsLoaded = false;
 	private readonly anchorsStore = new AnchorsStore(chromeLocalBackend());
 	@state() private pinned: string[] = [];
-	@state() private locks: Record<string, number> = {};
-	@state() private windowId: number | undefined;
+	@state() private locks: Record<string, string> = {}; // sessionId -> panel that has it open
+	@state() private owner: string | undefined;
 	@state() private query = "";
 	/** "all", "browser", or a relay agent id (prime / worker). */
 	@state() private agentFilter = "all";
@@ -81,11 +81,10 @@ export class SessionsSidebar extends LitElement {
 	async refresh(): Promise<void> {
 		const storage = getSitegeistStorage();
 		try {
-			const [sessions, pinned, lockResponse, win, anchors, index] = await Promise.all([
+			const [sessions, pinned, lockResponse, anchors, index] = await Promise.all([
 				storage.sessions.getAllMetadata(),
 				storage.settings.get<string[]>(SESSIONS_PINNED_SETTING),
 				port.sendMessage({ type: "getLockedSessions" }),
-				chrome.windows.getCurrent(),
 				this.anchorsStore.all(),
 				storage.sessionSearch.all(),
 			]);
@@ -97,7 +96,7 @@ export class SessionsSidebar extends LitElement {
 			void this.ensureIndexed();
 			void this.loadNativeIds();
 			this.locks = lockResponse.locks || {};
-			this.windowId = win.id;
+			this.owner = port.currentOwner();
 		} catch (err) {
 			console.error("[SessionsSidebar] refresh failed:", err);
 		}
@@ -204,8 +203,8 @@ export class SessionsSidebar extends LitElement {
 	}
 
 	private isLocked(id: string): boolean {
-		const w = this.locks[id];
-		return w !== undefined && w !== this.windowId;
+		const owner = this.locks[id];
+		return owner !== undefined && owner !== this.owner;
 	}
 
 	private formatDate(iso: string): string {

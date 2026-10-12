@@ -23,7 +23,7 @@ import {
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
+import { Columns2, History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
 import { artifactsMaximizeActive, escapeRestoresChat, setArtifactsMaximized } from "./components/artifacts-maximize.js";
 import { setFooterSession } from "./components/footer-info.js";
@@ -72,8 +72,11 @@ import { SitegeistAppStorage } from "./storage/app-storage.js";
 import {
 	clearPromptDraft,
 	configurePromptDraft,
+	currentPromptDraftText,
 	DRAFT_STORAGE_WARNING_EVENT,
+	type DraftScope,
 	promotePromptDraft,
+	seedPromptDraft,
 } from "./storage/prompt-drafts.js";
 import { DebuggerTool } from "./tools/debugger.js";
 import { ExtractImageTool, registerExtractImageRenderer } from "./tools/extract-image.js";
@@ -86,7 +89,20 @@ import {
 	FetchRuntimeProvider,
 	NavigateRuntimeProvider,
 } from "./tools/repl/runtime-providers.js";
+import { hasSidePanelApi, isFirefoxExtension, sidebarActionApi } from "./utils/browser-compat.js";
+import { draftHandoffKey } from "./utils/open-beside.js";
 import * as port from "./utils/port.js";
+import {
+	clearAgentTab,
+	initPanelPlace,
+	isBesidePanel,
+	isPanelTab,
+	isWebUrl,
+	panelTab,
+	panelWindow,
+	rememberedPage,
+	targetTab,
+} from "./utils/target-tab.js";
 import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
 import { proxyToken, syncWithServer } from "./sync.js";
@@ -119,6 +135,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.contextMenus?.onClicked.addListener((info, tab) => {
 	if (info.menuItemId !== "sg-copy-markdown") return;
 	if (tab && tab.windowId >= 0 && tab.windowId !== currentWindowId) return;
+	const ownTab = panelTab();
+	if (ownTab !== undefined && tab?.id !== ownTab) return; // a panel tab copies only what was clicked in it
 	const selection = window.getSelection();
 	if (!selection || selection.isCollapsed) return;
 	const markdown = selectionToMarkdown(selection) || info.selectionText || "";
@@ -205,6 +223,15 @@ const refreshAgentOptions = async (): Promise<void> => {
 const isPrimeAgent = (a: Agent | undefined): a is PrimeRemoteAgent => a instanceof PrimeRemoteAgent;
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
+/** This panel: the side panel / sidebar of a window, or a panel tab (split view beside a page); owns session locks. */
+let panelOwner: port.PanelOwner;
+/** Unsent prompts are kept per panel: the side panel's window, or the panel tab. */
+const draftScope = (): DraftScope => {
+	const ownTab = panelTab();
+	return ownTab !== undefined ? `tab${ownTab}` : currentWindowId;
+};
+/** The window this panel is in (a panel tab can be dragged to another window). */
+const panelWindowId = (): number => panelWindow() ?? currentWindowId;
 /** New main-pi sessions from the panel run this unless Tom picks another model (matches the router's interactive default). */
 const PRIME_INTERACTIVE_DEFAULT_MODEL = "claude-opus-5-5";
 /** Set once initApp has loaded a session/agent; tab events before that must not navigate the panel. */
@@ -214,8 +241,9 @@ let appReady = false;
 // PAGE ANCHORS — sessions bound to the pages they were used on (Tom, 2026-09-29)
 // ============================================================================
 const anchors = new AnchorsStore(chromeLocalBackend());
-/** The tab Tom is looking at in this window; key undefined = the page cannot anchor a session. */
-let activeTab: { key: string | undefined; url: string; title: string } | undefined;
+/** The page sitegeist works on: the active tab (side panel) or the page beside the panel tab. key undefined = the page
+ * cannot anchor a session. */
+let activeTab: { id: number | undefined; key: string | undefined; url: string; title: string } | undefined;
 /** Pages bound to the current session (header attach button + auto-resume guard). */
 let currentAnchors: AnchorBinding[] = [];
 /** Tab that was active when the current turn started; bound to the session once it has an id. */
@@ -505,12 +533,27 @@ function unsuppressAutoResume(key: string): void {
 }
 
 async function refreshActiveTab(): Promise<void> {
-	const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
+	const tab = await targetTab();
 	const url = tab?.url ?? "";
 	activeTab =
 		tab && url && !url.startsWith("chrome-extension://") && !url.startsWith("moz-extension://")
-			? { key: pageKey(url), url, title: tab.title ?? "" }
+			? { id: tab.id, key: pageKey(url), url, title: tab.title ?? "" }
 			: undefined;
+	// A panel tab keeps the page it sits beside in its URL, so a reload or a session switch starts from it.
+	const page = rememberedPage();
+	if (isPanelTab() && page !== undefined) {
+		const here = new URL(window.location.href);
+		if (here.searchParams.get("page") !== String(page)) {
+			here.searchParams.set("page", String(page));
+			window.history.replaceState({}, "", here);
+		}
+	}
+}
+
+/** Panel tab: keep the page it sits beside when the panel loads another session. */
+function keepPanelPlace(url: URL): void {
+	const page = rememberedPage();
+	if (isPanelTab() && page !== undefined) url.searchParams.set("page", String(page));
 }
 
 async function refreshCurrentAnchors(): Promise<void> {
@@ -572,7 +615,7 @@ async function resumableSessionFor(key: string): Promise<AnchorBinding | undefin
 	return candidates.find((b) => {
 		if (!ids.has(b.sessionId) || b.sessionId === currentSessionId) return false;
 		const owner = locks[b.sessionId];
-		return owner === undefined || owner === currentWindowId;
+		return owner === undefined || owner === panelOwner;
 	});
 }
 
@@ -590,6 +633,7 @@ async function maybeAutoResume(): Promise<void> {
 	url.searchParams.set("session", target.sessionId);
 	url.searchParams.set("resumed", activeTab.key);
 	if (currentSessionId) url.searchParams.set("from", currentSessionId);
+	keepPanelPlace(url);
 	window.location.href = url.toString();
 }
 
@@ -615,7 +659,7 @@ const createAgent = async (
 		agentUnsubscribe();
 	}
 	if (isPrimeAgent(agent)) agent.detach();
-	configurePromptDraft(currentWindowId, currentSessionId);
+	configurePromptDraft(draftScope(), currentSessionId);
 	agentKind = kind;
 
 	// Mark all loaded messages as already recorded (by object identity)
@@ -693,11 +737,15 @@ const createAgent = async (
 			messages: initialState?.messages ?? [],
 			windowId: currentWindowId,
 			tabContext: async (): Promise<string> => {
-				const [tab] = await chrome.tabs.query({ active: true, windowId: currentWindowId });
+				const tab = await targetTab();
+				const inTab = isPanelTab();
+				const label = inTab ? "Page beside the panel (browser_* tools use it by default)" : "Active tab";
 				const where =
-					tab?.url && !tab.url.startsWith("chrome-extension://")
-						? `Active tab: "${tab.title ?? ""}" ${tab.url}`
-						: "Active tab: (none)";
+					tab?.url && isWebUrl(tab.url) ? `${label}: "${tab.title ?? ""}" ${tab.url}` : `${label}: (none)`;
+				// Panel in a tab (split view, 2026-10-12): say so, so the agent does not try to switch tabs to "show" Tom.
+				const placeNote = inTab
+					? " The panel is a browser tab next to the page Tom is reading (split view): browser_* tools act on that page where it is, screenshots do not take focus, and browser_navigate newTab opens behind the split view."
+					: "";
 				const matching = tab?.url ? await storage.skills.getSkillsForUrl(tab.url).catch(() => []) : [];
 				const skillsLine =
 					matching.length > 0
@@ -718,7 +766,7 @@ const createAgent = async (
 						? " Site runbooks: before driving a site with browser_* tools, agent_wiki_read main-pi-agent → 'Site runbooks — how to drive specific sites from the sitegeist panel' (page 01a06f49-71c8-7c6a-9b17-ddd04df32bc1) and reuse its selectors/flow; after you work out a NEW site or task (selectors, flow, verification), append a dated section to that page in the same turn so next time it is one call. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts)."
 						: " If a browser tool errors, say so plainly and carry on without it (main-pi owns the browser bridge).";
 				return first
-					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev side panel in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools switch their window to their tab so Tom can watch but never take window focus from what he is typing in (focus:true only if he asks to be pulled over); pass background:true to not even switch tabs. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Draw when it helps (Tom, 2026-10-11: figures make your explanations much better): when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, make one (e.g. matplotlib, TikZ/LaTeX rendered to PNG, or a self-contained HTML/SVG page), send it with telegram_attach so it shows in the artifacts panel, and refer to it in your reply. Files Tom attaches in the panel arrive as saved paths on this host in a [sitegeist attachments] block (never as pasted text): read them yourself when the contents matter, or browser_upload_file them into a page.${codeNote} Reply in the chat; keep answers tight.${skillsLine}${transcriptLine} [/sitegeist browser context]`
+					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev ${inTab ? "panel in a browser tab" : "side panel"} in his browser (not Telegram). ${where}.${placeNote} Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools switch their window to their tab so Tom can watch but never take window focus from what he is typing in (focus:true only if he asks to be pulled over); pass background:true to not even switch tabs. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Draw when it helps (Tom, 2026-10-11: figures make your explanations much better): when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, make one (e.g. matplotlib, TikZ/LaTeX rendered to PNG, or a self-contained HTML/SVG page), send it with telegram_attach so it shows in the artifacts panel, and refer to it in your reply. Files Tom attaches in the panel arrive as saved paths on this host in a [sitegeist attachments] block (never as pasted text): read them yourself when the contents matter, or browser_upload_file them into a page.${codeNote} Reply in the chat; keep answers tight.${skillsLine}${transcriptLine} [/sitegeist browser context]`
 					: `[sitegeist browser context] ${where}.${skillsLine}${transcriptLine} [/sitegeist browser context]`;
 			},
 		});
@@ -865,14 +913,14 @@ const createAgent = async (
 			if (!currentSessionId && shouldSaveSession(messages)) {
 				// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
 				currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
-				promotePromptDraft(currentWindowId, currentSessionId);
+				promotePromptDraft(draftScope(), currentSessionId);
 				if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
 
 				port
 					.sendMessage({
 						type: "acquireLock",
 						sessionId: currentSessionId,
-						windowId: currentWindowId,
+						owner: panelOwner,
 					})
 					.then((lockResponse) => {
 						if (!lockResponse.success) {
@@ -937,13 +985,11 @@ const createAgent = async (
 			);
 		},
 		onBeforeSend: async () => {
+			clearAgentTab(); // Tom's new prompt: the page beside a panel tab is the target again
 			if (!agent || isPrimeAgent(agent)) return; // prime gets its page context inside the prompt itself
 
-			// Get current tab info
-			const [tab] = await chrome.tabs.query({
-				active: true,
-				currentWindow: true,
-			});
+			// The page sitegeist works on (side panel: the active tab; panel tab: the page beside it)
+			const tab = await targetTab();
 			if (!tab?.url || tab.url.startsWith("chrome-extension://") || tab.url.startsWith("moz-extension://")) return;
 
 			// Find most recent navigation (either nav message or nav tool result)
@@ -1060,17 +1106,114 @@ const loadSession = (sessionId: string) => {
 	// Navigation will disconnect port and auto-release locks
 	const url = new URL(window.location.href);
 	url.searchParams.set("session", sessionId);
+	keepPanelPlace(url);
 	window.location.href = url.toString();
 };
 
 const newSession = (kind: AgentKind = "browser") => {
 	suppressAutoResumeForActivePage();
-	clearPromptDraft(currentWindowId); // Explicit New starts empty; saved-chat drafts remain separate.
+	clearPromptDraft(draftScope()); // Explicit New starts empty; saved-chat drafts remain separate.
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
 	url.search = kind !== "browser" ? `?new=true&agent=${encodeURIComponent(kind)}` : "?new=true";
+	keepPanelPlace(url);
 	window.location.href = url.toString();
 };
+
+/** Panel tab: unsent text that came along with a moved chat (see moveBesidePage and utils/open-beside). */
+async function adoptDraftHandoff(sessionId: string | undefined, pageTabId: number | undefined): Promise<void> {
+	if (!isPanelTab()) return;
+	const key = draftHandoffKey(sessionId, pageTabId);
+	const data = await chrome.storage.session.get(key);
+	const text: unknown = data[key];
+	if (typeof text !== "string" || !text) return;
+	await chrome.storage.session.remove(key);
+	seedPromptDraft(draftScope(), sessionId, text);
+}
+
+const SPLIT_HINT_SHOWN_KEY = "sg.splitHintShown";
+
+/** Panel tab not side by side with its page yet: one hint per tab on joining them (extensions cannot split Zen). */
+async function hintSplitView(): Promise<void> {
+	if (!isPanelTab()) return;
+	try {
+		if (sessionStorage.getItem(SPLIT_HINT_SHOWN_KEY)) return;
+	} catch {
+		return;
+	}
+	await new Promise((r) => setTimeout(r, 1500)); // a split view the browser is still setting up
+	const page = await targetTab();
+	if (!page || (await isBesidePanel(page))) return;
+	try {
+		sessionStorage.setItem(SPLIT_HINT_SHOWN_KEY, "1");
+	} catch {
+		/* the hint shows again next time */
+	}
+	const title = page.title ? `"${page.title}"` : "the page";
+	Toast.show(
+		isFirefoxExtension()
+			? `To see sitegeist beside ${title}: select both tabs, right-click one → "Join 2 Tabs".`
+			: `To see sitegeist beside ${title}, put this tab in a split view with it.`,
+		"info",
+		12000,
+	);
+}
+
+/** The background's answer to "sg-open-beside" (validated: a message boundary). */
+function openBesideError(response: unknown): string | undefined {
+	if (typeof response !== "object" || response === null) return "no answer from the extension";
+	if ("ok" in response && response.ok === true) return undefined;
+	return "error" in response && typeof response.error === "string" ? response.error : "unknown error";
+}
+
+/**
+ * Side panel / sidebar → a tab beside the page in a split view (Tom, 2026-10-12), taking this chat and its unsent
+ * text along. Runs synchronously up to the close: Firefox / Zen close the sidebar only from inside the click.
+ */
+function moveBesidePage(): void {
+	const pageTabId = activeTab?.id;
+	if (pageTabId === undefined) return;
+	if (agent && !isPrimeAgent(agent) && agent.state.isStreaming) {
+		Toast.show("Wait for the answer to finish, then move the chat.", "info", 4000);
+		return;
+	}
+	if (!currentSessionId && agent?.state.messages.some((m) => m.role === "user")) {
+		Toast.show("This chat is not saved yet. Try again in a moment.", "info", 4000);
+		return;
+	}
+	const sent: Promise<unknown> = chrome.runtime.sendMessage({
+		type: "sg-open-beside",
+		pageTabId,
+		sessionId: currentSessionId,
+		agentKind: currentSessionId ? undefined : agentKind,
+		draft: currentPromptDraftText(),
+		from: panelOwner,
+	});
+	// The unsent text moves with the chat: it must not come back here later.
+	const clearMovedDraft = () => clearPromptDraft(draftScope(), currentSessionId);
+	const sidebar = sidebarActionApi();
+	if (!hasSidePanelApi() && sidebar) {
+		clearMovedDraft();
+		void sidebar.close().catch(() => newSession(agentKind)); // the chat lives on in the new tab
+		return;
+	}
+	void sent.then(
+		async (response) => {
+			const error = openBesideError(response);
+			if (error !== undefined) {
+				Toast.error(`Could not open sitegeist next to the page: ${error}`, 8000);
+				return;
+			}
+			clearMovedDraft();
+			try {
+				await chrome.sidePanel.close({ windowId: currentWindowId });
+			} catch {
+				window.close(); // older Chrome: a side panel closes itself this way
+			}
+		},
+		(err: unknown) => Toast.error(`Could not open sitegeist next to the page: ${String(err)}`, 8000),
+	);
+}
 
 /** Per-session agent choice: swap in place while the session is still empty, otherwise start a fresh one. */
 const switchAgentKind = async (kind: AgentKind) => {
@@ -1203,6 +1346,28 @@ const renderApp = () => {
 								})
 							: ""
 					}
+					${
+						!isPanelTab() && activeTab?.id !== undefined
+							? Button({
+									variant: "ghost",
+									size: "sm",
+									className: "text-muted-foreground",
+									children: icon(Columns2, "sm"),
+									onClick: () => moveBesidePage(),
+									title: "Open next to this page: moves this chat into a tab beside the page (split view)",
+								})
+							: ""
+					}
+					${
+						isPanelTab() && activeTab
+							? html`<span
+									data-sg-beside=${activeTab.id ?? ""}
+									class="text-[10px] text-muted-foreground truncate max-w-[160px]"
+									title="sitegeist works on the page beside it: ${activeTab.title} - ${activeTab.url}"
+									>⇆ ${activeTab.title || activeTab.url}</span
+								>`
+							: ""
+					}
 				</div>
 				<div class="flex items-center gap-1 px-2">
 					${
@@ -1250,7 +1415,7 @@ const renderApp = () => {
 					.onSelect=${(sessionId: string) => loadSession(sessionId)}
 					.onNew=${() => newSession()}
 					.onDeleted=${(deletedSessionId: string) => {
-						clearPromptDraft(currentWindowId, deletedSessionId);
+						clearPromptDraft(draftScope(), deletedSessionId);
 						void anchors.removeSession(deletedSessionId);
 						if (isPrimeSessionId(deletedSessionId))
 							void primeDeleteArtifacts(agentIdFromSessionId(deletedSessionId), deletedSessionId).catch(
@@ -1317,7 +1482,32 @@ const refreshSessionsSidebar = () => {
 // ============================================================================
 
 // Listen for tab updates and insert navigation messages only when agent is running
+/**
+ * Panel tab: the page beside it may have changed (it navigated, or another page joined the split view). Same follow-ups
+ * as for the side panel's active tab: header, anchors, a navigation note to a running agent, auto-resume.
+ */
+async function onPageBesideChanged(): Promise<void> {
+	await new Promise((r) => setTimeout(r, 300)); // let target-tab's own activation bookkeeping settle first
+	const before = activeTab?.url;
+	await refreshActiveTab();
+	if (appReady) renderApp();
+	const now = activeTab;
+	if (now && now.url !== before && agent?.state.isStreaming && !isToolNavigating()) {
+		agent.steer(await createNavigationMessage(now.url, now.title || "Untitled", undefined, now.id));
+	}
+	await maybeAutoResume();
+}
+
 chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
+	if (isPanelTab()) {
+		if (
+			(changeInfo.url || changeInfo.title) &&
+			tab.windowId === panelWindowId() &&
+			(tab.active || _tabId === activeTab?.id)
+		)
+			void onPageBesideChanged();
+		return;
+	}
 	// Page anchors: the page Tom is on changed (URL) or got its title → header button, sidebar, auto-resume.
 	if ((changeInfo.url || changeInfo.title) && tab.active && tab.windowId === currentWindowId)
 		void onActiveTabChanged();
@@ -1343,6 +1533,10 @@ chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
 
 // Listen for tab activation (user switches tabs) only when agent is running
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
+	if (isPanelTab()) {
+		if (activeInfo.windowId === panelWindowId()) void onPageBesideChanged();
+		return;
+	}
 	// Ignore tab activations from other windows
 	if (activeInfo.windowId !== currentWindowId) return;
 	void onActiveTabChanged();
@@ -1531,8 +1725,14 @@ async function initApp() {
 	}
 	currentWindowId = currentWindow.id;
 
-	// Initialize port communication system
-	port.initialize(currentWindowId);
+	// Side panel / sidebar, or a normal tab (split view beside a page, ?page=<tab id> = the page it was opened for)
+	const seedPage = Number(new URLSearchParams(window.location.search).get("page"));
+	await initPanelPlace(Number.isInteger(seedPage) && seedPage > 0 ? seedPage : undefined);
+	const ownTab = panelTab();
+	panelOwner = ownTab !== undefined ? port.tabPanelOwner(ownTab) : port.sidePanelOwner(currentWindowId);
+
+	// Initialize port communication system (session locks are per panel)
+	port.initialize(panelOwner);
 
 	// TODO reenable Request persistent storage
 	// if (storage.sessions) {
@@ -1592,6 +1792,9 @@ async function initApp() {
 	}
 
 	await refreshActiveTab();
+	// A chat moved here from the side panel brings its unsent text along (open-beside handoff).
+	await adoptDraftHandoff(sessionIdFromUrl ?? undefined, seedPage > 0 ? seedPage : undefined);
+	void hintSplitView();
 
 	// Panel opened (icon, shortcut, browser restart): the page Tom is on decides the session first.
 	if (
@@ -1606,7 +1809,7 @@ async function initApp() {
 			const lockResponse = await port.sendMessage({
 				type: "acquireLock",
 				sessionId: bound.sessionId,
-				windowId: currentWindowId,
+				owner: panelOwner,
 			});
 			if (lockResponse.success) {
 				sessionIdFromUrl = bound.sessionId;
@@ -1627,7 +1830,7 @@ async function initApp() {
 			const lockResponse = await port.sendMessage({
 				type: "acquireLock",
 				sessionId: latestSessionId,
-				windowId: currentWindowId,
+				owner: panelOwner,
 			});
 
 			if (lockResponse.success) {
@@ -1646,7 +1849,7 @@ async function initApp() {
 			const lockResponse = await port.sendMessage({
 				type: "acquireLock",
 				sessionId: sessionIdFromUrl,
-				windowId: currentWindowId,
+				owner: panelOwner,
 			});
 
 			if (!lockResponse.success) {
