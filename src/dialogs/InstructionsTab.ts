@@ -30,6 +30,7 @@ export class InstructionsTab extends SettingsTab {
 	@state() private syncToken = "";
 	@state() private saved = false;
 	@state() private syncStatus = "";
+	@state() private tokenCopied = false;
 	private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 	getTabName(): string {
@@ -63,6 +64,17 @@ export class InstructionsTab extends SettingsTab {
 		this.saved = false;
 		clearTimeout(this.saveTimer);
 		this.saveTimer = setTimeout(() => this.save(), 400);
+	}
+
+	/** The token box is a password field (browsers block copying from those): copy it for another browser. */
+	private async copyToken() {
+		const token = this.syncToken.trim();
+		if (!token) return;
+		await navigator.clipboard.writeText(token);
+		this.tokenCopied = true;
+		setTimeout(() => {
+			this.tokenCopied = false;
+		}, 2000);
 	}
 
 	private async syncNow() {
@@ -147,13 +159,21 @@ export class InstructionsTab extends SettingsTab {
 				<p class="text-xs text-muted-foreground">
 					${i18n("Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.")}
 				</p>
-				<input
-					type="password"
-					autocomplete="off"
-					class="w-full px-3 py-2 text-sm text-foreground bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
-					.value=${this.syncToken}
-					@input=${(e: Event) => this.onSyncTokenInput(e)}
-				/>
+				<div class="flex gap-2">
+					<input
+						type="password"
+						autocomplete="off"
+						class="flex-1 px-3 py-2 text-sm text-foreground bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
+						.value=${this.syncToken}
+						@input=${(e: Event) => this.onSyncTokenInput(e)}
+					/>
+					<button
+						class="px-3 py-2 text-sm rounded-md border border-input bg-background hover:bg-accent disabled:opacity-50"
+						title=${i18n("Copy the token, to paste it into sitegeist in another browser")}
+						?disabled=${!this.syncToken.trim()}
+						@click=${() => this.copyToken()}
+					>${this.tokenCopied ? i18n("Copied") : i18n("Copy")}</button>
+				</div>
 				<label class="flex items-start gap-2 text-xs text-muted-foreground">
 					<input type="checkbox" class="mt-0.5" .checked=${this.syncAuth} @change=${(e: Event) => this.onSyncAuthChange(e)} />
 					<span>${i18n("Also back up provider logins (API keys and OAuth tokens) to the sync server, so they survive removing the extension. Only use with a private server you control.")}</span>

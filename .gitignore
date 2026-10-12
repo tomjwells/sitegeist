@@ -1,5 +1,6 @@
 node_modules/
 dist-chrome/
+dist-firefox/
 site/dist/
 site/data/
 *.log

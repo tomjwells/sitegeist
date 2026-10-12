@@ -1,0 +1,88 @@
+{
+	"manifest_version": 3,
+	"name": "sitegeist-dev",
+	"description": "Your AI companion for the web - Research, automate, create",
+	"version": "1.0.0",
+	"browser_specific_settings": {
+		"gecko": {
+			"id": "sitegeist-dev@tjw-private",
+			"strict_min_version": "154.0",
+			"update_url": "https://extensions.tjw-private/sitegeist-dev-firefox/updates.json"
+		}
+	},
+	"action": {
+		"default_title": "Click to open side panel",
+		"default_icon": {
+			"16": "icon-16.png",
+			"48": "icon-48.png"
+		},
+		"default_area": "navbar"
+	},
+	"background": {
+		"scripts": [
+			"background.js"
+		],
+		"type": "module"
+	},
+	"icons": {
+		"16": "icon-16.png",
+		"48": "icon-48.png",
+		"128": "icon-128.png"
+	},
+	"sidebar_action": {
+		"default_panel": "sidepanel.html",
+		"default_title": "sitegeist",
+		"default_icon": {
+			"16": "icon-16.png",
+			"48": "icon-48.png"
+		}
+	},
+	"commands": {
+		"_execute_sidebar_action": {
+			"suggested_key": {
+				"default": "Ctrl+Shift+S",
+				"mac": "Command+Shift+S"
+			},
+			"description": "Toggle side panel"
+		}
+	},
+	"permissions": [
+		"storage",
+		"unlimitedStorage",
+		"activeTab",
+		"scripting",
+		"cookies",
+		"webNavigation",
+		"declarativeNetRequest",
+		"contextMenus",
+		"clipboardWrite"
+	],
+	"optional_permissions": [
+		"userScripts"
+	],
+	"host_permissions": [
+		"<all_urls>",
+		"http://*/*",
+		"https://*/*",
+		"http://localhost/*",
+		"http://127.0.0.1/*"
+	],
+	"declarative_net_request": {
+		"rule_resources": [
+			{
+				"id": "cors_rules",
+				"enabled": true,
+				"path": "cors-rules.json"
+			}
+		]
+	},
+	"sandbox": {
+		"pages": [
+			"sandbox.html"
+		]
+	},
+	"content_security_policy": {
+		"extension_pages": "script-src 'self'; object-src 'self'",
+		"sandbox": "sandbox allow-scripts allow-modals; default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net/ https://unpkg.com/ https://cdnjs.cloudflare.com/ https://esm.sh/ https://esm.run/ https://cdn.skypack.dev/ https://cdn.tailwindcss.com; script-src-elem 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net/ https://unpkg.com/ https://cdnjs.cloudflare.com/ https://esm.sh/ https://esm.run/ https://cdn.skypack.dev/ https://cdn.tailwindcss.com; connect-src https://cdn.jsdelivr.net/ https://unpkg.com/ https://cdnjs.cloudflare.com/ https://esm.sh/ https://esm.run/ https://cdn.skypack.dev/ https://cdn.tailwindcss.com https://t1.gstatic.com/; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/ https://cdnjs.cloudflare.com/ https://cdn.tailwindcss.com; img-src 'self' data: blob: https:; font-src 'self' data: https://cdn.jsdelivr.net/ https://cdnjs.cloudflare.com/; object-src 'none'; base-uri 'none'; form-action 'none'"
+	}
+}

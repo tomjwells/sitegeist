@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Firefox / Zen build** from the same source (Tom, 2026-10-12: "Why can't I install sitegeist on Zen browser?"). `npm run build` now builds `dist-chrome/` and `dist-firefox/` (`scripts/build.mjs --target firefox`, manifest `static/manifest.firefox.json`: MV3, `sidebar_action`, background `scripts` with `type: module`, `userScripts` as an optional permission, gecko id `sitegeist-dev@tjw-private`, `strict_min_version` 154 for the manifest `sandbox` key). The Firefox version is `1.0.<commit count>`, so every published commit is a newer version for Firefox's update check. `publish-extension sitegeist` publishes both: the Chrome zip, plus `sitegeist-dev-firefox/<file>.xpi` and `updates.json` (self-hosted updates through the manifest `update_url`, so an installed copy updates itself).
+  - The toolbar button toggles the extension sidebar (`sidebarAction`, synchronously in the click handler), and Cmd/Ctrl+Shift+S runs `_execute_sidebar_action`. Chrome keeps the side panel. Browser differences are detected in one place, `src/utils/browser-compat.ts`.
+  - Firefox has no `chrome.debugger`. `nativeClick` / `nativeType` / `nativePress` / `nativeKeyDown` / `nativeKeyUp` fall back to page events through a user script (`src/tools/synthetic-input.ts`: pointer/mouse events, `execCommand("insertText")` so React inputs see the text, Enter submits forms). The runtime description tells the agent they are synthetic. The `debugger` tool's `eval` runs in the page's own world via `userScripts.execute({ world: "MAIN" })`.
+  - The background script registers the user-script message relay again once the optional permission is granted. The stale "Firefox is currently not supported for browserjs()" error now tells the user how to enable page scripts.
+  - Settings → Instructions → Proxy token has a **Copy** button (browsers block copying from password fields), so the token can be pasted into sitegeist in another browser. The welcome dialog mentions it.
+  - Test: `npm run test:firefox:extension` runs the add-on in REAL Zen 1.23.2b (Firefox 157), headless, through geckodriver's WebDriver HTTP API. It covers: permanent unsigned install; the toolbar button closes/opens the sitegeist sidebar; "Grant Permission" grants `userScripts`; page scripts in the isolated and page worlds; `captureVisibleTab`; synthetic click/type/Enter on a real form; a PDF artifact in Firefox's own PDF viewer; an HTML artifact running its inline script in the extension sandbox. The test is skipped when Zen/geckodriver are not cached in `~/.cache/sitegeist-firefox-test/`.
+
 ### Fixed
 
 - Image artifacts taller than the panel are shown whole (fitted). The image pushed past the bottom of the panel and was cut off, because the flex row's `min-height: auto` defeated `max-h-full`. Maximize made this happen for landscape images too.

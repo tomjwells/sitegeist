@@ -118,6 +118,9 @@ declare module "@mariozechner/mini-lit" {
 		"No matching sessions": string;
 		Close: string;
 		"Proxy token": string;
+		Copy: string;
+		Copied: string;
+		"Copy the token, to paste it into sitegeist in another browser": string;
 		"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.": string;
 	}
 }
@@ -242,6 +245,10 @@ const sitegeistTranslations = {
 		"No matching sessions": "No matching sessions",
 		Close: "Close",
 		"Proxy token": "Proxy token",
+		Copy: "Copy",
+		Copied: "Copied",
+		"Copy the token, to paste it into sitegeist in another browser":
+			"Copy the token, to paste it into sitegeist in another browser",
 		"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.":
 			"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.",
 	},
@@ -366,6 +373,10 @@ const sitegeistTranslations = {
 		"No matching sessions": "Keine passenden Sitzungen",
 		Close: "Schließen",
 		"Proxy token": "Proxy-Token",
+		Copy: "Kopieren",
+		Copied: "Kopiert",
+		"Copy the token, to paste it into sitegeist in another browser":
+			"Token kopieren, um es in sitegeist in einem anderen Browser einzufügen",
 		"Shared secret the proxy requires. It unlocks the sync store and lets the Browser agent call every model in the catalog through the proxy's credentials - no per-provider login needed. Models take effect after reopening the panel.":
 			"Gemeinsames Geheimnis, das der Proxy verlangt. Es öffnet den Sync-Speicher und erlaubt dem Browser-Agenten, jedes Modell im Katalog über die Zugangsdaten des Proxys aufzurufen - kein Login pro Anbieter nötig. Modelle gelten nach erneutem Öffnen des Panels.",
 	},

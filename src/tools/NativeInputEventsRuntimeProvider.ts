@@ -1,5 +1,7 @@
 import type { SandboxRuntimeProvider } from "@mariozechner/pi-web-ui";
 import { NATIVE_INPUT_EVENTS_DESCRIPTION } from "../prompts/prompts.js";
+import { hasDebuggerApi } from "../utils/browser-compat.js";
+import { isSyntheticAction, runSyntheticInput } from "./synthetic-input.js";
 
 /**
  * Provides native input event functions to JavaScript REPL using Chrome Debugger API.
@@ -179,6 +181,12 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 
 		// Get active tab ID once at the start
 		const tabId = await this.getActiveTabId();
+
+		// Firefox / Zen: no debugger API. Same actions as page events through a user script (synthetic-input.ts).
+		if (!hasDebuggerApi()) {
+			respond(await this.syntheticInput(tabId, message));
+			return;
+		}
 
 		try {
 			// Attach debugger to tab
@@ -374,7 +382,51 @@ export class NativeInputEventsRuntimeProvider implements SandboxRuntimeProvider 
 		}
 	}
 
+	/** Firefox / Zen path of handleMessage: page events instead of CDP input (see synthetic-input.ts). */
+	private async syntheticInput(
+		tabId: number,
+		message: { action?: unknown; selector?: unknown; text?: unknown; key?: unknown },
+	): Promise<{ success: boolean; error?: string }> {
+		const action = message.action;
+		if (!isSyntheticAction(action)) return { success: false, error: `Unknown action: ${String(action)}` };
+		const keyName = typeof message.key === "string" ? message.key : undefined;
+		try {
+			if (action === "keyDown" && keyName) this.setModifier(keyName, true);
+			const result = await runSyntheticInput(tabId, {
+				action,
+				selector: typeof message.selector === "string" ? message.selector : undefined,
+				text: typeof message.text === "string" ? message.text : undefined,
+				key: keyName ? this.getKeyInfo(keyName) : undefined,
+				alt: (this.modifiers & this.MODIFIER_ALT) !== 0,
+				ctrl: (this.modifiers & this.MODIFIER_CTRL) !== 0,
+				meta: (this.modifiers & this.MODIFIER_META) !== 0,
+				shift: (this.modifiers & this.MODIFIER_SHIFT) !== 0,
+			});
+			return result.ok ? { success: true } : { success: false, error: result.error ?? "synthetic input failed" };
+		} catch (error) {
+			return { success: false, error: error instanceof Error ? error.message : String(error) };
+		} finally {
+			if (action === "keyUp" && keyName) this.setModifier(keyName, false);
+		}
+	}
+
+	private setModifier(key: string, down: boolean): void {
+		const bit =
+			key === "Alt"
+				? this.MODIFIER_ALT
+				: key === "Control"
+					? this.MODIFIER_CTRL
+					: key === "Meta"
+						? this.MODIFIER_META
+						: key === "Shift"
+							? this.MODIFIER_SHIFT
+							: 0;
+		this.modifiers = down ? this.modifiers | bit : this.modifiers & ~bit;
+	}
+
 	getDescription(): string {
-		return NATIVE_INPUT_EVENTS_DESCRIPTION;
+		if (hasDebuggerApi()) return NATIVE_INPUT_EVENTS_DESCRIPTION;
+		return `${NATIVE_INPUT_EVENTS_DESCRIPTION}
+In this browser (Firefox / Zen) these functions send synthetic page events (isTrusted false), not real input: most sites accept them, a few (Google Sheets, some anti-bot checks) ignore them.`;
 	}
 }

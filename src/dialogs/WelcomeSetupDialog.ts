@@ -39,6 +39,10 @@ export class WelcomeSetupDialog extends DialogBase {
 						You can either log in with an existing subscription (Anthropic, OpenAI, or GitHub Copilot)
 						or enter an API key.
 					</p>
+					<p class="text-sm text-muted-foreground">
+						Already use sitegeist in another browser? Copy the proxy token there (Settings → Instructions → Proxy
+						token → Copy) and paste it here in the same place. Your logins, skills and instructions then sync over.
+					</p>
 					<div class="flex justify-end">
 						${Button({
 							variant: "default",

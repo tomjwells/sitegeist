@@ -11,6 +11,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Bug } from "lucide";
+import { hasDebuggerApi } from "../utils/browser-compat.js";
 
 // ============================================================================
 // TYPES
@@ -122,6 +123,28 @@ CRITICAL: Use browserjs() and repl tool for DOM manipulation. Use this ONLY for 
 			if (args.action === "eval") {
 				if (!args.code) {
 					throw new Error("eval action requires code parameter");
+				}
+
+				// Firefox / Zen: no debugger API. Run the code in the page's own context (MAIN world) as a user script.
+				if (!hasDebuggerApi()) {
+					if (typeof chrome.userScripts?.execute !== "function") {
+						throw new Error('Page scripts are not enabled for sitegeist: click "Grant Permission" in the panel.');
+					}
+					const results = await chrome.userScripts.execute({
+						js: [{ code: args.code }],
+						target: { tabId: tab.id, allFrames: false },
+						world: "MAIN",
+					});
+					const first = Array.isArray(results) ? results[0] : undefined;
+					if (first?.error) throw new Error(first.error);
+					const value: unknown = first?.result;
+					const text =
+						value === undefined
+							? "undefined"
+							: typeof value === "string"
+								? value
+								: JSON.stringify(value, null, 2);
+					return { content: [{ type: "text", text }], details: { value } };
 				}
 
 				// Attach debugger if not already attached

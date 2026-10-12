@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, watch } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build, context } from "esbuild";
@@ -10,9 +10,15 @@ const packageRoot = join(__dirname, "..");
 const isWatch = process.argv.includes("--watch");
 const staticDir = join(packageRoot, "static");
 
-// Chrome only
-const targetBrowser = "chrome";
-const outDir = join(packageRoot, "dist-chrome");
+// --target chrome (default) -> dist-chrome/, --target firefox -> dist-firefox/ (Firefox / Zen). Same source, same
+// bundle; only the manifest differs (static/manifest.<target>.json). Code feature-detects what a browser lacks.
+const TARGETS = ["chrome", "firefox"];
+const targetArg = process.argv.indexOf("--target");
+const targetBrowser = targetArg >= 0 ? process.argv[targetArg + 1] : "chrome";
+if (!TARGETS.includes(targetBrowser ?? "")) {
+	throw new Error(`build.mjs: --target must be one of ${TARGETS.join(", ")} (got ${String(targetBrowser)})`);
+}
+const outDir = join(packageRoot, `dist-${targetBrowser}`);
 
 const entryPoints = {
 	sidepanel: join(packageRoot, "src/sidepanel.ts"),
@@ -284,15 +290,16 @@ export const piWebUiPatchPlugin = {
 	},
 };
 
+function git(args) {
+	try {
+		return execFileSync("git", ["-C", packageRoot, ...args], { encoding: "utf8" }).trim();
+	} catch {
+		return "";
+	}
+}
+
 // Build identity shown bottom-left in the panel (src/components/footer-info.ts): the commit this build is from.
 function buildIdentity() {
-	const git = (args) => {
-		try {
-			return execFileSync("git", ["-C", packageRoot, ...args], { encoding: "utf8" }).trim();
-		} catch {
-			return "";
-		}
-	};
 	const sha = git(["rev-parse", "--short", "HEAD"]) || "dev";
 	const dirty = git(["status", "--porcelain", "--untracked-files=no"]).length > 0;
 	return { sha, dirty, builtAt: new Date().toISOString() };
@@ -305,7 +312,7 @@ const buildOptions = {
 	bundle: true,
 	outdir: outDir,
 	format: "esm",
-	target: ["chrome120"],
+	target: targetBrowser === "firefox" ? ["firefox154"] : ["chrome120"],
 	platform: "browser",
 	sourcemap: isWatch ? "inline" : true,
 	entryNames: "[name]",
@@ -336,11 +343,33 @@ const getStaticFiles = () => {
 	return readdirSync(staticDir).map((file) => join("static", file));
 };
 
-const copyStatic = () => {
-	// Use browser-specific manifest
+/**
+ * Firefox updates an installed add-on only when the version in updates.json is higher than the installed one, so
+ * every Firefox build gets "<major>.<minor>.<number of commits>" (1.0.256): it grows with each commit, and two
+ * builds of the same commit have the same version (a republish is not offered as an update). Chrome's manifest is
+ * copied unchanged ("Load unpacked" does not care).
+ */
+function firefoxVersion(staticVersion) {
+	const [major = "1", minor = "0"] = String(staticVersion).split(".");
+	const commits = git(["rev-list", "--count", "HEAD"]);
+	return `${major}.${minor}.${/^[0-9]+$/.test(commits) ? commits : "0"}`;
+}
+
+const writeManifest = () => {
 	const manifestSource = join(packageRoot, `static/manifest.${targetBrowser}.json`);
 	const manifestDest = join(outDir, "manifest.json");
-	copyFileSync(manifestSource, manifestDest);
+	if (targetBrowser !== "firefox") {
+		copyFileSync(manifestSource, manifestDest);
+		return;
+	}
+	const manifest = JSON.parse(readFileSync(manifestSource, "utf8"));
+	manifest.version = firefoxVersion(manifest.version);
+	writeFileSync(manifestDest, `${JSON.stringify(manifest, null, "\t")}\n`);
+};
+
+const copyStatic = () => {
+	// Use browser-specific manifest
+	writeManifest();
 
 	// Copy all files from static/ directory (except manifest files)
 	const staticFiles = getStaticFiles();

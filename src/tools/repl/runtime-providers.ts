@@ -290,10 +290,10 @@ export class BrowserJsRuntimeProvider implements SandboxRuntimeProvider {
 					console: consoleLogs,
 				});
 			} else {
-				// Firefox fallback
+				// userScripts not available: the permission is not granted yet (Firefox / Zen: optional permission)
 				respond({
 					success: false,
-					error: 'Firefox is currently not supported for browserjs(). Use Chrome 138+ with "Allow User Scripts" enabled.',
+					error: 'Page scripts are not enabled for sitegeist. TELL THE USER: in Firefox / Zen, click "Grant Permission" in the sitegeist panel (or reopen the panel to see the prompt); in Chrome 138+, turn on "Allow User Scripts" for sitegeist at chrome://extensions.',
 				});
 			}
 		} catch (error: any) {

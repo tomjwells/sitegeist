@@ -1,15 +1,21 @@
 import { ANCHORS_STORAGE_KEY, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
+import { hasSidePanelApi, sidebarActionApi } from "./utils/browser-compat.js";
 import type { LockedSessionsMessage, LockResultMessage, SidepanelToBackgroundMessage } from "./utils/port.js";
 
 // Called when Sitegeist icon is clicked - opens the (window-global) side panel.
 // Open by windowId, not tabId: the panel has no tab-specific options, and Edge treats a tabId-opened
 // panel as bound to that tab - switching tabs closes/re-creates it, losing all in-panel state (open
 // artifact, scroll position). Chrome behaves the same either way. Same call the keyboard toggle uses.
+// Firefox / Zen have no side panel API: the panel is the extension sidebar (manifest sidebar_action), and
+// sidebarAction.open/toggle only work synchronously inside this click handler (user gesture), so no await first.
 chrome.action.onClicked.addListener((tab: chrome.tabs.Tab) => {
 	const windowId = tab?.windowId;
-	if (windowId !== undefined && chrome.sidePanel.open) {
-		chrome.sidePanel.open({ windowId });
+	if (hasSidePanelApi()) {
+		if (windowId !== undefined) chrome.sidePanel.open({ windowId });
+		return;
 	}
+	const sidebar = sidebarActionApi();
+	if (sidebar) void (sidebar.toggle ? sidebar.toggle() : sidebar.open());
 });
 
 // ============================================================================
@@ -71,9 +77,16 @@ chrome.runtime.onInstalled.addListener(() => {
 	});
 });
 
-// Listen for messages from userScripts (overlay in page)
-console.log("[Background] onUserScriptMessage available:", !!chrome.runtime.onUserScriptMessage);
-if (chrome.runtime.onUserScriptMessage) {
+// Listen for messages from userScripts (overlay in page). Firefox / Zen: userScripts is an optional permission the
+// user grants from the panel after this script started, and the namespace only appears then: register on grant too.
+let userScriptRelayRegistered = false;
+chrome.permissions.onAdded.addListener(() => registerUserScriptRelay());
+registerUserScriptRelay();
+function registerUserScriptRelay(): void {
+	if (userScriptRelayRegistered) return;
+	console.log("[Background] onUserScriptMessage available:", !!chrome.runtime.onUserScriptMessage);
+	if (!chrome.runtime.onUserScriptMessage) return;
+	userScriptRelayRegistered = true;
 	chrome.runtime.onUserScriptMessage.addListener((message, sender, sendResponse) => {
 		console.log("[Background] Received userScript message:", message, "from:", sender);
 		if (message.type === "abort-repl") {
@@ -85,8 +98,6 @@ if (chrome.runtime.onUserScriptMessage) {
 		}
 	});
 	console.log("[Background] onUserScriptMessage listener registered");
-} else {
-	console.error("[Background] onUserScriptMessage NOT available!");
 }
 
 // Storage keys for tracking state (persists across service worker sleep)
@@ -180,7 +191,8 @@ chrome.windows.onRemoved.addListener((windowId: number) => {
 
 // Handle keyboard shortcut - toggle sidepanel open/close
 chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab) => {
-	if (command === "toggle-sidepanel") {
+	// Firefox / Zen toggle the sidebar natively (manifest command _execute_sidebar_action), so this is Chrome only.
+	if (command === "toggle-sidepanel" && hasSidePanelApi()) {
 		if (!sender?.windowId) {
 			console.log("[Background] Cannot toggle sidepanel: sender windowId not available");
 			return;
@@ -200,7 +212,7 @@ chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab
 });
 
 function closeSidepanel(windowId: number, callCloseOnSidePanelAPI: boolean = true) {
-	if (callCloseOnSidePanelAPI) {
+	if (callCloseOnSidePanelAPI && hasSidePanelApi()) {
 		(chrome.sidePanel as any).close({ windowId });
 	}
 
