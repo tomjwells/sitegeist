@@ -15,6 +15,7 @@ import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import type { Attachment, UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
 import { catalogProviders, getModels as registryModels } from "../models-registry.js";
 import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
+import { bridgeNoticeToast, isBridgeNotice } from "./bridge-notice.js";
 import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
 import { MAIN_AGENT_ID, PRIME_PROVIDER } from "./constants.js";
 import {
@@ -357,8 +358,21 @@ export class PrimeRemoteAgent extends Agent {
 
 	// ---- event replay -----------------------------------------------------------------------------
 
+	/** Bridge notices already toasted (a reconnect can deliver the same journal events again). */
+	private readonly shownNotices = new Set<string>();
+
 	private applyEvents(events: Json[]): void {
 		for (const raw of events) {
+			if (isBridgeNotice(raw)) {
+				// Not an agent event: the bridge's own notices (e.g. its dead-call watchdog) become a toast.
+				const toast = bridgeNoticeToast(raw, Date.now());
+				const key = `${String(raw.timestamp)}|${toast}`;
+				if (toast !== undefined && !this.shownNotices.has(key)) {
+					this.shownNotices.add(key);
+					this.onNotice?.(toast);
+				}
+				continue;
+			}
 			if (typeof raw.type !== "string" || !AGENT_EVENT_TYPES.has(raw.type)) continue;
 			// The bridge log carries pi-agent-core AgentEvents verbatim; shape checked per case below.
 			const event = raw as unknown as AgentEvent;

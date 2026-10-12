@@ -14,6 +14,7 @@
 		"src/prime/attachments-text.ts",
 		"src/anchors/anchors.ts",
 		"src/sessions/session-search.ts",
+		"src/prime/bridge-notice.ts",
 		"scripts/build.mjs"
 	]
 }

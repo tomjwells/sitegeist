@@ -4,9 +4,13 @@
 
 ### Fixed
 
+- Image artifacts taller than the panel are shown whole (fitted). The image pushed past the bottom of the panel and was cut off, because the flex row's `min-height: auto` defeated `max-h-full`. Maximize made this happen for landscape images too.
+
 - prime-agent sessions: artifacts the agent sends (`telegram_attach` → artifacts panel) are now saved with the session the moment they arrive. Before, they were only saved with the next agent event; a figure that landed after the turn's end (the usual case) was shown but not saved, and vanished when the panel was closed or reloaded. The R730 relay now also keeps a copy of every file it delivers (per session, newest 40), and on resume the panel restores any artifact it does not have ("Restored N artifacts from the R730"). Deleting a session drops the R730 copies. Covered by `npm run test:prime-model:extension`.
 
 ### Changed
+
+- PDF artifacts open in Chrome's built-in PDF viewer (an iframe on a blob: URL of the bytes, fitted to the panel width, no thumbnail pane): text is sharp at every zoom, and the viewer's toolbar has page navigation, zoom, find, rotate, print and download. pi-web-ui's viewer drew every page into a canvas at a fixed 1.5x scale in CSS pixels and stretched it to the panel width, so text was blurry on a Retina screen. If Chrome is set to download PDFs instead of opening them (`navigator.pdfViewerEnabled` is false), the pages are drawn with pdf.js at panel width x devicePixelRatio (sharp) and drawn again when the panel width changes. Content that is not a PDF shows an error. A rewrite of the artifact shows the new document; blob: URLs are revoked when the content changes or the artifact goes away. The viewer's own title and download button name the file after the blob id; the panel's Download button keeps the artifact filename.
 
 - Agents are told to draw when it helps: the prime-session browser context (main-pi and every coach) and the Browser agent's system prompt now say that when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, the agent should make one and show it in the artifacts panel (prime: `telegram_attach`; Browser agent: an HTML/SVG artifact).
 
@@ -15,6 +19,10 @@
 - prime-agent sessions: a model or thinking level chosen before the first message is now applied to the new bridge session before the prompt is sent. Before, the session was created on the first send with the bridge's automation default (claude-sonnet-5-5 / high), the choice was dropped, and the label silently flipped. New main-pi sessions now default to claude-opus-5-5 (the router's interactive default) and actually run it. After applying, the panel reads the running model/level back; if the bridge refused or clamped something, a toast says so. Test: `npm run test:prime-model:extension`.
 
 ### Added
+
+- Artifacts panel: a maximize button (top right, left of the close X) gives the artifacts the whole side panel width, for every artifact type (PDF, images, HTML, Markdown, SVG, text, ...). The chat is hidden but keeps its scroll position and unsent text. Press the button again, or Escape, to bring the chat back. Maximize stays on when you switch artifact tabs, and ends when the panel is closed or reloaded. While maximized, Escape only restores the chat and never aborts a running agent (the next Escape does; a held-down Escape never aborts). Escape cannot reach the panel while keyboard focus is inside the PDF viewer or an HTML artifact; use the button there. Below 800 px wide the panel is already a full-screen overlay, so the button is not shown. Test: `npm run test:artifacts:extension`.
+
+- prime-agent sessions: notices from the R730 bridge (`bridge_notice` journal events, e.g. its dead-call watchdog aborting a model call that sent nothing back for 30 s or was still waiting at a model switch) show as a toast. They were dropped with the other non-agent events. Notices older than 2 minutes (replayed on attach/reconnect) and repeats are not shown. Unit test: `npm run test:bridge-notice`.
 
 - Footer, bottom left under the prompt box: `v<version> · <build sha> · <session id>` in light grey, so the build and session are visible and appear in screenshots. Click the id to copy it; it pastes straight into the sidebar search.
 

@@ -25,6 +25,7 @@ import {
 import { html, render } from "lit";
 import { History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
+import { artifactsMaximizeActive, escapeRestoresChat, setArtifactsMaximized } from "./components/artifacts-maximize.js";
 import { setFooterSession } from "./components/footer-info.js";
 import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
 import { Toast } from "./components/Toast.js";
@@ -1368,12 +1369,22 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 window.addEventListener(
 	"keydown",
 	(e) => {
-		// Escape key to abort streaming - works globally in sidepanel
-		// Use capturing phase to intercept before MessageEditor handles it
-		if (e.key === "Escape" && agent?.state.isStreaming) {
-			e.preventDefault();
-			e.stopPropagation();
-			agent.abort();
+		if (e.key === "Escape") {
+			const panel = chatPanel?.artifactsPanel;
+			if (panel && artifactsMaximizeActive(panel) && escapeRestoresChat(e, panel)) {
+				// Maximized artifacts: Escape only brings the chat back. It never aborts a running agent; the next
+				// Escape does.
+				e.preventDefault();
+				e.stopPropagation();
+				setArtifactsMaximized(false);
+			} else if (agent?.state.isStreaming) {
+				// Escape key to abort streaming - works globally in sidepanel
+				// Use capturing phase to intercept before MessageEditor handles it
+				e.preventDefault();
+				e.stopPropagation();
+				// A held-down key (auto-repeat) does not abort: its first press may just have restored the chat.
+				if (!e.repeat) agent.abort();
+			}
 		}
 
 		// Cmd+U (Mac) or Ctrl+U (Windows/Linux) to open debug page

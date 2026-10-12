@@ -40,7 +40,10 @@ const modelsRegistryPlugin = {
 //  - MessageEditor: thinking dropdown follows the model (src/thinking-options.ts);
 //    prime-agent sessions can send while streaming = steering (Enter or the extra send button).
 //  - AgentInterface: lets prime-agent sessions prompt while streaming (PrimeRemoteAgent turns it into a steer).
+//  - ArtifactsPanel + ChatPanel: PDF artifacts in Chrome's PDF viewer, maximize toggle (see the entries below).
 const PRIME = 'this.currentModel?.provider === "prime"';
+const srcImport = (names, file) =>
+	`import { ${names} } from ${JSON.stringify(join(packageRoot, file).replace(/\\/g, "/"))};`;
 const piWebUiPatches = [
 	{
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageEditor\.js$/,
@@ -181,6 +184,81 @@ const piWebUiPatches = [
 				find: "            await this.session?.prompt(input);\n        }\n    }",
 				replace:
 					"            await this.session?.prompt(input);\n        }\n        } catch (error) {\n            restoreRejectedPrompt(draftSubmission);\n            if (attachments && this._messageEditor.attachments.length === 0) this._messageEditor.attachments = attachments;\n            throw error;\n        }\n    }",
+			},
+		],
+	},
+	{
+		// ArtifactsPanel: `.pdf` artifacts render in Chrome's built-in PDF viewer (src/components/PdfArtifact.ts)
+		// instead of pi-web-ui's blurry fixed-scale canvases; a maximize toggle left of the close X lets the
+		// artifacts take the whole side panel (src/components/artifacts-maximize.ts); closing the panel restores 50/50.
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]tools[\\/]artifacts[\\/]artifacts\.js$/,
+		imports: [
+			srcImport("SitegeistPdfArtifact as __SgPdfArtifact", "src/components/PdfArtifact.ts"),
+			srcImport(
+				"maximizeButton as __sgMaximizeButton, setArtifactsMaximized as __sgSetArtifactsMaximized, watchArtifactsMaximized as __sgWatchArtifactsMaximized",
+				"src/components/artifacts-maximize.ts",
+			),
+		],
+		replacements: [
+			{
+				find: 'else if (type === "pdf") {\n                element = new PdfArtifact();',
+				replace: 'else if (type === "pdf") {\n                element = new __SgPdfArtifact();',
+			},
+			{
+				find: "    constructor() {\n        super(...arguments);\n        this._artifacts = new Map();",
+				replace:
+					"    constructor() {\n        super(...arguments);\n        __sgWatchArtifactsMaximized(this);\n        this._artifacts = new Map();",
+			},
+			{
+				find: '\t\t\t\t\t\t${Button({\n            variant: "ghost",\n            size: "sm",\n            onClick: () => this.onClose?.(),',
+				replace:
+					'\t\t\t\t\t\t${__sgMaximizeButton(this)}\n\t\t\t\t\t\t${Button({\n            variant: "ghost",\n            size: "sm",\n            onClick: () => {\n                __sgSetArtifactsMaximized(false);\n                this.onClose?.();\n            },',
+			},
+		],
+	},
+	{
+		// ImageArtifact: the image fits inside the panel, as upstream's max-w-full max-h-full object-contain intends.
+		// The flex row's min-height: auto let an image taller than the panel push past it (cut off, scrolling); with
+		// maximize, landscape images hit that too.
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]tools[\\/]artifacts[\\/]ImageArtifact\.js$/,
+		imports: [],
+		replacements: [
+			{
+				find: '<div class="flex-1 flex items-center justify-center p-4">',
+				replace: '<div class="flex-1 min-h-0 flex items-center justify-center p-4">',
+			},
+		],
+	},
+	{
+		// ChatPanel: column widths from src/components/artifacts-maximize.ts (upstream 50/50 unless maximized: then
+		// the artifacts take the full width and the chat is hidden); maximize ends when the last artifact is deleted.
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]ChatPanel\.js$/,
+		imports: [
+			srcImport(
+				"artifactsLayout as __sgArtifactsLayout, setArtifactsMaximized as __sgSetArtifactsMaximized, watchArtifactsMaximized as __sgWatchArtifactsMaximized",
+				"src/components/artifacts-maximize.ts",
+			),
+		],
+		replacements: [
+			{
+				find: "    constructor() {\n        super(...arguments);\n        this.hasArtifacts = false;",
+				replace:
+					"    constructor() {\n        super(...arguments);\n        __sgWatchArtifactsMaximized(this);\n        this.hasArtifacts = false;",
+			},
+			{
+				find: '<div class="h-full" style="${!isMobile && this.showArtifactsPanel && this.hasArtifacts ? "width: 50%;" : "width: 100%;"}">',
+				replace:
+					'<div class="h-full sg-chat-column" style="${__sgArtifactsLayout(isMobile, this.showArtifactsPanel && this.hasArtifacts).chat}">',
+			},
+			{
+				find: '<div class="h-full ${isMobile ? "absolute inset-0 pointer-events-none" : ""}" style="${!isMobile ? (!this.hasArtifacts || !this.showArtifactsPanel ? "display: none;" : "width: 50%;") : ""}">',
+				replace:
+					'<div class="h-full sg-artifacts-column ${isMobile ? "absolute inset-0 pointer-events-none" : ""}" style="${__sgArtifactsLayout(isMobile, this.showArtifactsPanel && this.hasArtifacts).artifacts}">',
+			},
+			{
+				find: "            this.hasArtifacts = count > 0;\n",
+				replace:
+					"            this.hasArtifacts = count > 0;\n            if (count === 0)\n                __sgSetArtifactsMaximized(false);\n",
 			},
 		],
 	},

@@ -28,7 +28,12 @@ test("real Sitegeist composer draft lifecycle", { timeout: 60_000 }, async (t) =
 		platform: "browser",
 		target: ["chrome120"],
 		plugins: [piWebUiPatchPlugin],
-		define: { "process.env.NODE_ENV": '"test"', global: "globalThis" },
+		define: {
+			"process.env.NODE_ENV": '"test"',
+			global: "globalThis",
+			// the patched AgentInterface footer shows the build (src/components/footer-info.ts)
+			__SITEGEIST_BUILD__: JSON.stringify({ sha: "test", dirty: false, builtAt: "" }),
+		},
 		inject: [join(root, "scripts/process-shim.js")],
 		alias: {
 			process: join(root, "scripts/process-shim.js"),

@@ -18,7 +18,9 @@
 		"test:anchors": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/anchors.test.ts",
 		"test:search": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/session-search.test.ts",
 		"test:prime-model:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-model-extension.test.ts",
-		"test:anchors:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/anchors-extension.test.ts"
+		"test:anchors:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/anchors-extension.test.ts",
+		"test:artifacts:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/artifacts-extension.test.ts",
+		"test:bridge-notice": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/bridge-notice.test.ts"
 	},
 	"dependencies": {
 		"@mariozechner/jailjs": "^0.1.0",
