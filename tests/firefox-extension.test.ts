@@ -478,161 +478,215 @@ async function untilOk<T>(read: () => Promise<T>, ok: (v: T) => boolean, timeout
 const ZEN_TABS = `const w = Services.wm.getMostRecentWindow("navigator:browser"); const g = w.gBrowser;
 	const find = (part) => [...g.tabs].find((t) => t.linkedBrowser.currentURI.spec.includes(part));`;
 
-test("Zen: sitegeist opened next to the page works on that page once Tom joins the two tabs", { skip }, async () => {
-	const SID = "sg-7c2e4a9b1d3f";
-	const DRAFT = "Which claim is weakest?";
-	const seeded = seededPrimeSession(SID, "Zen reading companion");
-	const relay = await startStandInRelay(SID, seeded.messages);
-	const { base } = relay;
-	const { d, stop } = await startZen();
-	try {
-		// The pages Tom has open, and a plain panel tab standing in for the sidebar: page scripts granted, chat seeded.
-		await d.openTab(`${base}/other`);
-		await d.openTab(`${base}/article`);
-		await d.openTab(`${BASE}/sidepanel.html?new=true`);
-		await untilOk(
-			() => d.run(`return document.body?.innerText ?? ""`),
-			(t) => typeof t === "string" && t.includes("Grant Permission"),
-			20_000,
-			"permission dialog",
-		);
-		await d.click("xpath", "//button[normalize-space(.)='Grant Permission']");
-		await until(
-			() => d.runAsync(`return await chrome.permissions.contains({ permissions: ["userScripts"] });`),
-			(v) => v === true,
-			10_000,
-			"userScripts granted",
-		);
-		await d.runAsync(
-			`const [data, metadata, syncUrl] = arguments;
+test(
+	"Zen: sitegeist opened next to the page, joined in a split of three, works on the pane Tom clicked last",
+	{ skip },
+	async () => {
+		const SID = "sg-7c2e4a9b1d3f";
+		const DRAFT = "Which claim is weakest?";
+		const seeded = seededPrimeSession(SID, "Zen reading companion");
+		const relay = await startStandInRelay(SID, seeded.messages);
+		const { base } = relay;
+		const { d, stop } = await startZen();
+		try {
+			// The pages Tom has open, and a plain panel tab standing in for the sidebar: page scripts granted, chat seeded.
+			await d.openTab(`${base}/other`);
+			await d.openTab(`${base}/next`);
+			await d.openTab(`${base}/article`);
+			await d.openTab(`${BASE}/sidepanel.html?new=true`);
+			await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("Grant Permission"),
+				20_000,
+				"permission dialog",
+			);
+			await d.click("xpath", "//button[normalize-space(.)='Grant Permission']");
+			await until(
+				() => d.runAsync(`return await chrome.permissions.contains({ permissions: ["userScripts"] });`),
+				(v) => v === true,
+				10_000,
+				"userScripts granted",
+			);
+			await d.runAsync(
+				`const [data, metadata, syncUrl] = arguments;
 			 const db = await new Promise((res, rej) => { const q = indexedDB.open("sitegeist-storage"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
 			 await new Promise((res, rej) => { const tx = db.transaction(["sessions", "sessions-metadata", "settings"], "readwrite"); tx.objectStore("sessions").put(data); tx.objectStore("sessions-metadata").put(metadata); tx.objectStore("settings").put(syncUrl, "sync.url"); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
 			 db.close();
 			 location.href = "sidepanel.html?session=" + data.id;`,
-			[seeded.data, seeded.metadata, `${base}/sitegeist`],
-		);
-		await untilOk(
-			() => d.run(`return document.body?.innerText ?? ""`),
-			(t) => typeof t === "string" && t.includes("ask away"),
-			30_000,
-			"chat",
-		);
-		const editor = await d.element("css selector", "message-editor textarea");
-		await d.cmd("POST", d.s(`/element/${editor}/value`), { text: DRAFT });
+				[seeded.data, seeded.metadata, `${base}/sitegeist`],
+			);
+			await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("ask away"),
+				30_000,
+				"chat",
+			);
+			const editor = await d.element("css selector", "message-editor textarea");
+			await d.cmd("POST", d.s(`/element/${editor}/value`), { text: DRAFT });
 
-		// Tom is on the article; "Open next to this page" in the panel.
-		const articleId = await d.runAsync(
-			`const t = (await chrome.tabs.query({})).find((x) => (x.url ?? "").startsWith(arguments[0]));
+			// Tom is on the article; "Open next to this page" in the panel.
+			const articleId = await d.runAsync(
+				`const t = (await chrome.tabs.query({})).find((x) => (x.url ?? "").startsWith(arguments[0]));
 			 await chrome.tabs.update(t.id, { active: true });
 			 return t.id;`,
-			[`${base}/article`],
-		);
-		assert.equal(typeof articleId, "number");
-		const before = new Set(await d.handles());
-		await untilOk(
-			() =>
-				d.run(
-					`const b = document.querySelector('button[title^="Open next to this page"]'); if (!b) return false; b.click(); return true;`,
-				),
-			(v) => v === true,
-			15_000,
-			"move button",
-		);
+				[`${base}/article`],
+			);
+			assert.equal(typeof articleId, "number");
+			const before = new Set(await d.handles());
+			await untilOk(
+				() =>
+					d.run(
+						`const b = document.querySelector('button[title^="Open next to this page"]'); if (!b) return false; b.click(); return true;`,
+					),
+				(v) => v === true,
+				15_000,
+				"move button",
+			);
 
-		// Zen cannot be split by extensions: the panel opens as the tab right after the page, both tabs selected.
-		const handle = await until(
-			() => d.handles(),
-			(hs) => hs.some((h) => !before.has(h)),
-			15_000,
-			"panel tab",
-		).then((hs) => hs.find((h) => !before.has(h)));
-		assert.ok(handle);
-		await d.switchTo(handle);
-		const placed = await untilOk(
-			() =>
-				d.runAsync(
-					`const me = await chrome.tabs.getCurrent();
+			// Zen cannot be split by extensions: the panel opens as the tab right after the page, both tabs selected.
+			const handle = await until(
+				() => d.handles(),
+				(hs) => hs.some((h) => !before.has(h)),
+				15_000,
+				"panel tab",
+			).then((hs) => hs.find((h) => !before.has(h)));
+			assert.ok(handle);
+			await d.switchTo(handle);
+			const placed = await untilOk(
+				() =>
+					d.runAsync(
+						`const me = await chrome.tabs.getCurrent();
 				 const page = await chrome.tabs.get(arguments[0]);
 				 return { url: me.url, index: me.index, active: me.active, highlighted: me.highlighted, pageIndex: page.index, pageHighlighted: page.highlighted };`,
-					[articleId],
-				),
-			(v) => isRecord(v) && typeof v.url === "string",
-			15_000,
-			"panel tab info",
-		);
-		assert.ok(isRecord(placed), JSON.stringify(placed));
-		assert.ok(String(placed.url).includes(`page=${articleId}`) && String(placed.url).includes(`session=${SID}`));
-		assert.equal(placed.index, Number(placed.pageIndex) + 1, "right after the page");
-		assert.equal(placed.active, true);
-		assert.equal(placed.highlighted, true);
-		assert.equal(placed.pageHighlighted, true, "both tabs selected, ready for Join 2 Tabs");
-		// The sidebar closes after the move (here: the plain tab standing in for it), and its relay socket with it.
-		await inChrome(
-			d,
-			`const w = Services.wm.getMostRecentWindow("navigator:browser"); const g = w.gBrowser;
+						[articleId],
+					),
+				(v) => isRecord(v) && typeof v.url === "string",
+				15_000,
+				"panel tab info",
+			);
+			assert.ok(isRecord(placed), JSON.stringify(placed));
+			assert.ok(String(placed.url).includes(`page=${articleId}`) && String(placed.url).includes(`session=${SID}`));
+			assert.equal(placed.index, Number(placed.pageIndex) + 1, "right after the page");
+			assert.equal(placed.active, true);
+			assert.equal(placed.highlighted, true);
+			assert.equal(placed.pageHighlighted, true, "both tabs selected, ready for Join 2 Tabs");
+			// The sidebar closes after the move (here: the plain tab standing in for it), and its relay socket with it.
+			await inChrome(
+				d,
+				`const w = Services.wm.getMostRecentWindow("navigator:browser"); const g = w.gBrowser;
 			 const standIn = [...g.tabs].find((t) => { const s = t.linkedBrowser.currentURI.spec; return s.includes("sidepanel.html") && !s.includes("page="); });
 			 if (standIn) g.removeTab(standIn); return !!standIn;`,
-		);
-		await untilOk(
-			() => d.run(`return document.body?.innerText ?? ""`),
-			(t) => typeof t === "string" && t.includes("ask away") && t.includes("Join 2 Tabs"),
-			20_000,
-			"moved chat and the join hint",
-		);
-		assert.equal(await d.run(`return document.querySelector("message-editor textarea")?.value ?? ""`), DRAFT);
-		assert.ok(
-			String(await d.run(`return document.querySelector("[data-sg-beside]")?.textContent ?? ""`)).includes(
-				"Article",
-			),
-		);
-
-		// Tom joins them (right-click → "Join 2 Tabs") and types in sitegeist.
-		const joined = await inChrome(
-			d,
-			`${ZEN_TABS} w.gZenViewSplitter.splitTabs([find("/article"), find("sidepanel.html?page=")]);
-				 g.selectedTab = find("sidepanel.html?page="); return w.gZenViewSplitter.splitViewActive;`,
-		);
-		assert.equal(joined, true);
-		const selected = () => inChrome(d, `${ZEN_TABS} return g.selectedTab.linkedBrowser.currentURI.spec;`);
-		const where = async (): Promise<unknown> =>
-			JSON.parse(
-				textOf(await relay.call("browser_eval", { code: "return document.title + '|' + location.pathname" })),
 			);
-		await until(
-			async () => relay.openSockets(),
-			(n) => n === 1,
-			20_000,
-			"one relay socket",
-		);
-		assert.equal(await where(), "Article|/article");
-		assert.ok(String(await selected()).includes("sidepanel.html?page="), "the chat keeps the focus");
-		const shot = imageOf(await relay.call("browser_screenshot"));
-		assert.ok(shot, "screenshot");
-		const pixel = await d.runAsync(
-			`const img = await createImageBitmap(await (await fetch("data:image/png;base64," + arguments[0])).blob());
+			await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("ask away") && t.includes("Join 2 Tabs"),
+				20_000,
+				"moved chat and the join hint",
+			);
+			assert.equal(await d.run(`return document.querySelector("message-editor textarea")?.value ?? ""`), DRAFT);
+			assert.ok(
+				String(await d.run(`return document.querySelector("[data-sg-beside]")?.textContent ?? ""`)).includes(
+					"Article",
+				),
+			);
+
+			// Tom joins them with a third page (Zen splits up to 4) and types in sitegeist.
+			const joined = await inChrome(
+				d,
+				`${ZEN_TABS} w.gZenViewSplitter.splitTabs([find("/article"), find("sidepanel.html?page="), find("/next")]);
+				 g.selectedTab = find("sidepanel.html?page="); return w.gZenViewSplitter.splitViewActive;`,
+			);
+			assert.equal(joined, true);
+			const ids = await d.runAsync(
+				`const tabs = await chrome.tabs.query({}); const id = (p) => tabs.find((t) => (t.url ?? "").endsWith(p))?.id;
+			 return { article: id("/article"), next: id("/next"), other: id("/other") };`,
+			);
+			assert.ok(
+				isRecord(ids) && typeof ids.article === "number" && typeof ids.next === "number",
+				JSON.stringify(ids),
+			);
+			const selected = () => inChrome(d, `${ZEN_TABS} return g.selectedTab.linkedBrowser.currentURI.spec;`);
+			const where = async (): Promise<unknown> =>
+				JSON.parse(
+					textOf(await relay.call("browser_eval", { code: "return document.title + '|' + location.pathname" })),
+				);
+			await until(
+				async () => relay.openSockets(),
+				(n) => n === 1,
+				20_000,
+				"one relay socket",
+			);
+			assert.equal(await where(), "Article|/article");
+			assert.ok(String(await selected()).includes("sidepanel.html?page="), "the chat keeps the focus");
+
+			// It knows every pane on screen: browser_tabs marks them, and the page context of a prompt lists them by tab id.
+			const listed = await untilOk(
+				async () => textOf(await relay.call("browser_tabs")),
+				(t) => t.includes(`${ids.next}\t+\t`),
+				10_000,
+				"panes marked in browser_tabs",
+			);
+			assert.ok(listed.includes(`${ids.article}\t+>\tArticle`), listed);
+			assert.ok(listed.includes(`${ids.other}\t \tOther`), `a tab outside the split is not marked: ${listed}`);
+			await d.cmd("POST", d.s(`/element/${await d.element("css selector", "message-editor textarea")}/value`), {
+				text: "\uE007", // Enter: sends the moved question
+			});
+			await until(
+				async () => relay.prompts.length,
+				(n) => n > 0,
+				10_000,
+				"prompt sent to the relay",
+			);
+			const sent = JSON.stringify(relay.prompts.at(-1));
+			assert.ok(sent.includes(`[tab ${ids.article}]`), sent.slice(0, 500));
+			assert.ok(
+				sent.includes(`Other pages on screen in the split view with the panel: [tab ${ids.next}]`),
+				sent.slice(0, 700),
+			);
+			assert.ok(!sent.includes(`[tab ${ids.other}]`), "a tab outside the split is not listed");
+
+			// The default follows the pane Tom clicked last.
+			const clickPane = async (part: string): Promise<void> => {
+				await inChrome(d, `${ZEN_TABS} g.selectedTab = find(arguments[0]); return true;`, [part]);
+				await new Promise((r) => setTimeout(r, 700)); // sitegeist notes the pane once the click has settled
+				await inChrome(d, `${ZEN_TABS} g.selectedTab = find("sidepanel.html?page="); return true;`);
+			};
+			await clickPane("/next");
+			assert.equal(await where(), "Next|/next", "Tom clicked the third pane last");
+			await clickPane("/article");
+			assert.equal(await where(), "Article|/article", "and back");
+
+			// Reading a tab outside the split does not move Tom (it would hide the split and the chat).
+			assert.ok(textOf(await relay.call("browser_page", { tabId: ids.other })).includes("OTHER"));
+			assert.ok(String(await selected()).includes("sidepanel.html?page="), "Tom stays in the split view");
+			const shot = imageOf(await relay.call("browser_screenshot"));
+			assert.ok(shot, "screenshot");
+			const pixel = await d.runAsync(
+				`const img = await createImageBitmap(await (await fetch("data:image/png;base64," + arguments[0])).blob());
 			 const c = new OffscreenCanvas(img.width, img.height); const x = c.getContext("2d"); x.drawImage(img, 0, 0);
 			 return Array.from(x.getImageData(Math.floor(img.width / 2), Math.floor(img.height / 2), 1, 1).data);`,
-			[shot],
-		);
-		assert.ok(Array.isArray(pixel) && Number(pixel[0]) > 150 && Number(pixel[1]) < 60, `red page, got ${pixel}`);
-		assert.ok(String(await selected()).includes("sidepanel.html?page="), "screenshot took no focus");
+				[shot],
+			);
+			assert.ok(Array.isArray(pixel) && Number(pixel[0]) > 150 && Number(pixel[1]) < 60, `red page, got ${pixel}`);
+			assert.ok(String(await selected()).includes("sidepanel.html?page="), "screenshot took no focus");
 
-		// Tom clicks into the page half: same page. Tom goes to another tab: the panel is off screen, the tools stay
-		// on the page beside it (and bring the split view back, so Tom can watch).
-		await inChrome(d, `${ZEN_TABS} g.selectedTab = find("/article"); return true;`);
-		assert.equal(await d.run("return document.visibilityState"), "visible", "both halves on screen");
-		assert.equal(await where(), "Article|/article");
-		await inChrome(d, `${ZEN_TABS} g.selectedTab = find("/other"); return true;`);
-		await until(
-			() => d.run("return document.visibilityState"),
-			(v) => v === "hidden",
-			10_000,
-			"panel off screen",
-		);
-		assert.equal(await where(), "Article|/article", "the page beside the panel, not the tab Tom went to");
-		assert.ok(String(await selected()).includes("/article"), "the split view came back to the front");
-	} finally {
-		await stop();
-		relay.close();
-	}
-});
+			// Tom clicks into the page pane: same page. Tom goes to another tab: the panel is off screen, the tools stay on
+			// the page beside it and leave Tom where he is.
+			await inChrome(d, `${ZEN_TABS} g.selectedTab = find("/article"); return true;`);
+			assert.equal(await d.run("return document.visibilityState"), "visible", "both halves on screen");
+			assert.equal(await where(), "Article|/article");
+			await inChrome(d, `${ZEN_TABS} g.selectedTab = find("/other"); return true;`);
+			await until(
+				() => d.run("return document.visibilityState"),
+				(v) => v === "hidden",
+				10_000,
+				"panel off screen",
+			);
+			assert.equal(await where(), "Article|/article", "the page beside the panel, not the tab Tom went to");
+			assert.ok(String(await selected()).includes("/other"), "Tom stays on the tab he went to");
+		} finally {
+			await stop();
+			relay.close();
+		}
+	},
+);

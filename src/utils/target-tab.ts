@@ -12,13 +12,19 @@
  *    2. Chrome's split view (Tab.splitViewId, Chrome 140+): the other half;
  *    3. the panel is on screen and Tom is on a web page: that page is beside it (Zen's split view gives extensions
  *       no split ids, but the selected tab follows the half Tom clicked);
- *    4. otherwise a web page still visible next to the panel (document.visibilityState), else the page the panel
- *       was opened for or last used beside it, else the most recently used web page in the window.
+ *    4. otherwise the page Tom clicked last next to the panel (at first: the page it was opened for) while it is still
+ *       on screen, else another web page visible next to the panel (document.visibilityState), else that page anyway,
+ *       else the most recently used web page in the window.
+ * In a split of 3-4 pages (Zen) the default is therefore the pane Tom clicked last; pagesOnScreen() lists all of them.
  */
+
+import { isFirefoxExtension } from "./browser-compat.js";
 
 const SPLIT_VIEW_ID_NONE = -1;
 /** Visibility probes per lookup, most recently used tabs first: keeps a lookup cheap in windows with many tabs. */
 const MAX_VISIBILITY_PROBES = 6;
+/** Zen splits hold up to 4 panes; probing a few more recent tabs covers them without asking every tab. */
+const MAX_SCREEN_PROBES = 8;
 const PROBE_TIMEOUT_MS = 400;
 /** After a tab switch the panel's own visibility settles before we read it. */
 const ACTIVATION_SETTLE_MS = 250;
@@ -144,6 +150,45 @@ export async function targetTab(): Promise<chrome.tabs.Tab | undefined> {
 	}
 	if (remembered) return remembered;
 	return recent[0] ? remember(recent[0]) : undefined;
+}
+
+const isHiddenTab = (tab: chrome.tabs.Tab): boolean => "hidden" in tab && tab.hidden === true; // Firefox: other Zen workspaces
+
+/**
+ * Web pages Tom can see now in the window sitegeist works in: the tab in front of it plus the other panes of its split
+ * view (Tom, 2026-10-13: a Zen split of 3-4 pages with sitegeist as one pane). Chrome reports its split view
+ * (Tab.splitViewId). Zen's split view is invisible to extensions, so there the recently used tabs are asked whether their
+ * page is visible. Tab-strip order; the panel itself is not included.
+ */
+export async function pagesOnScreen(): Promise<chrome.tabs.Tab[]> {
+	const me = await getTab(panelTabId);
+	const windowId = me?.windowId ?? panelWindowId;
+	if (windowId === undefined) return [];
+	const tabs = await chrome.tabs.query({ windowId });
+	const front = tabs.find((t) => t.active);
+	const seen = new Set<number>();
+	if (front?.id !== undefined) seen.add(front.id);
+	if (inSplitView(front))
+		for (const t of tabs) if (t.id !== undefined && t.splitViewId === front.splitViewId) seen.add(t.id);
+	if (isFirefoxExtension()) {
+		const candidates = tabs
+			.filter(
+				(t) =>
+					t.id !== undefined &&
+					!seen.has(t.id) &&
+					t.id !== panelTabId &&
+					isWebUrl(t.url) &&
+					!t.discarded &&
+					!isHiddenTab(t),
+			)
+			.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+			.slice(0, MAX_SCREEN_PROBES);
+		const visible = await Promise.all(candidates.map((t) => isVisible(t)));
+		candidates.forEach((t, i) => {
+			if (visible[i] && t.id !== undefined) seen.add(t.id);
+		});
+	}
+	return tabs.filter((t) => t.id !== undefined && t.id !== panelTabId && seen.has(t.id) && isWebUrl(t.url));
 }
 
 /** True when `tab` is on screen next to this panel tab (split view): tools then work on it where it is. */

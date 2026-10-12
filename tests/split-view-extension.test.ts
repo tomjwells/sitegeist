@@ -253,7 +253,8 @@ test(
 			assert.equal((await tab(worker, panelId)).active, true, "eval did not move the focus out of the chat");
 			assert.ok(textOf(await relay.call("browser_page")).includes("ARTICLE"));
 			const listed = textOf(await relay.call("browser_tabs"));
-			assert.ok(listed.includes(`${articleId}\t>\tArticle`), `the page beside the panel is marked: ${listed}`);
+			assert.ok(listed.includes(`${articleId}\t+>\tArticle`), `the page beside the panel is marked: ${listed}`);
+			assert.ok(listed.includes("+ also on screen"), "the marks are explained");
 			assert.ok(!listed.includes("sidepanel.html"), "the panel itself is not listed");
 			const shot = imageOf(await relay.call("browser_screenshot"));
 			assert.ok(shot, "screenshot image");
@@ -286,8 +287,17 @@ test(
 			assert.equal((await tab(worker, panelId)).url.startsWith(panelPage), true, "the panel did not navigate");
 			await until(beside, (t) => t.includes("Next"), 10_000, "beside label follows the page");
 
-			// 4. A tab the agent opens stays behind the split view and is the page until Tom's next prompt.
+			// 4. Tom is back in the chat. Reading a tab outside the split view does not move him (it would hide the chat).
 			await worker.evaluate((id) => chrome.tabs.update(id, { active: true }), panelId);
+			const tomsOther = (await tabs(worker)).find((t) => t.url === `${base}/other`);
+			assert.ok(tomsOther, "Tom's other tab");
+			assert.ok(textOf(await relay.call("browser_page", { tabId: tomsOther.id })).includes("OTHER"));
+			assert.equal(
+				(await tab(worker, panelId)).active,
+				true,
+				"reading a tab outside the split view did not move Tom",
+			);
+			// A tab the agent opens stays behind the split view and is the page until Tom's next prompt.
 			const opened = await relay.call("browser_navigate", { url: `${base}/other`, newTab: true });
 			const openedId = isRecord(opened) && isRecord(opened.details) ? opened.details.tabId : undefined;
 			assert.equal(typeof openedId, "number");
@@ -302,6 +312,17 @@ test(
 				"prompt sent to the relay",
 			);
 			assert.equal(await where(), "Next|/next", "Tom's prompt: back to the page beside the panel");
+			const sent = JSON.stringify(relay.prompts.at(-1));
+			assert.ok(sent.includes("Default page for browser_* tools"), sent.slice(0, 400));
+			assert.ok(
+				sent.includes(`[tab ${articleId}]`) && sent.includes(`${base}/next`),
+				"the context names the page by tab id",
+			);
+			// (an existing chat: the short context, which says it in one line)
+			assert.ok(
+				sent.includes("tools do not switch tabs"),
+				"the context says tools do not switch tabs from the split view",
+			);
 
 			// 5. Toolbar menu / shortcut on the same page: the existing panel tab comes forward, no second one.
 			const again = await panel.evaluate(

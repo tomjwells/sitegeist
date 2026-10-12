@@ -98,6 +98,7 @@ import {
 	isBesidePanel,
 	isPanelTab,
 	isWebUrl,
+	pagesOnScreen,
 	panelTab,
 	panelWindow,
 	rememberedPage,
@@ -737,15 +738,20 @@ const createAgent = async (
 			messages: initialState?.messages ?? [],
 			windowId: currentWindowId,
 			tabContext: async (): Promise<string> => {
-				const tab = await targetTab();
+				const [tab, onScreen] = await Promise.all([targetTab(), pagesOnScreen()]);
 				const inTab = isPanelTab();
-				const label = inTab ? "Page beside the panel (browser_* tools use it by default)" : "Active tab";
-				const where =
-					tab?.url && isWebUrl(tab.url) ? `${label}: "${tab.title ?? ""}" ${tab.url}` : `${label}: (none)`;
-				// Panel in a tab (split view, 2026-10-12): say so, so the agent does not try to switch tabs to "show" Tom.
-				const placeNote = inTab
-					? " The panel is a browser tab next to the page Tom is reading (split view): browser_* tools act on that page where it is, screenshots do not take focus, and browser_navigate newTab opens behind the split view."
-					: "";
+				// Every page Tom can see, with tab ids, so "the bulletin" or "the left calendar" needs no browser_tabs call
+				// (Tom, 2026-10-13: a Zen split of 3-4 pages with sitegeist as one pane).
+				const page = (t: chrome.tabs.Tab): string => `[tab ${t.id ?? "?"}] "${t.title ?? ""}" ${t.url ?? ""}`;
+				const others = onScreen.filter((t) => t.id !== tab?.id);
+				const defaultPage = tab?.url && isWebUrl(tab.url) ? page(tab) : "(none)";
+				const where = inTab
+					? `Default page for browser_* tools (the pane next to the panel Tom clicked last): ${defaultPage}${others.length > 0 ? `. Other pages on screen in the split view with the panel: ${others.map(page).join("; ")}` : ""}`
+					: `Active tab: ${defaultPage}${others.length > 0 ? `. Also on screen (split view): ${others.map(page).join("; ")}` : ""}`;
+				// Panel in a tab (split view, 2026-10-12): tools never switch tabs there, because that would hide the chat.
+				const tabsNote = inTab
+					? " The panel is itself a browser tab in a split view next to the pages above: browser_* tools act on any tab where it is and never switch tabs (switching would hide the chat); pass focus:true only if Tom asks to be shown a tab. Screenshots do not take focus, and browser_navigate newTab opens behind the split view."
+					: " Tab-acting tools switch their window to their tab so Tom can watch but never take window focus from what he is typing in (focus:true only if he asks to be pulled over); pass background:true to not even switch tabs.";
 				const matching = tab?.url ? await storage.skills.getSkillsForUrl(tab.url).catch(() => []) : [];
 				const skillsLine =
 					matching.length > 0
@@ -766,8 +772,8 @@ const createAgent = async (
 						? " Site runbooks: before driving a site with browser_* tools, agent_wiki_read main-pi-agent → 'Site runbooks — how to drive specific sites from the sitegeist panel' (page 01a06f49-71c8-7c6a-9b17-ddd04df32bc1) and reuse its selectors/flow; after you work out a NEW site or task (selectors, flow, verification), append a dated section to that page in the same turn so next time it is one call. If a browser tool misbehaves, the code is local: extension fork /home/vscode/code/sitegeist (branch homelab-fixes; browser side src/prime/browser-tools.ts), prime side ~/.prime/agent/extensions/sitegeist-browser-tools.ts, relay in the cors-proxy stack (~/.pi/agent/tool-projects/cors-proxy/server.ts)."
 						: " If a browser tool errors, say so plainly and carry on without it (main-pi owns the browser bridge).";
 				return first
-					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev ${inTab ? "panel in a browser tab" : "side panel"} in his browser (not Telegram). ${where}.${placeNote} Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand). Tab-acting tools switch their window to their tab so Tom can watch but never take window focus from what he is typing in (focus:true only if he asks to be pulled over); pass background:true to not even switch tabs. To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Draw when it helps (Tom, 2026-10-11: figures make your explanations much better): when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, make one (e.g. matplotlib, TikZ/LaTeX rendered to PNG, or a self-contained HTML/SVG page), send it with telegram_attach so it shows in the artifacts panel, and refer to it in your reply. Files Tom attaches in the panel arrive as saved paths on this host in a [sitegeist attachments] block (never as pasted text): read them yourself when the contents matter, or browser_upload_file them into a page.${codeNote} Reply in the chat; keep answers tight.${skillsLine}${transcriptLine} [/sitegeist browser context]`
-					: `[sitegeist browser context] ${where}.${skillsLine}${transcriptLine} [/sitegeist browser context]`;
+					? `[sitegeist browser context] Tom is driving this session from the sitegeist-dev ${inTab ? "panel in a browser tab" : "side panel"} in his browser (not Telegram). ${where}. Browser tools available while the panel is open: browser_tabs, browser_screenshot (also saves a PNG path), browser_page, browser_eval, browser_navigate, browser_cookies, browser_upload_file (file from this host into a page), browser_pick_element (Tom clicks an element), browser_skill + browser_instructions (sitegeist's shared skills and custom instructions — first-class, synced; never edit ~/.pi/agent/sitegeist-sync by hand).${tabsNote} To give Tom a file (any type, incl. HTML apps that render), call telegram_attach with its path: in this browser session it lands in the side panel's artifacts panel, not Telegram. Draw when it helps (Tom, 2026-10-11: figures make your explanations much better): when a concept is geometric or spatial, or is best explained with typeset LaTeX, a picture, a chart, a diagram or another graphic, make one (e.g. matplotlib, TikZ/LaTeX rendered to PNG, or a self-contained HTML/SVG page), send it with telegram_attach so it shows in the artifacts panel, and refer to it in your reply. Files Tom attaches in the panel arrive as saved paths on this host in a [sitegeist attachments] block (never as pasted text): read them yourself when the contents matter, or browser_upload_file them into a page.${codeNote} Reply in the chat; keep answers tight.${skillsLine}${transcriptLine} [/sitegeist browser context]`
+					: `[sitegeist browser context] ${where}.${inTab ? " (The panel is a tab in the split view: tools do not switch tabs.)" : ""}${skillsLine}${transcriptLine} [/sitegeist browser context]`;
 			},
 		});
 		prime.onStatusChange = () => renderApp();

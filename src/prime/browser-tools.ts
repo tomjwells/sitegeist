@@ -8,7 +8,16 @@ import { getSitegeistStorage } from "../storage/app-storage.js";
 import { CUSTOM_INSTRUCTIONS_UPDATED_SETTING, pushInstructions } from "../sync.js";
 import { AskUserWhichElementTool } from "../tools/ask-user-which-element.js";
 import { skillTool } from "../tools/skill.js";
-import { captureTabPng, isBesidePanel, isPanelTab, panelWindow, setAgentTab, targetTab } from "../utils/target-tab.js";
+import {
+	captureTabPng,
+	isBesidePanel,
+	isPanelTab,
+	pagesOnScreen,
+	panelTab,
+	panelWindow,
+	setAgentTab,
+	targetTab,
+} from "../utils/target-tab.js";
 import type { Json } from "./prime-client.js";
 import { isJson } from "./prime-client.js";
 
@@ -37,17 +46,26 @@ async function resolveTab(tabId: number | undefined, _windowId: number): Promise
  * Tom wants to see prime working (2026-09-05): every tab-acting tool switches its window to its tab unless
  * the caller passes background:true. It never takes window focus (2026-09-16: focusing the window yanked Tom
  * out of Telegram / another browser window mid-typing on every tool call); focus:true is an explicit opt-in.
- * A page already on screen beside the panel tab (split view) is left where it is: switching to it would only move
- * the keyboard out of the chat.
+ * From sitegeist as a tab (split view) nothing switches tabs, see staysInPlace.
  */
 async function bringToFront(tab: chrome.tabs.Tab, args: Json): Promise<void> {
 	if (args.background === true) return;
 	const id = tab.id;
 	if (id === undefined) return;
-	if (!tab.active && !(await isBesidePanel(tab)))
+	if (!tab.active && !(await staysInPlace(tab, args)))
 		await chrome.tabs.update(id, { active: true }).catch(() => undefined);
 	if (args.focus === true && tab.windowId !== undefined)
 		await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+}
+
+/**
+ * sitegeist as a tab in a split view (2026-10-13): tools never switch tabs, because switching hides the chat (in Zen
+ * the whole split) while Tom is typing in it. They work on the tab where it is; focus:true (Tom asked to be shown the
+ * tab) still switches. From the side panel a tab comes forward as before, so Tom can watch.
+ */
+async function staysInPlace(tab: chrome.tabs.Tab, args: Json): Promise<boolean> {
+	if (isPanelTab()) return args.focus !== true;
+	return isBesidePanel(tab);
 }
 
 function requireTabId(tab: chrome.tabs.Tab): number {
@@ -55,22 +73,31 @@ function requireTabId(tab: chrome.tabs.Tab): number {
 	return tab.id;
 }
 
-/** `*` = in front of its window, `>` = the page the tools use by default when it is not in front (panel tab). */
+const TAB_MARKS =
+	"marks: * in front of its window, + also on screen (another pane of the split view), > the page the browser_* tools use when no tabId is given";
+
+/** One mark column: `*` in front of its window, `+` another pane on screen, `>` the default page (combined, e.g. `+>`). */
 async function listTabs(): Promise<BrowserToolResult> {
-	const [tabs, target] = await Promise.all([chrome.tabs.query({}), targetTab()]);
+	const [tabs, target, onScreen] = await Promise.all([chrome.tabs.query({}), targetTab(), pagesOnScreen()]);
+	const screenIds = new Set(onScreen.map((t) => t.id));
 	const rows = tabs
 		.filter((t) => !/^(chrome|moz)-extension:\/\//.test(t.url ?? ""))
 		.map((t) => ({
 			id: t.id,
 			windowId: t.windowId,
 			active: t.active,
+			onScreen: t.active || screenIds.has(t.id),
 			target: t.id !== undefined && t.id === target?.id,
 			title: t.title ?? "",
 			url: t.url ?? "",
 		}));
-	const mark = (r: { active: boolean; target: boolean }): string => (r.active ? "*" : r.target ? ">" : " ");
+	const mark = (r: { active: boolean; onScreen: boolean; target: boolean }): string =>
+		`${r.active ? "*" : r.onScreen ? "+" : ""}${r.target ? ">" : ""}` || " ";
 	const lines = rows.map((r) => `${r.id}\t${mark(r)}\t${r.title.slice(0, 80)}\t${r.url}`);
-	return { content: [{ type: "text", text: `id\tactive\ttitle\turl\n${lines.join("\n")}` }], details: { tabs: rows } };
+	return {
+		content: [{ type: "text", text: `id\tmark\ttitle\turl\n${lines.join("\n")}\n${TAB_MARKS}` }],
+		details: { tabs: rows },
+	};
 }
 
 async function dataUrlToResized(dataUrl: string, maxWidth: number): Promise<ImageBlock> {
@@ -455,7 +482,7 @@ async function navigate(args: Json, windowId: number): Promise<BrowserToolResult
 	} else {
 		const tab = await resolveTab(num(args.tabId), windowId);
 		tabId = requireTabId(tab);
-		const keepInPlace = args.background === true || (await isBesidePanel(tab));
+		const keepInPlace = args.background === true || (await staysInPlace(tab, args));
 		await chrome.tabs.update(tabId, { url, active: keepInPlace ? tab.active : true });
 		if (args.background !== true && args.focus === true && tab.windowId !== undefined)
 			await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
@@ -569,7 +596,10 @@ async function pickElement(args: Json, windowId: number, callId: string): Promis
 	const id = requireTabId(tab);
 	// Tom has to see the page to click in it: bring it to the front of its window (unless it is already on screen
 	// beside the panel tab) and the window in front, otherwise the overlay waits on a page Tom is not looking at.
-	if (!tab.active && !(await isBesidePanel(tab))) await chrome.tabs.update(id, { active: true });
+	// From a panel tab that hides the chat, so the panel tab comes back once Tom has picked.
+	const shown = tab.active || (await isBesidePanel(tab));
+	const backToPanel = isPanelTab() && !shown ? panelTab() : undefined;
+	if (!shown) await chrome.tabs.update(id, { active: true });
 	if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	const controller = new AbortController();
 	const timeoutMs = Math.min(Math.max(num(args.timeoutMs) ?? 120_000, 5_000), 175_000);
@@ -594,6 +624,7 @@ async function pickElement(args: Json, windowId: number, callId: string): Promis
 	} finally {
 		clearTimeout(timer);
 		activeCalls.delete(callId);
+		if (backToPanel !== undefined) await chrome.tabs.update(backToPanel, { active: true }).catch(() => undefined);
 	}
 }
 
