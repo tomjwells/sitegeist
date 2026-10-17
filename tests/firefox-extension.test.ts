@@ -3,6 +3,8 @@
  * Covers what Firefox does differently from Chrome: unsigned permanent install, the extension sidebar opened from the
  * toolbar button, the optional userScripts permission, page scripts (isolated + page world), screenshots, the code
  * sandbox (HTML artifacts), PDFs in Firefox's own viewer, and the page-event input fallback (no debugger API).
+ * Fullscreen artifacts (2026-10-17): in a tab the artifacts panel goes fullscreen; where fullscreen is refused (pref off,
+ * as in the sidebar) they open in a new window in fullscreen state; Escape leaves or closes it.
  * Second test: sitegeist opened next to a page (2026-10-12): the tab lands right after the page with both selected, the
  * chat and its unsent text move along, and once Tom joins them in Zen's split view prime's browser tools work on the
  * page beside the panel (Zen gives extensions no split ids: the visible tab / remembered page decides).
@@ -102,6 +104,23 @@ class Driver {
 	}
 	async parentFrame(): Promise<void> {
 		await this.cmd("POST", this.s("/frame/parent"), {});
+	}
+	/** A real key press (WebDriver key actions, e.g. "\uE00C" = Escape) in the current window. */
+	async press(key: string): Promise<void> {
+		await this.cmd("POST", this.s("/actions"), {
+			actions: [
+				{
+					type: "key",
+					id: "keyboard",
+					actions: [
+						{ type: "keyDown", value: key },
+						{ type: "keyUp", value: key },
+					],
+				},
+			],
+		});
+		// The key may close the window (Escape in the fullscreen window): then there is nothing left to release.
+		await this.cmd("DELETE", this.s("/actions")).catch(() => undefined);
 	}
 	/** Opens a URL in a new tab from the browser chrome (WebDriver cannot navigate to moz-extension:// itself). */
 	async openTab(url: string): Promise<string> {
@@ -444,6 +463,57 @@ test(
 				"HTML artifact script",
 			);
 			await d.parentFrame();
+
+			// 7. Fullscreen (2026-10-17). In a tab the artifacts panel element itself goes fullscreen; Escape leaves.
+			const fullscreenTag = () => d.run("return document.fullscreenElement?.tagName ?? null");
+			await d.click("css selector", "artifacts-panel .sg-artifacts-fullscreen");
+			await until(fullscreenTag, (t) => t === "ARTIFACTS-PANEL", 10_000, "element fullscreen in Zen");
+			assert.equal(
+				await d.run(`return document.querySelector("artifacts-panel .sg-artifacts-fullscreen").title`),
+				"Exit fullscreen (Esc)",
+			);
+			await d.press("\uE00C");
+			await until(fullscreenTag, (t) => t === null, 10_000, "Escape leaves fullscreen");
+			// Where fullscreen is refused (as in the sidebar), the artifacts open in a fullscreen window instead.
+			await d.context("chrome");
+			await d.run(`Services.prefs.setBoolPref("full-screen-api.enabled", false); return true;`);
+			await d.context("content");
+			assert.equal(await d.run("return document.fullscreenEnabled"), false);
+			const windowsBefore = new Set(await d.handles());
+			await d.click("css selector", "artifacts-panel .sg-artifacts-fullscreen");
+			const viewerHandle = await until(
+				() => d.handles(),
+				(hs) => hs.some((h) => !windowsBefore.has(h)),
+				15_000,
+				"fullscreen window",
+			).then((hs) => hs.find((h) => !windowsBefore.has(h)));
+			assert.ok(viewerHandle);
+			await d.switchTo(viewerHandle);
+			const fullscreenWindow = await until(
+				() =>
+					d.runAsync(
+						`const w = await chrome.windows.getCurrent();
+					 const tabs = [...document.querySelectorAll("artifacts-panel button[data-filename]")];
+					 return { type: w.type, state: w.state, url: location.search, tabs: tabs.map((b) => b.getAttribute("data-filename")),
+					   active: tabs.find((b) => b.classList.contains("border-primary"))?.getAttribute("data-filename") ?? null };`,
+					),
+				(v) => isRecord(v) && Array.isArray(v.tabs) && v.tabs.length === 2,
+				15_000,
+				"artifacts in the fullscreen window",
+			);
+			assert.ok(isRecord(fullscreenWindow), JSON.stringify(fullscreenWindow));
+			assert.equal(fullscreenWindow.type, "popup");
+			assert.equal(fullscreenWindow.state, "fullscreen", "Zen opens the window in fullscreen state");
+			assert.equal(fullscreenWindow.active, "page.html", "starts on the artifact Tom was looking at");
+			assert.ok(String(fullscreenWindow.url).startsWith("?view=artifacts&token="));
+			await d.press("\uE00C");
+			await until(
+				() => d.handles(),
+				(hs) => !hs.includes(viewerHandle),
+				10_000,
+				"Escape closes the window",
+			);
+			await d.switchTo(panelTab);
 			assert.ok(panelTab);
 		} finally {
 			await stop();

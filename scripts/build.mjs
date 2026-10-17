@@ -195,14 +195,19 @@ const piWebUiPatches = [
 	},
 	{
 		// ArtifactsPanel: `.pdf` artifacts render in Chrome's built-in PDF viewer (src/components/PdfArtifact.ts)
-		// instead of pi-web-ui's blurry fixed-scale canvases; a maximize toggle left of the close X lets the
-		// artifacts take the whole side panel (src/components/artifacts-maximize.ts); closing the panel restores 50/50.
+		// instead of pi-web-ui's blurry fixed-scale canvases; right of the artifact's own buttons (download) a fullscreen
+		// button (src/components/artifacts-fullscreen.ts), then a maximize toggle that lets the artifacts take the whole
+		// side panel (src/components/artifacts-maximize.ts); closing the panel restores 50/50.
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]tools[\\/]artifacts[\\/]artifacts\.js$/,
 		imports: [
 			srcImport("SitegeistPdfArtifact as __SgPdfArtifact", "src/components/PdfArtifact.ts"),
 			srcImport(
 				"maximizeButton as __sgMaximizeButton, setArtifactsMaximized as __sgSetArtifactsMaximized, watchArtifactsMaximized as __sgWatchArtifactsMaximized",
 				"src/components/artifacts-maximize.ts",
+			),
+			srcImport(
+				"fullscreenButton as __sgFullscreenButton, watchArtifactsFullscreen as __sgWatchArtifactsFullscreen",
+				"src/components/artifacts-fullscreen.ts",
 			),
 		],
 		replacements: [
@@ -213,12 +218,12 @@ const piWebUiPatches = [
 			{
 				find: "    constructor() {\n        super(...arguments);\n        this._artifacts = new Map();",
 				replace:
-					"    constructor() {\n        super(...arguments);\n        __sgWatchArtifactsMaximized(this);\n        this._artifacts = new Map();",
+					"    constructor() {\n        super(...arguments);\n        __sgWatchArtifactsMaximized(this);\n        __sgWatchArtifactsFullscreen(this);\n        this._artifacts = new Map();",
 			},
 			{
 				find: '\t\t\t\t\t\t${Button({\n            variant: "ghost",\n            size: "sm",\n            onClick: () => this.onClose?.(),',
 				replace:
-					'\t\t\t\t\t\t${__sgMaximizeButton(this)}\n\t\t\t\t\t\t${Button({\n            variant: "ghost",\n            size: "sm",\n            onClick: () => {\n                __sgSetArtifactsMaximized(false);\n                this.onClose?.();\n            },',
+					'\t\t\t\t\t\t${__sgFullscreenButton(this, this._activeFilename)}\n\t\t\t\t\t\t${__sgMaximizeButton(this)}\n\t\t\t\t\t\t${Button({\n            variant: "ghost",\n            size: "sm",\n            onClick: () => {\n                __sgSetArtifactsMaximized(false);\n                this.onClose?.();\n            },',
 			},
 		],
 	},

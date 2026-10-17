@@ -31,6 +31,8 @@ const ACTIVATION_SETTLE_MS = 250;
 
 let panelTabId: number | undefined;
 let panelWindowId: number | undefined;
+/** The panel document is a browser tab (also a plain sidepanel.html tab), not the side panel / sidebar. */
+let hostIsTab = false;
 let rememberedPageId: number | undefined;
 let agentTabId: number | undefined;
 
@@ -57,6 +59,7 @@ const inSplitView = (tab: chrome.tabs.Tab | undefined): tab is chrome.tabs.Tab &
 export async function initPanelPlace(seedPageId?: number): Promise<void> {
 	const [me, win] = await Promise.all([chrome.tabs.getCurrent(), chrome.windows.getCurrent()]);
 	panelWindowId = me?.windowId ?? win.id;
+	hostIsTab = me?.id !== undefined;
 	// Side panel / sidebar: no tab. A plain tab keeps side-panel behaviour; only a panel opened next to a page (or
 	// placed in a Chrome split view) works on the page beside it.
 	if (me?.id === undefined || (seedPageId === undefined && !inSplitView(me))) return;
@@ -81,6 +84,8 @@ async function rememberActivated(info: chrome.tabs.OnActivatedInfo): Promise<voi
 	if (tab?.active && isWebUrl(tab.url)) rememberedPageId = tab.id;
 }
 
+/** True when the panel document is any browser tab: tabs can go fullscreen, side panels and sidebars cannot. */
+export const panelHostIsTab = (): boolean => hostIsTab;
 /** True when this panel is a tab next to a page (see initPanelPlace), not the side panel / sidebar. */
 export const isPanelTab = (): boolean => panelTabId !== undefined;
 export const panelTab = (): number | undefined => panelTabId;

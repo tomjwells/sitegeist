@@ -5,8 +5,9 @@
  *  - Layout (ChatPanel): at >= 800 px chat and artifacts sit side by side, 50/50. Maximized, the artifacts panel
  *    takes the full width and the chat is hidden (see CHAT_HIDDEN). Below 800 px the panel is already a
  *    full-screen overlay, so the toggle is hidden and the flag has no effect there.
- *  - Toggle (ArtifactsPanel tab bar, left of the close X). Closing the panel also restores 50/50, so a later
- *    artifact never reopens on top of the chat.
+ *  - Toggle (ArtifactsPanel tab bar, left of the close X; icon: hide / show the chat, so it is not mistaken for the
+ *    fullscreen button next to it, src/components/artifacts-fullscreen.ts). Closing the panel also restores 50/50, so
+ *    a later artifact never reopens on top of the chat. Not shown in the fullscreen window or while fullscreen.
  *  - Escape (sidepanel.ts) restores the chat. While maximized it never aborts the agent.
  * The flag is not persisted (a reload starts at 50/50); it survives switching artifact tabs.
  */
@@ -14,7 +15,8 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { icon } from "@mariozechner/mini-lit/dist/icons.js";
 import type { ArtifactsPanel } from "@mariozechner/pi-web-ui";
 import type { ReactiveController, ReactiveControllerHost, TemplateResult } from "lit";
-import { Maximize2, Minimize2 } from "lucide";
+import { PanelLeftClose, PanelLeftOpen } from "lucide";
+import { isArtifactsViewer, isPanelFullscreen } from "./artifacts-fullscreen.js";
 
 let maximized = false;
 const hosts = new Set<ReactiveControllerHost>();
@@ -70,14 +72,14 @@ export function artifactsLayout(isMobile: boolean, panelShown: boolean): Artifac
 
 /** The toggle in the artifacts tab bar. Not shown in overlay mode (< 800 px): the panel is full-screen there. */
 export function maximizeButton(panel: ArtifactsPanel): TemplateResult | string {
-	if (panel.overlay) return "";
+	if (panel.overlay || isArtifactsViewer() || isPanelFullscreen(panel)) return "";
 	return Button({
 		variant: "ghost",
 		size: "sm",
 		className: "sg-artifacts-maximize",
 		onClick: () => setArtifactsMaximized(!maximized),
 		title: maximized ? "Restore the chat (Esc)" : "Maximize: artifacts take the whole panel (Esc restores)",
-		children: icon(maximized ? Minimize2 : Maximize2, "sm"),
+		children: icon(maximized ? PanelLeftOpen : PanelLeftClose, "sm"),
 	});
 }
 

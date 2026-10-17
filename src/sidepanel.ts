@@ -25,7 +25,9 @@ import {
 import { html, render } from "lit";
 import { Columns2, History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
+import { isArtifactsViewer } from "./components/artifacts-fullscreen.js";
 import { artifactsMaximizeActive, escapeRestoresChat, setArtifactsMaximized } from "./components/artifacts-maximize.js";
+import { artifactsViewerToken, startArtifactsViewer } from "./components/artifacts-viewer.js";
 import { setFooterSession } from "./components/footer-info.js";
 import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
 import { Toast } from "./components/Toast.js";
@@ -1569,6 +1571,8 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 window.addEventListener(
 	"keydown",
 	(e) => {
+		// Fullscreen artifacts: Escape belongs to the browser (leave fullscreen) or to the viewer window (close it).
+		if (e.key === "Escape" && (document.fullscreenElement || isArtifactsViewer())) return;
 		if (e.key === "Escape") {
 			const panel = chatPanel?.artifactsPanel;
 			if (panel && artifactsMaximizeActive(panel) && escapeRestoresChat(e, panel)) {
@@ -1935,4 +1939,7 @@ async function initApp() {
 // Register custom user message renderer early, before any session loads
 registerUserMessageRenderer();
 
-initApp();
+// sidepanel.html?view=artifacts&token=… is the fullscreen artifacts window (src/components/artifacts-viewer.ts), not a panel.
+const viewerToken = artifactsViewerToken();
+if (viewerToken !== undefined) void startArtifactsViewer(viewerToken);
+else initApp();

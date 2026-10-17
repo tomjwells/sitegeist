@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Fullscreen artifacts** (Tom, 2026-10-17: "Can you add ability to fullscreen previews in the artifacts UI ... This could be a little icon next to the download icon in top right"). A fullscreen button sits right of the artifact's own buttons (download), for every artifact type (`src/components/artifacts-fullscreen.ts`).
+  - sitegeist in a tab (split view, or sidepanel.html as a tab): the artifacts panel element itself goes fullscreen (Fullscreen API). The icon turns into "Exit fullscreen"; Esc or the button leaves.
+  - Side panel / sidebar: browsers do not let a side panel go fullscreen. In Chrome 155 `requestFullscreen()` in a real side panel never settles; Firefox only lets the selected tab go fullscreen. So the button opens the artifacts in a new window created in fullscreen state (`chrome.windows.create({ type: "popup", state: "fullscreen" })`; maximized if a platform refuses). The window is `sidepanel.html?view=artifacts&token=…` in viewer mode (`src/components/artifacts-viewer.ts`): only pi-web-ui's ArtifactsPanel, with every artifact, starting on the one being viewed, rendered exactly as in the panel. It asks the panel for the artifacts over runtime messaging, because `storage.session` would cap them at 10 MB. Esc, the exit button or the close X close the window. A stale link shows a notice with a close button. A tab whose fullscreen request is refused falls back to the same window.
+  - The maximize toggle (artifacts take the whole panel) now uses a hide-the-chat icon (PanelLeftClose/PanelLeftOpen), so it is not mistaken for fullscreen. It is hidden in the fullscreen window and while the panel is fullscreen. Esc while fullscreen never aborts a running agent.
+  - Tests: `npm run test:fullscreen:extension` drives a real Chrome side panel (`chrome.sidePanel.open`) over raw CDP, because Playwright attaches to tabs only. It checks:
+    - the button's place;
+    - the window: popup, every artifact, the active one first, the image shown at 1600 px instead of the 360 px panel;
+    - Esc and the exit button close the window;
+    - the stale-link notice;
+    - in a tab: element fullscreen, Esc to leave, no window.
+  - The Zen test adds element fullscreen in a tab, and the window route with fullscreen refused (Zen reports the window state as "fullscreen").
+  - Headless Chrome cannot show a fullscreen window; the window state there is not asserted.
+
 - **sitegeist in a split of 3 or 4 pages** (Tom, 2026-10-13, testing a Zen split of Bulletin + week view + month view + sitegeist: "Any other tests I should run to see if it can use its joined tabs"):
   - The agent now knows every page on screen. Each prompt's page context lists the other panes of the split view with their tab ids ("Other pages on screen in the split view with the panel: [tab 28] "Bulletin" …"; from the side panel: "Also on screen (split view): …"). `browser_tabs` gains a mark column: `*` in front of its window, `+` another pane on screen, `>` the default page, with a legend. `pagesOnScreen()` in `src/utils/target-tab.ts`: Chrome reads `splitViewId`; Zen gives extensions no split ids, so recently used tabs are asked whether their page is visible.
   - The default page in such a split is the pane Tom clicked last. It always was; now the context says so.
