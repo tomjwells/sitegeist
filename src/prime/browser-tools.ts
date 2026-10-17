@@ -8,6 +8,7 @@ import { getSitegeistStorage } from "../storage/app-storage.js";
 import { CUSTOM_INSTRUCTIONS_UPDATED_SETTING, pushInstructions } from "../sync.js";
 import { AskUserWhichElementTool } from "../tools/ask-user-which-element.js";
 import { skillTool } from "../tools/skill.js";
+import { fitSize, MODEL_IMAGE_MAX_SIDE } from "../utils/image-size.js";
 import {
 	captureTabPng,
 	isBesidePanel,
@@ -100,12 +101,11 @@ async function listTabs(): Promise<BrowserToolResult> {
 	};
 }
 
+/** Scaled to `maxWidth` wide and to fit MODEL_IMAGE_MAX_SIDE high: a tall window must not exceed the model API limit. */
 async function dataUrlToResized(dataUrl: string, maxWidth: number): Promise<ImageBlock> {
 	const blob = await (await fetch(dataUrl)).blob();
 	const bitmap = await createImageBitmap(blob);
-	const scale = bitmap.width > maxWidth ? maxWidth / bitmap.width : 1;
-	const width = Math.max(1, Math.round(bitmap.width * scale));
-	const height = Math.max(1, Math.round(bitmap.height * scale));
+	const { width, height } = fitSize(bitmap.width, bitmap.height, MODEL_IMAGE_MAX_SIDE, maxWidth);
 	const canvas = new OffscreenCanvas(width, height);
 	const ctx = canvas.getContext("2d");
 	if (!ctx) throw new Error("no 2d context");
@@ -134,7 +134,10 @@ async function screenshot(args: Json, windowId: number): Promise<BrowserToolResu
 			`browser_screenshot: capture failed (${error instanceof Error ? error.message : String(error)}). The window is probably minimized or fully covered - retry with focus:true (brings the window forward, interrupts Tom) or use browser_page for the text.`,
 		);
 	}
-	const image = await dataUrlToResized(dataUrl, Math.min(Math.max(num(args.maxWidth) ?? 1280, 200), 2560));
+	const image = await dataUrlToResized(
+		dataUrl,
+		Math.min(Math.max(num(args.maxWidth) ?? 1280, 200), MODEL_IMAGE_MAX_SIDE),
+	);
 	return {
 		content: [{ type: "text", text: `Screenshot of tab ${id}: ${tab.title ?? ""} — ${tab.url ?? ""}` }, image],
 		details: { tabId: id, url: tab.url, title: tab.title },

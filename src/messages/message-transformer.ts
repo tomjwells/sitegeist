@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@mariozechner/pi-ai";
 import { convertAttachments, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
+import { fitMessageImages } from "../utils/model-image.js";
 import type { NavigationMessage } from "./NavigationMessage.js";
 
 // Helper: Check if a message has toolCall blocks
@@ -136,5 +137,7 @@ ${skillsInfo}
 		}
 	}
 
-	return reorderMessages(transformed);
+	// Images the model gets fit MODEL_IMAGE_MAX_SIDE: one full-size screenshot breaks every later turn once the chat
+	// holds many images (src/utils/image-size.ts). The chat itself keeps the originals.
+	return Promise.all(reorderMessages(transformed).map((msg) => fitMessageImages(msg)));
 }

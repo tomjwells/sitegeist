@@ -15,6 +15,7 @@
 		"src/anchors/anchors.ts",
 		"src/sessions/session-search.ts",
 		"src/prime/bridge-notice.ts",
-		"scripts/build.mjs"
+		"scripts/build.mjs",
+		"src/utils/image-size.ts"
 	]
 }

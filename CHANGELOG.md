@@ -40,6 +40,19 @@
 
 ### Fixed
 
+- **A chat could get stuck on "At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels"** (Tom, 2026-10-17, main-pi chat sg-7a480633fce6). Pasted screenshots went to the model at full size (a Retina screenshot: 3432 px wide). Anthropic accepts that while a request holds few images, but caps every image once a request holds more than 20. Every turn re-sends the whole chat, so when the 21st image arrived (the agent's own screenshot), every later turn failed, Tom's "?" included.
+  - Images now reach the model scaled to fit 2000 px on both sides (`src/utils/image-size.ts`, `src/utils/model-image.ts`), with PNG kept as PNG and JPEG as JPEG. The model API scales images down to about 1568 px before the model sees them, so nothing visible is lost.
+    - prime sessions: pasted images, in `PrimeRemoteAgent.prompt`. The upload to the R730 stays the full-size original, and the attachments block says so: "scaled to 2000x1169 from 3432x2006; the file is full size".
+    - The Browser agent: every user and tool-result image, in the message transformer (cached by content hash, because every turn re-sends them).
+    - `browser_screenshot`: `maxWidth` at most 2000, and a tall window also fits 2000 px high.
+  - The chat itself keeps the originals for display.
+  - The stuck chat was repaired on the R730 by scaling its two oversized screenshots and switching the live session to the repaired copy. No messages were lost.
+  - Tests:
+    - `npm run test:image-size`: sizes from PNG/JPEG/GIF/WebP headers, plus the fit rules.
+    - `npm run test:model-image`: the real scaling code in Chromium.
+    - `test:prime-model:extension` now attaches a 3432x2006 screenshot in the real panel. The relay receives it at 2000x1169, the uploaded file stays 3432x2006, and the prompt notes the scaling.
+    - `tests/prime-attachments.test.ts` covers the note.
+
 - Image artifacts taller than the panel are shown whole (fitted). The image pushed past the bottom of the panel and was cut off, because the flex row's `min-height: auto` defeated `max-h-full`. Maximize made this happen for landscape images too.
 
 - prime-agent sessions: artifacts the agent sends (`telegram_attach` → artifacts panel) are now saved with the session the moment they arrive. Before, they were only saved with the next agent event; a figure that landed after the turn's end (the usual case) was shown but not saved, and vanished when the panel was closed or reloaded. The R730 relay now also keeps a copy of every file it delivers (per session, newest 40), and on resume the panel restores any artifact it does not have ("Restored N artifacts from the R730"). Deleting a session drops the R730 copies. Covered by `npm run test:prime-model:extension`.

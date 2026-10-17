@@ -64,3 +64,19 @@ test("transcript view: tiles hide the block, otherwise a one-line Attached summa
 	assert.equal(compactAttachmentsText("plain question", false), "plain question");
 	assert.equal(hasAttachmentsBlock("plain question"), false);
 });
+
+test("an image the model gets scaled down says so; the file is the full-size original", () => {
+	const shownAs = { width: 2000, height: 1169, originalWidth: 3432, originalHeight: 2006 };
+	const section = buildAttachmentsSection([{ ...shot, size: 1_097_699, path: "/x/shot.png", shownAs }]);
+	assert.match(
+		section,
+		/^- 1\. "shot\.png" \(image\/png, 1072 KiB\) saved on this host at \/x\/shot\.png \(also attached to this message as an image, scaled to 2000x1169 from 3432x2006; the file is full size\)$/m,
+	);
+	const failed = buildAttachmentsSection([{ ...shot, error: "HTTP 502", shownAs }]);
+	assert.match(
+		failed,
+		/could NOT be saved on this host \(HTTP 502\); the image is still attached to this message, scaled to 2000x1169 from 3432x2006$/m,
+	);
+	// the transcript view still recognises the line
+	assert.equal(compactAttachmentsText(section, false), "\n\nAttached: shot.png (1072 KiB)");
+});

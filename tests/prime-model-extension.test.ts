@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
+import { imageSizeFromBase64 } from "../src/utils/image-size.ts";
+import { makePng } from "./png.fixture.ts";
 
 /**
  * Real-extension check of the prime model/thinking fix (Tom, 2026-10-10: picked claude-opus-5-5 + XHigh on a new
@@ -243,6 +245,10 @@ test(
 				res.end(JSON.stringify({ ok: true }));
 				return;
 			}
+			if (p === `/sessions/${sid}/files`) {
+				res.end(JSON.stringify({ ok: true, path: `/home/vscode/inbox/sitegeist/${String(body.filename)}` }));
+				return;
+			}
 			// A session that already ran on the R730 and sent one figure the panel never saved.
 			if (p === `/sessions/${oldSid}` && req.method === "GET") {
 				res.end(
@@ -360,7 +366,20 @@ test(
 				"XHigh selected",
 			);
 
-			// Send. The relay starts the session on sonnet-5-5 / high; the panel must switch it before the prompt.
+			// Send, with a full-size Retina screenshot attached (Tom, 2026-10-17: a 3432 px screenshot broke every later
+			// turn of a chat once it held more than 20 images). The relay starts the session on sonnet-5-5 / high; the panel
+			// must switch it before the prompt.
+			await page.setInputFiles("message-editor input[type=file]", {
+				name: "retina.png",
+				mimeType: "image/png",
+				buffer: makePng(3432, 2006),
+			});
+			await until(
+				() => page.evaluate(() => document.querySelectorAll("message-editor attachment-tile").length),
+				(n) => n === 1,
+				10_000,
+				"attachment tile",
+			);
 			await page.fill("message-editor textarea", "hello");
 			await page.keyboard.press("Enter");
 			await until(
@@ -389,6 +408,21 @@ test(
 			);
 			assert.equal(state.model, CATALOG["claude-opus-5-5"]);
 			assert.equal(state.thinkingLevel, "xhigh");
+			// The model gets the screenshot scaled to fit 2000 px; the file on the R730 is the full-size original.
+			const prompt = calls.find((c) => c.path.endsWith("/prompt"))?.body;
+			const promptImages = Array.isArray(prompt?.images) ? prompt.images : [];
+			assert.equal(promptImages.length, 1, "one image with the prompt");
+			const sent: unknown = promptImages[0];
+			const sentData = typeof sent === "object" && sent !== null && "data" in sent ? String(sent.data) : "";
+			assert.deepEqual(imageSizeFromBase64(sentData), { width: 2000, height: 1169 });
+			const upload = calls.find((c) => c.path.endsWith("/files"))?.body;
+			assert.deepEqual(imageSizeFromBase64(String(upload?.dataBase64 ?? "")), { width: 3432, height: 2006 });
+			assert.ok(
+				typeof promptBody === "string" &&
+					promptBody.includes("retina.png") &&
+					promptBody.includes("scaled to 2000x1169 from 3432x2006; the file is full size"),
+				"the prompt says the image was scaled and where the full-size file is",
+			);
 
 			// After sending: the labels still say what runs, and the footer shows the session id.
 			await until(

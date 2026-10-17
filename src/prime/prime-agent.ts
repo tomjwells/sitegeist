@@ -14,6 +14,7 @@ import {
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import type { Attachment, UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
 import { catalogProviders, getModels as registryModels } from "../models-registry.js";
+import { fitImageForModel, type ImageFit } from "../utils/model-image.js";
 import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
 import { bridgeNoticeToast, isBridgeNotice } from "./bridge-notice.js";
 import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
@@ -468,9 +469,14 @@ export class PrimeRemoteAgent extends Agent {
 		if (!text.trim() && imageBlocks.length === 0 && attachments.length === 0) return;
 		const context = await this.tabContext().catch(() => "");
 		const sessionId = await this.ensureSession(text.slice(0, 60) || attachments[0]?.fileName || "browser session");
+		// The model gets images scaled to fit 2000 px: a full-size Retina screenshot (3432 px) broke every later
+		// turn of a chat once it held more than 20 images (2026-10-17, src/utils/image-size.ts). Files stay full size.
+		const fits = await Promise.all(imageBlocks.map((block) => fitImageForModel(block)));
+		const fitByData = new Map(imageBlocks.map((block, i) => [block.data, fits[i]]));
+		const modelImages = fits.map((fit) => fit.image);
 		// Attachments become files on the agent's host BEFORE the prompt goes out, so the prompt can name
 		// their paths (the model reads/uploads the file; no extracted-text dump).
-		const filesSection = attachments.length > 0 ? await this.shipAttachments(sessionId, attachments) : "";
+		const filesSection = attachments.length > 0 ? await this.shipAttachments(sessionId, attachments, fitByData) : "";
 		const outbound = [context, text, filesSection].filter((part) => part.trim().length > 0).join("\n\n");
 		if (!outbound.trim()) return;
 		// Sent while a turn is running = steering, like a Telegram message mid-turn: delivered at the next
@@ -490,7 +496,7 @@ export class PrimeRemoteAgent extends Agent {
 				this.agentId,
 				sessionId,
 				outbound,
-				imageBlocks.length ? (imageBlocks as unknown as Json[]) : undefined,
+				modelImages.length ? (modelImages as unknown as Json[]) : undefined,
 				steering ? "steer" : undefined,
 			);
 		} catch (err) {
@@ -566,11 +572,25 @@ export class PrimeRemoteAgent extends Agent {
 	 * an upload fails, a document's browser-extracted text is inlined after the block as the fallback so the
 	 * prompt still carries the content; an image is inline anyway.
 	 */
-	private async shipAttachments(sessionId: string, attachments: Attachment[]): Promise<string> {
+	private async shipAttachments(
+		sessionId: string,
+		attachments: Attachment[],
+		fitByData: Map<string, ImageFit | undefined>,
+	): Promise<string> {
 		const turnId = `sg-${Date.now().toString(36)}`;
 		const shipped = await Promise.all(
 			attachments.map(async (a) => {
-				const base = { fileName: a.fileName, mimeType: a.mimeType, size: a.size, kind: a.type };
+				const fit = a.type === "image" ? fitByData.get(a.content) : undefined;
+				const shownAs =
+					fit?.scaled === true
+						? {
+								width: fit.width,
+								height: fit.height,
+								originalWidth: fit.originalWidth,
+								originalHeight: fit.originalHeight,
+							}
+						: undefined;
+				const base = { fileName: a.fileName, mimeType: a.mimeType, size: a.size, kind: a.type, shownAs };
 				try {
 					const stored = await primeUploadFile(this.agentId, sessionId, {
 						filename: a.fileName,
