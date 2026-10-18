@@ -14,7 +14,8 @@ import { makePng } from "./png.fixture.ts";
  * prime-agent session; it ran on claude-sonnet-5-5 / high and the label flipped). A stand-in relay plays the R730
  * bridge: a new session starts on its automation default (sonnet-5-5 / high), and every command the panel sends is
  * recorded. Asserts the panel applies the shown model + chosen thinking level BEFORE the first prompt, and that the
- * footer shows the build and session id.
+ * footer shows the build and session id. A coach's new chat must do the same (Tom, 2026-10-18: a Shredded Coach chat
+ * labelled claude-opus-5-5 ran on the coach body's automation default, claude-sonnet-5-5).
  */
 const root = fileURLToPath(new URL("../", import.meta.url));
 const dist = join(root, "dist-chrome");
@@ -177,6 +178,35 @@ test(
 		};
 		const sid = "sg-0123456789ab";
 		const oldSid = "sg-aaaaaaaaaaaa";
+		// A coach (worker) body: its own bridge, which also starts new sessions on the automation default.
+		const coach = "shreddedcoach";
+		const coachSid = "sg-shreddedcoach-0123456789ab";
+		const coachCalls: Call[] = [];
+		const coachState: { model: Record<string, unknown> | undefined; thinkingLevel: string } = {
+			model: CATALOG["claude-sonnet-5-5"],
+			thinkingLevel: "high",
+		};
+		/** The bridge's answer to a session rpc command, applied to that session's state. */
+		const rpcReply = (
+			body: Record<string, unknown>,
+			st: { model: Record<string, unknown> | undefined; thinkingLevel: string },
+		): Record<string, unknown> => {
+			if (body.type === "set_model") {
+				const m = CATALOG[String(body.modelId)];
+				if (m) st.model = m;
+				return { ok: true, response: { success: !!m, data: m } };
+			}
+			if (body.type === "set_thinking_level") {
+				st.thinkingLevel = String(body.level);
+				return { ok: true, response: { success: true } };
+			}
+			if (body.type === "get_state")
+				return {
+					ok: true,
+					response: { success: true, data: { ...st, sessionId: "native-uuid", isStreaming: false } },
+				};
+			return { ok: true, response: { success: true, data: {} } };
+		};
 		const usage = {
 			input: 1,
 			output: 1,
@@ -207,10 +237,37 @@ test(
 				return;
 			}
 			if (url === "/sitegeist/agents") {
-				res.end(JSON.stringify({ agents: [{ id: "prime", label: "main-pi (prime-agent)", ok: true }] }));
+				res.end(
+					JSON.stringify({
+						agents: [
+							{ id: "prime", label: "main-pi (prime-agent)", ok: true },
+							{ id: coach, label: "Shredded Coach", ok: true },
+						],
+					}),
+				);
 				return;
 			}
 			const body = req.method === "POST" ? await readJson(req) : {};
+			const coachPrefix = `/sitegeist/agents/${coach}`;
+			if (url.startsWith(coachPrefix)) {
+				const cp = url.slice(coachPrefix.length);
+				coachCalls.push({ path: cp, body });
+				if (cp === "/sessions" && req.method === "POST") {
+					res.end(JSON.stringify({ ok: true, sessionId: coachSid, name: "x", state: coachState }));
+					return;
+				}
+				if (cp === `/sessions/${coachSid}/rpc`) {
+					res.end(JSON.stringify(rpcReply(body, coachState)));
+					return;
+				}
+				if (cp === `/sessions/${coachSid}/prompt`) {
+					res.end(JSON.stringify({ ok: true }));
+					return;
+				}
+				res.statusCode = 404;
+				res.end(JSON.stringify({ error: "not found" }));
+				return;
+			}
 			const p = url.replace(/^\/sitegeist\/agents\/prime/, "");
 			calls.push({ path: p, body });
 			if (p === "/sessions" && req.method === "POST") {
@@ -218,27 +275,7 @@ test(
 				return;
 			}
 			if (p === `/sessions/${sid}/rpc`) {
-				if (body.type === "set_model") {
-					const m = CATALOG[String(body.modelId)];
-					if (m) state.model = m;
-					res.end(JSON.stringify({ ok: true, response: { success: !!m, data: m } }));
-					return;
-				}
-				if (body.type === "set_thinking_level") {
-					state.thinkingLevel = String(body.level);
-					res.end(JSON.stringify({ ok: true, response: { success: true } }));
-					return;
-				}
-				if (body.type === "get_state") {
-					res.end(
-						JSON.stringify({
-							ok: true,
-							response: { success: true, data: { ...state, sessionId: "native-uuid", isStreaming: false } },
-						}),
-					);
-					return;
-				}
-				res.end(JSON.stringify({ ok: true, response: { success: true, data: {} } }));
+				res.end(JSON.stringify(rpcReply(body, state)));
 				return;
 			}
 			if (p === `/sessions/${sid}/prompt`) {
@@ -510,6 +547,44 @@ test(
 			);
 			await new Promise((r) => setTimeout(r, 1000));
 			assert.ok(!calls.slice(before).some((c) => c.path.includes("/artifacts/m1abc")), "no re-download once saved");
+
+			// A coach's new chat runs what its label shows, with no pick from Tom (2026-10-18: Shredded Coach showed
+			// claude-opus-5-5, ran claude-sonnet-5-5, and the label flipped on send - three tries in four minutes).
+			await page.goto(`${panelUrl}?new=true&agent=${coach}`);
+			await dismissPermissionDialog(page);
+			await page.waitForSelector("message-editor textarea", { timeout: 30_000, state: "attached" });
+			await until(
+				() => page.evaluate(() => document.body.innerText),
+				(t) => t.includes("claude-opus-5-5"),
+				15_000,
+				"coach: opus default label",
+			);
+			await page.fill("message-editor textarea", "Is this razor a good one to get?");
+			await page.keyboard.press("Enter");
+			await until(
+				() => Promise.resolve(coachCalls.some((c) => c.path.endsWith("/prompt"))),
+				(v) => v,
+				30_000,
+				"coach prompt sent",
+			);
+			const coachOrder = coachCalls.map((c) =>
+				c.path.endsWith("/rpc")
+					? `rpc:${String(c.body.type)}${c.body.modelId ? `=${String(c.body.modelId)}` : ""}`
+					: c.path,
+			);
+			const iCoachModel = coachOrder.indexOf("rpc:set_model=claude-opus-5-5");
+			const iCoachPrompt = coachOrder.findIndex((o) => o.endsWith("/prompt"));
+			assert.ok(
+				iCoachModel >= 0 && iCoachModel < iCoachPrompt,
+				`coach: set_model before prompt: ${coachOrder.join(" | ")}`,
+			);
+			assert.equal(coachState.model, CATALOG["claude-opus-5-5"]);
+			await until(
+				() => page.evaluate(() => document.body.innerText),
+				(t) => t.includes("claude-opus-5-5") && !t.includes("claude-sonnet-5-5"),
+				10_000,
+				"coach: label stays opus",
+			);
 		} finally {
 			await context.close();
 			server.close();

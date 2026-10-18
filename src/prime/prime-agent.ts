@@ -159,7 +159,7 @@ export class PrimeRemoteAgent extends Agent {
 		windowId: number;
 		/** Short description of the active tab, prefixed to each prompt so prime knows where Tom is. */
 		tabContext: () => Promise<string>;
-		/** Apply `model` to the new bridge session even if Tom does not pick one (main-pi's interactive default). */
+		/** Apply `model` to the new bridge session even if Tom does not pick one (the interactive default, for any agent). */
 		applyInitialModel?: boolean;
 	}) {
 		super({

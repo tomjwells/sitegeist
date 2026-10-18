@@ -719,9 +719,10 @@ const createAgent = async (
 	if (kind !== "browser") {
 		// Brain on the R730 (a prime bridge session: main-pi or a worker sidecar), hands in this browser. The bridge reports the real
 		// model/thinking on create/hydrate; the placeholder only has to be a valid Model until then.
-		// A new main-pi session runs what the picker shows: the interactive default (claude-opus-5-5, the same default
-		// the Telegram router gives new chat topics) unless Tom picks another model. Without this the bridge's
-		// automation default (claude-sonnet-5-5) silently replaced whatever the label said (2026-10-10).
+		// A new session runs what the picker shows: the interactive default (claude-opus-5-5, the same default the
+		// Telegram router gives every new human chat, coach topics included) unless Tom picks another model. Without this
+		// the body's automation default (claude-sonnet-5-5, PI_AGENT_DEFAULT_MODEL) silently replaced whatever the label
+		// said: main-pi on 2026-10-10, and every coach until 2026-10-18 (Shredded Coach, three tries in four minutes).
 		const interactiveDefault = getModels("anthropic").find((m) => m.id === PRIME_INTERACTIVE_DEFAULT_MODEL);
 		const placeholder =
 			initialState?.model ??
@@ -735,7 +736,7 @@ const createAgent = async (
 			agentLabel: agentLabelFor(kind),
 			sessionId: primeSessionId,
 			model: placeholder,
-			applyInitialModel: kind === MAIN_AGENT_ID && !primeSessionId && placeholder === interactiveDefault,
+			applyInitialModel: !primeSessionId && placeholder === interactiveDefault,
 			thinkingLevel: initialState?.thinkingLevel ?? "high",
 			messages: initialState?.messages ?? [],
 			windowId: currentWindowId,
