@@ -78,11 +78,13 @@ const TAB_MARKS =
 	"marks: * in front of its window, + also on screen (another pane of the split view), > the page the browser_* tools use when no tabId is given";
 
 /** One mark column: `*` in front of its window, `+` another pane on screen, `>` the default page (combined, e.g. `+>`). */
+const isExtensionPage = (url: string | undefined): boolean => /^(chrome|moz)-extension:\/\//.test(url ?? "");
+
 async function listTabs(): Promise<BrowserToolResult> {
 	const [tabs, target, onScreen] = await Promise.all([chrome.tabs.query({}), targetTab(), pagesOnScreen()]);
 	const screenIds = new Set(onScreen.map((t) => t.id));
 	const rows = tabs
-		.filter((t) => !/^(chrome|moz)-extension:\/\//.test(t.url ?? ""))
+		.filter((t) => !isExtensionPage(t.url))
 		.map((t) => ({
 			id: t.id,
 			windowId: t.windowId,
@@ -98,6 +100,89 @@ async function listTabs(): Promise<BrowserToolResult> {
 	return {
 		content: [{ type: "text", text: `id\tmark\ttitle\turl\n${lines.join("\n")}\n${TAB_MARKS}` }],
 		details: { tabs: rows },
+	};
+}
+
+/**
+ * browser_tab_action (Tom, 2026-10-24: "I want to organize my tabs ... into targeted windows"): close tabs, or move
+ * them into another window or a new one. Tab ids come from browser_tabs. The panel itself and other extension pages
+ * are never touched. A new window opens in the background (focused:false), so Tom's focus stays where it is. The
+ * result lists what was closed (title, url, window) in details, so the R730 side can keep a reopen log.
+ */
+async function tabAction(args: Json): Promise<BrowserToolResult> {
+	const action = str(args.action);
+	if (action !== "close" && action !== "move") return text("browser_tab_action: action must be close or move");
+	const ids = Array.isArray(args.tabIds)
+		? [...new Set(args.tabIds.filter((v): v is number => typeof v === "number" && Number.isInteger(v)))]
+		: [];
+	if (ids.length === 0) return text("browser_tab_action: tabIds must list at least one tab id");
+	const windowArg = num(args.windowId);
+	const newWindow = args.newWindow === true;
+	if (action === "move" && newWindow === (windowArg !== undefined))
+		return text("browser_tab_action: move needs exactly one of windowId or newWindow:true");
+	const found: chrome.tabs.Tab[] = [];
+	const missing: number[] = [];
+	for (const id of ids) {
+		const tab = await chrome.tabs.get(id).catch(() => undefined);
+		if (tab?.id === undefined) missing.push(id);
+		else found.push(tab);
+	}
+	// The panel's own tab: panelTab() when it runs as a tab next to a page, getCurrent() for any tab it lives in
+	// (also a plain sidepanel.html tab, whose url the tabs API may not show). The side panel itself is not a tab.
+	const current = await chrome.tabs.getCurrent().catch(() => undefined);
+	const own = new Set([panelTab(), current?.id].filter((v): v is number => v !== undefined));
+	const skipped = found
+		.filter((t) => own.has(requireTabId(t)) || isExtensionPage(t.url) || isExtensionPage(t.pendingUrl))
+		.map(requireTabId);
+	const targets = found.filter((t) => !skipped.includes(requireTabId(t)));
+	const row = (t: chrome.tabs.Tab) => ({ id: t.id, windowId: t.windowId, title: t.title ?? "", url: t.url ?? "" });
+	const notes: string[] = [];
+	if (missing.length > 0) notes.push(`Not found (already closed?): ${missing.join(", ")}.`);
+	if (skipped.length > 0) notes.push(`Skipped the sitegeist panel / extension pages: ${skipped.join(", ")}.`);
+	if (targets.length === 0)
+		return {
+			content: [{ type: "text", text: `Nothing to ${action}. ${notes.join(" ")}`.trim() }],
+			details: { missing, skipped },
+		};
+	if (action === "close") {
+		await chrome.tabs.remove(targets.map(requireTabId));
+		const closed = targets.map(row);
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Closed ${closed.length} tab${closed.length === 1 ? "" : "s"}. ${notes.join(" ")}`.trim(),
+				},
+			],
+			details: { closed, missing, skipped },
+		};
+	}
+	let windowId = windowArg;
+	let rest = targets;
+	if (newWindow) {
+		const [first, ...others] = targets;
+		if (first === undefined) throw new Error("no tab to move");
+		const tabId = requireTabId(first);
+		// focused:false keeps Tom where he is; a browser that rejects the option still gets its window.
+		const win = await chrome.windows.create({ tabId, focused: false }).catch(() => chrome.windows.create({ tabId }));
+		if (win?.id === undefined) throw new Error("the new window has no id");
+		windowId = win.id;
+		rest = others;
+	} else if (windowId !== undefined) {
+		await chrome.windows.get(windowId).catch(() => {
+			throw new Error(`window ${windowId} not found (browser_tabs lists window ids)`);
+		});
+	}
+	if (windowId === undefined) throw new Error("no target window");
+	if (rest.length > 0) await chrome.tabs.move(rest.map(requireTabId), { windowId, index: -1 });
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Moved ${targets.length} tab${targets.length === 1 ? "" : "s"} to ${newWindow ? "new " : ""}window ${windowId}. ${notes.join(" ")}`.trim(),
+			},
+		],
+		details: { windowId, moved: targets.map(requireTabId), missing, skipped },
 	};
 }
 
@@ -676,6 +761,8 @@ export async function handleBrowserCall(
 	switch (tool) {
 		case "browser_tabs":
 			return listTabs();
+		case "browser_tab_action":
+			return tabAction(args);
 		case "browser_screenshot":
 			return screenshot(args, windowId);
 		case "browser_page":
