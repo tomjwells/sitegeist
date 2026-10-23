@@ -161,3 +161,9 @@ body {
 	backdrop-filter: blur(10px);
 	max-width: 100%;
 }
+
+/* A message the R730 has not got (send failed, waiting for a retry): red edge instead of the orange one. */
+.user-message-container.sg-unsent {
+	border-color: rgba(239, 68, 68, 0.6);
+	border-style: dashed;
+}

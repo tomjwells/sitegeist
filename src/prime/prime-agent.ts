@@ -30,6 +30,7 @@ import {
 	primeRpc,
 	primeUploadFile,
 } from "./prime-client.js";
+import { describeSendError, isUnsent, type SendState, sendStateOf, withSendState } from "./send-state.js";
 
 export {
 	agentIdFromSessionId,
@@ -113,6 +114,42 @@ function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
 	return JSON.stringify(ca) === JSON.stringify(cb);
 }
 
+/** The typed text of a user message (string content, or its text blocks joined). */
+function userText(m: AgentMessage): string {
+	const content: unknown = (m as { content?: unknown }).content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((c: unknown) => (isJson(c) && c.type === "text" && typeof c.text === "string" ? c.text : ""))
+		.filter((t) => t.length > 0)
+		.join("\n\n");
+}
+
+/**
+ * What a send needs to go out (again): the parts Tom typed, and, once built, the exact prompt. Kept in memory per
+ * send id; after a panel reload it is rebuilt from the message itself (attachments are then shipped again, which
+ * only costs a second copy of the file on the host - never a second prompt, the relay dedupes by id).
+ */
+interface SendPayload {
+	text: string;
+	imageBlocks: ImageContent[];
+	attachments: Attachment[];
+	context?: string;
+	outbound?: string;
+	modelImages?: Json[];
+}
+
+function payloadFromMessage(m: AgentMessage): SendPayload {
+	const content: unknown = (m as { content?: unknown }).content;
+	const imageBlocks: ImageContent[] = Array.isArray(content)
+		? content.filter(
+				(c: unknown): c is ImageContent =>
+					isJson(c) && c.type === "image" && typeof c.data === "string" && typeof c.mimeType === "string",
+			)
+		: [];
+	return { text: userText(m), imageBlocks, attachments: attachmentsOf(m) ?? [] };
+}
+
 export class PrimeRemoteAgent extends Agent {
 	readonly agentId: string;
 	readonly agentLabel: string;
@@ -143,7 +180,21 @@ export class PrimeRemoteAgent extends Agent {
 	private readonly remote: AgentState;
 	private readonly remoteListeners = new Set<(e: AgentEvent) => void>();
 	private socket: PrimeSocket | undefined;
-	private optimisticUser: AgentMessage | undefined;
+	/** Sent messages whose bridge echo has not arrived yet, in send order; the echo replaces the panel's bubble. */
+	private pendingEchoes: AgentMessage[] = [];
+	/** Per send id: what goes out, kept until the R730 has accepted it (2026-10-18: retries, no duplicates). */
+	private readonly sendPayloads = new Map<string, SendPayload>();
+	private readonly delivering = new Set<string>();
+	/** When the chat's history was last loaded from the bridge; a send accepted before that is already in it. */
+	private hydratedAt = 0;
+	private attachRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	private attachAttempt = 0;
+	/** A brand-new chat has no socket to announce "back online": its failed first send retries on a timer. */
+	private newChatRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	private newChatAttempt = 0;
+	private readonly onBrowserOnline = (): void => {
+		if (!this.socket) void this.retryUnsent();
+	};
 	private readonly windowId: number;
 	private readonly tabContext: () => Promise<string>;
 	private createInFlight: Promise<string> | undefined;
@@ -193,6 +244,7 @@ export class PrimeRemoteAgent extends Agent {
 		};
 		// AgentInterface only wires its own streamFn/getApiKey when these are missing.
 		this.getApiKey = async () => "remote";
+		window.addEventListener("online", this.onBrowserOnline);
 	}
 
 	override get state(): AgentState {
@@ -222,20 +274,38 @@ export class PrimeRemoteAgent extends Agent {
 
 	// ---- lifecycle ------------------------------------------------------------------------------
 
-	/** Resume an existing bridge session: fresh history from the bridge, then live events. */
+	/**
+	 * Resume an existing bridge session: fresh history from the bridge, then live events. Offline, it keeps trying
+	 * (5 s, 10 s, 20 s, 40 s...) instead of leaving a dead chat behind (2026-10-18).
+	 */
 	async attach(): Promise<void> {
 		if (!this.primeSessionId) return;
-		this.setStatus("connecting");
+		this.setStatus("connecting", this.attachAttempt > 0 ? `attempt ${this.attachAttempt + 1}` : "");
 		try {
 			const h = await primeHydrate(this.agentId, this.primeSessionId);
+			this.hydratedAt = Date.now();
+			this.attachAttempt = 0;
 			this.applyRemoteState(h.state);
 			const artifacts = this.remote.messages.filter(isArtifactMessage);
-			this.remote.messages = [...toAgentMessages(h.messages), ...artifacts];
+			// Messages the R730 never confirmed (saved as failed, or in flight when the panel closed) stay at the end
+			// as failed; retrying is safe because the relay ignores a repeat of a send that did land.
+			const unsent = this.remote.messages.filter(isUnsent).map((m) => {
+				const s = sendStateOf(m);
+				return s ? withSendState(m, { ...s, state: "failed" }) : m;
+			});
+			this.pendingEchoes = [];
+			this.remote.messages = [...toAgentMessages(h.messages), ...artifacts, ...unsent];
 			this.openSocket(h.offset);
 			this.emitRemote({ type: "agent_end", messages: [] });
 			void this.onArtifactsReconcile?.().catch((err) => console.warn("[prime] artifact reconcile failed", err));
 		} catch (err) {
-			this.setStatus("error", err instanceof Error ? err.message : String(err));
+			const delay = Math.min(40_000, 5_000 * 2 ** Math.min(this.attachAttempt++, 3));
+			this.setStatus("error", `${describeSendError(err)}; retrying in ${Math.round(delay / 1000)} s`);
+			if (!this.attachRetryTimer)
+				this.attachRetryTimer = setTimeout(() => {
+					this.attachRetryTimer = undefined;
+					void this.attach().catch(() => undefined);
+				}, delay);
 			throw err;
 		}
 	}
@@ -321,7 +391,11 @@ export class PrimeRemoteAgent extends Agent {
 			onBrowserCall: (id, tool, args) => void this.runBrowserCall(id, tool, args),
 			onBrowserCancel: (id) => void cancelBrowserCall(id),
 			onAttachments: (items) => void this.receiveAttachments(items),
-			onStatus: (status, detail) => this.setStatus(status, detail ?? ""),
+			onStatus: (status, detail) => {
+				this.setStatus(status, detail ?? "");
+				// The live connection is back: send what could not go out while it was down, oldest first.
+				if (status === "open") void this.retryUnsent();
+			},
 		});
 		void this.socket.connect();
 	}
@@ -353,6 +427,11 @@ export class PrimeRemoteAgent extends Agent {
 	}
 
 	detach(): void {
+		if (this.attachRetryTimer) clearTimeout(this.attachRetryTimer);
+		this.attachRetryTimer = undefined;
+		if (this.newChatRetryTimer) clearTimeout(this.newChatRetryTimer);
+		this.newChatRetryTimer = undefined;
+		window.removeEventListener("online", this.onBrowserOnline);
 		this.socket?.close();
 		this.socket = undefined;
 	}
@@ -429,11 +508,22 @@ export class PrimeRemoteAgent extends Agent {
 	private appendRemoteMessage(incoming: AgentMessage): void {
 		if (!LLM_ROLES.has(incoming.role)) return;
 		const messages = this.remote.messages;
-		if (incoming.role === "user" && this.optimisticUser) {
-			const optimistic = this.optimisticUser;
-			const idx = messages.lastIndexOf(optimistic);
-			this.optimisticUser = undefined;
-			if (idx >= 0) {
+		if (incoming.role === "user") {
+			// The bridge's echo of a message this panel sent replaces the panel's own bubble: the oldest sent one
+			// still waiting for its echo, or, when a send's answer was lost but the prompt landed (the echo then
+			// arrives before the retry says duplicate), the oldest unsent bubble with the same text.
+			const echoed = stripBrowserContext([incoming])[0] ?? incoming;
+			let optimistic = this.pendingEchoes.shift();
+			if (!optimistic) {
+				const echoText = userText(echoed).trim();
+				optimistic = messages.find(
+					(m) => isUnsent(m) && echoText.startsWith(userText(m).trim()) && userText(m).trim() !== "",
+				);
+				const id = optimistic ? sendStateOf(optimistic)?.id : undefined;
+				if (id) this.sendPayloads.delete(id);
+			}
+			const idx = optimistic ? messages.lastIndexOf(optimistic) : -1;
+			if (optimistic && idx >= 0) {
 				// The bridge echoes text only; keep the attachment tiles from the optimistic bubble so the
 				// transcript still shows what Tom attached.
 				const tiles = attachmentsOf(optimistic);
@@ -441,6 +531,7 @@ export class PrimeRemoteAgent extends Agent {
 				const message = stripBrowserContext([withTiles])[0] ?? withTiles;
 				// Take the bridge's position: a steer sent mid-tool belongs after that tool's result, not before it.
 				this.remote.messages = [...messages.slice(0, idx), ...messages.slice(idx + 1), message];
+				this.onStatusChange?.(this.status);
 				return;
 			}
 		}
@@ -467,23 +558,77 @@ export class PrimeRemoteAgent extends Agent {
 	override async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
 		const { text, imageBlocks, attachments, optimistic } = this.composePrompt(input, images);
 		if (!text.trim() && imageBlocks.length === 0 && attachments.length === 0) return;
+		// The bubble shows at once, marked "sending" until the R730 has it. The id travels with the prompt; a retry
+		// repeats it and the relay answers duplicate:true instead of prompting twice (2026-10-18, Tom on a train:
+		// a copy that never left the browser looked sent, and a blind resend could have run the task again).
+		const id = crypto.randomUUID();
+		// The tab context is read BEFORE the bubble goes in: the first message of a chat gets the long form (tools,
+		// draw guidance), chosen by "no messages yet".
 		const context = await this.tabContext().catch(() => "");
-		const sessionId = await this.ensureSession(text.slice(0, 60) || attachments[0]?.fileName || "browser session");
-		// The model gets images scaled to fit 2000 px: a full-size Retina screenshot (3432 px) broke every later
-		// turn of a chat once it held more than 20 images (2026-10-17, src/utils/image-size.ts). Files stay full size.
-		const fits = await Promise.all(imageBlocks.map((block) => fitImageForModel(block)));
-		const fitByData = new Map(imageBlocks.map((block, i) => [block.data, fits[i]]));
-		const modelImages = fits.map((fit) => fit.image);
-		// Attachments become files on the agent's host BEFORE the prompt goes out, so the prompt can name
-		// their paths (the model reads/uploads the file; no extracted-text dump).
-		const filesSection = attachments.length > 0 ? await this.shipAttachments(sessionId, attachments, fitByData) : "";
-		const outbound = [context, text, filesSection].filter((part) => part.trim().length > 0).join("\n\n");
-		if (!outbound.trim()) return;
+		this.sendPayloads.set(id, { text, imageBlocks, attachments, context });
+		this.remote.messages = [
+			...this.remote.messages,
+			withSendState(optimistic, { id, state: "sending", at: Date.now() }),
+		];
+		await this.deliver(id);
+	}
+
+	/** Messages shown in the chat that the R730 has not confirmed (in flight or failed). */
+	get unsentCount(): number {
+		return this.remote.messages.filter(isUnsent).length;
+	}
+
+	/** Send a failed message again, by hand (the bubble's Retry) - same id, so never a second prompt. */
+	retrySend(id: string): void {
+		void this.deliver(id);
+	}
+
+	/** Drop a failed message without sending it (the bubble's Discard). */
+	discardSend(id: string): void {
+		this.sendPayloads.delete(id);
+		this.remote.messages = this.remote.messages.filter((m) => sendStateOf(m)?.id !== id);
+		this.emitRemote({ type: "turn_start" }); // repaint the list
+		this.onStatusChange?.(this.status);
+	}
+
+	/** After a reconnect: failed sends go out again, oldest first; one failure stops the run until the next reconnect. */
+	private async retryUnsent(): Promise<void> {
+		for (const m of this.remote.messages.filter((x) => sendStateOf(x)?.state === "failed")) {
+			const id = sendStateOf(m)?.id;
+			if (id && !(await this.deliver(id))) break;
+		}
+	}
+
+	private findSend(id: string): AgentMessage | undefined {
+		return this.remote.messages.find((m) => sendStateOf(m)?.id === id);
+	}
+
+	/** Replace the bubble of send `id` with a copy carrying `state` (undefined = sent); returns the new bubble. */
+	private markSend(id: string, state: SendState | undefined): AgentMessage | undefined {
+		const current = this.findSend(id);
+		if (!current) return undefined;
+		const next = withSendState(current, state);
+		this.remote.messages = this.remote.messages.map((m) => (m === current ? next : m));
+		return next;
+	}
+
+	/**
+	 * One attempt to get send `id` to the R730. Builds the prompt once (tab context, files shipped, images fitted)
+	 * and keeps it for retries. Resolves true when the R730 has the message (also when it already had it).
+	 */
+	private async deliver(id: string): Promise<boolean> {
+		const current = this.findSend(id);
+		if (!current || this.delivering.has(id)) return false;
+		let payload = this.sendPayloads.get(id);
+		if (!payload) {
+			payload = payloadFromMessage(current); // after a panel reload
+			this.sendPayloads.set(id, payload);
+		}
+		this.delivering.add(id);
+		this.markSend(id, { id, state: "sending", at: Date.now() });
 		// Sent while a turn is running = steering, like a Telegram message mid-turn: delivered at the next
 		// tool boundary (bridge streamingBehavior "steer"); the turn keeps going.
 		const steering = this.remote.isStreaming;
-		this.optimisticUser = optimistic;
-		this.remote.messages = [...this.remote.messages, optimistic];
 		this.remote.error = undefined;
 		if (!steering) {
 			this.remote.isStreaming = true;
@@ -492,21 +637,85 @@ export class PrimeRemoteAgent extends Agent {
 			this.emitRemote({ type: "turn_start" }); // nudges the UI to re-render the list
 		}
 		try {
-			await primePrompt(
+			// After a panel reload the context is rebuilt here; the chat then has messages, so it is the short form.
+			if (payload.context === undefined) payload.context = await this.tabContext().catch(() => "");
+			const sessionId = await this.ensureSession(
+				payload.text.slice(0, 60) || payload.attachments[0]?.fileName || "browser session",
+			);
+			if (payload.outbound === undefined) {
+				// The model gets images scaled to fit 2000 px: a full-size Retina screenshot (3432 px) broke every later
+				// turn of a chat once it held more than 20 images (2026-10-17, src/utils/image-size.ts). Files stay full size.
+				const fits = await Promise.all(payload.imageBlocks.map((block) => fitImageForModel(block)));
+				const fitByData = new Map(payload.imageBlocks.map((block, i) => [block.data, fits[i]]));
+				payload.modelImages = fits.map((fit) => fit.image as unknown as Json); // ImageContent is a plain JSON object
+				// Attachments become files on the agent's host BEFORE the prompt goes out, so the prompt can name
+				// their paths (the model reads/uploads the file; no extracted-text dump).
+				const filesSection =
+					payload.attachments.length > 0
+						? await this.shipAttachments(sessionId, payload.attachments, fitByData)
+						: "";
+				payload.outbound = [payload.context, payload.text, filesSection]
+					.filter((part) => part.trim().length > 0)
+					.join("\n\n");
+			}
+			const reply = await primePrompt(
 				this.agentId,
 				sessionId,
-				outbound,
-				modelImages.length ? (modelImages as unknown as Json[]) : undefined,
+				payload.outbound,
+				payload.modelImages && payload.modelImages.length > 0 ? payload.modelImages : undefined,
 				steering ? "steer" : undefined,
+				id,
 			);
+			this.sendPayloads.delete(id);
+			this.newChatAttempt = 0;
+			const acceptedAt = typeof reply.acceptedAt === "string" ? Date.parse(reply.acceptedAt) : Number.NaN;
+			if (reply.duplicate === true) {
+				// The R730 already had it (an earlier attempt landed, its answer did not). If that was before this
+				// panel loaded the chat, the history above already shows it; and no new turn starts for a repeat.
+				if (Number.isFinite(acceptedAt) && acceptedAt < this.hydratedAt)
+					this.remote.messages = this.remote.messages.filter((m) => sendStateOf(m)?.id !== id);
+				else {
+					const sent = this.markSend(id, undefined);
+					if (sent) this.pendingEchoes.push(sent);
+				}
+				try {
+					this.applyRemoteState(await primeRpc(this.agentId, sessionId, { type: "get_state" }));
+				} catch (err) {
+					console.warn("[prime] get_state after a duplicate send failed", err);
+					this.remote.isStreaming = false;
+				}
+				if (!this.remote.isStreaming) this.emitRemote({ type: "agent_end", messages: [] });
+				else this.emitRemote({ type: "turn_start" });
+			} else {
+				const sent = this.markSend(id, undefined);
+				if (sent) this.pendingEchoes.push(sent);
+				this.emitRemote({ type: "turn_start" }); // the bubble loses its "sending" line
+			}
+			return true;
 		} catch (err) {
-			this.remote.error = err instanceof Error ? err.message : String(err);
-			this.setStatus("error", this.remote.error);
+			const error = describeSendError(err);
+			this.markSend(id, { id, state: "failed", at: Date.now(), error });
 			if (!steering) {
 				this.remote.isStreaming = false;
 				this.emitRemote({ type: "agent_end", messages: [] });
+			} else {
+				this.emitRemote({ type: "turn_start" });
 			}
-			throw err;
+			this.onNotice?.(`Not sent: ${error}. It goes out when the connection is back, or press Retry.`);
+			if (this.socket)
+				this.socket.reconnectNow(); // a failed send is a cheap sign the live connection is down too
+			else if (!this.newChatRetryTimer) {
+				// No session yet (the first message of a new chat failed): try again on a timer, 5 s, 10 s, 20 s, 40 s...
+				const delay = Math.min(60_000, 5_000 * 2 ** Math.min(this.newChatAttempt++, 3));
+				this.newChatRetryTimer = setTimeout(() => {
+					this.newChatRetryTimer = undefined;
+					void this.retryUnsent();
+				}, delay);
+			}
+			return false;
+		} finally {
+			this.delivering.delete(id);
+			this.onStatusChange?.(this.status); // header: the unsent count
 		}
 	}
 

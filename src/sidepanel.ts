@@ -69,6 +69,7 @@ import {
 	primeFetchArtifact,
 	primeListArtifacts,
 } from "./prime/prime-client.js";
+import { SEND_ACTION_EVENT, sendActionOf } from "./prime/send-state.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import {
@@ -193,6 +194,37 @@ let currentTitle = "";
 let isEditingTitle = false;
 let sessionsSidebarOpen = false;
 let draftStorageWarning = false;
+/** Plain words for the status light (2026-10-18, Tom: "is it polling?"). It is a live socket, not a poll. */
+function liveConnectionTitle(agent: PrimeRemoteAgent): string {
+	const detail = agent.statusDetail ? ` — ${agent.statusDetail}` : "";
+	const state =
+		agent.status === "open"
+			? "connected (live events, pinged every 20 s)"
+			: agent.status === "connecting"
+				? `connecting…${detail}`
+				: agent.status === "closed"
+					? `lost${detail}`
+					: agent.status === "error"
+						? `error${detail}`
+						: agent.status === "creating"
+							? "starting the session…"
+							: "not started";
+	const unsent =
+		agent.unsentCount > 0
+			? ` · ${agent.unsentCount} message${agent.unsentCount === 1 ? "" : "s"} not sent yet (sent again when it is back)`
+			: "";
+	const session = agent.primeSessionId ? ` · ${agent.primeSessionId}` : " · session starts with the first message";
+	return `Live connection to the R730: ${state}${unsent}${session}`;
+}
+
+// Retry / Discard under a message the R730 never got (the bubble dispatches; the chat's agent acts).
+document.addEventListener(SEND_ACTION_EVENT, (event: Event) => {
+	const action = sendActionOf(event);
+	if (!action || !isPrimeAgent(agent)) return;
+	if (action.action === "retry") agent.retrySend(action.id);
+	else agent.discardSend(action.id);
+});
+
 window.addEventListener(DRAFT_STORAGE_WARNING_EVENT, () => {
 	draftStorageWarning = true;
 	renderApp();
@@ -1281,9 +1313,16 @@ const renderApp = () => {
 					${
 						isPrimeAgent(agent)
 							? html`<span
-									class="inline-block w-2 h-2 rounded-full ${agent.status === "open" ? "bg-green-500" : agent.status === "error" || agent.status === "closed" ? "bg-red-500" : agent.status === "idle" ? "bg-muted-foreground/40" : "bg-yellow-500"}"
-									title="prime-agent: ${agent.status}${agent.statusDetail ? ` (${agent.statusDetail})` : ""}${agent.primeSessionId ? ` · ${agent.primeSessionId}` : " · session starts with the first message"}"
-								></span>`
+									class="sg-live-dot inline-block w-2 h-2 rounded-full ${agent.status === "open" ? "bg-green-500" : agent.status === "error" || agent.status === "closed" ? "bg-red-500" : agent.status === "idle" ? "bg-muted-foreground/40" : "bg-yellow-500"}"
+									title="${liveConnectionTitle(agent)}"
+								></span>${
+									agent.unsentCount > 0
+										? html`<span
+												class="sg-unsent-count text-[10px] leading-none px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-500 whitespace-nowrap"
+												title="${agent.unsentCount === 1 ? "One message" : `${agent.unsentCount} messages`} the R730 has not got yet. Sent again when the connection is back, or press Retry under the message."
+											>${agent.unsentCount} unsent</span>`
+										: ""
+								}`
 							: ""
 					}
 

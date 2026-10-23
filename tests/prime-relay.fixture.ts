@@ -14,10 +14,20 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 export interface StandInRelay {
 	/** http://127.0.0.1:<port>; the relay lives at <base>/sitegeist (the panel's sync.url). */
 	base: string;
-	/** Prompts the panel sent to the session. */
-	prompts: unknown[];
+	/** Prompts the session accepted (first time per clientMessageId), in order. */
+	prompts: Array<Record<string, unknown>>;
+	/** Prompt POSTs that repeated an accepted clientMessageId (answered duplicate:true, like the real relay). */
+	repeats: number;
+	/** The train tunnel: every request and socket is cut at the TCP level. */
+	offline: boolean;
+	/** The prompt lands but its answer is lost (a 504 after the relay recorded it); no echo until flushEchoes(). */
+	swallowPrompt: boolean;
 	/** Open panel sockets for the session; tool calls go to the newest. */
 	openSockets(): number;
+	/** Close every panel socket (the connection died). */
+	dropSockets(): void;
+	/** Send the bridge's echo of accepted prompts that were held back (swallowPrompt) over the open sockets. */
+	flushEchoes(): void;
 	/** A browser_* tool call from the R730; resolves with the panel's result, throws on a failed call. */
 	call(tool: string, args?: Record<string, unknown>): Promise<unknown>;
 	close(): void;
@@ -26,11 +36,30 @@ export interface StandInRelay {
 export async function startStandInRelay(sessionId: string, messages: unknown[]): Promise<StandInRelay> {
 	const sockets: MiniSocket[] = [];
 	const pending = new Map<string, (reply: { ok: boolean; result: unknown; error: string }) => void>();
-	const prompts: unknown[] = [];
+	const prompts: Array<Record<string, unknown>> = [];
+	const accepted = new Map<string, string>(); // clientMessageId -> acceptedAt
+	const heldEchoes: Array<Record<string, unknown>> = [];
+	const history: unknown[] = [...messages]; // what hydrate returns; accepted prompts are appended like the bridge log
+	let offset = 0;
 	const prime = "/sitegeist/agents/prime";
 	const session = `${prime}/sessions/${sessionId}`;
+	const relayState = { offline: false, swallowPrompt: false, repeats: 0 };
+	/** What the bridge logs for an accepted prompt: the user message echoed, then an idle turn. */
+	const echo = (text: string): void => {
+		const events = [
+			{ type: "agent_start" },
+			{ type: "message_end", message: { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } },
+			{ type: "agent_end", messages: [] },
+		];
+		offset += events.length;
+		for (const ws of sockets) ws.send(JSON.stringify({ type: "events", events, offset }));
+	};
 	const server = createServer(async (req, res) => {
 		const url = req.url ?? "";
+		if (relayState.offline && url.startsWith("/sitegeist/")) {
+			req.socket.destroy();
+			return;
+		}
 		const color = PAGES[url];
 		if (color !== undefined) {
 			const name = url.slice(1);
@@ -51,9 +80,9 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 				JSON.stringify({
 					ok: true,
 					sessionId,
-					offset: 0,
+					offset,
 					state: { thinkingLevel: "high", isStreaming: false },
-					messages,
+					messages: history,
 				}),
 			);
 		} else if (url === `${session}/artifacts`) {
@@ -61,17 +90,44 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 		} else if (url === `${session}/prompt`) {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-			prompts.push(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
-			res.end(JSON.stringify({ ok: true }));
+			const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+			const body: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+			const id = typeof body.clientMessageId === "string" ? body.clientMessageId : undefined;
+			const seen = id ? accepted.get(id) : undefined;
+			if (seen) {
+				// The real relay: the first accepted prompt per clientMessageId wins, a repeat never reaches the bridge.
+				relayState.repeats++;
+				res.end(JSON.stringify({ ok: true, duplicate: true, acceptedAt: seen }));
+				return;
+			}
+			const text = typeof body.message === "string" ? body.message : "";
+			if (id) accepted.set(id, new Date().toISOString());
+			prompts.push(body);
+			history.push({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
+			if (relayState.swallowPrompt) {
+				// Accepted, but the answer never gets back to the panel. (Cutting the socket here is not enough: Chrome
+				// retries a POST whose reused connection died before any response byte, and the retry is then a repeat.)
+				heldEchoes.push({ text });
+				res.statusCode = 504;
+				res.end(JSON.stringify({ error: "the bridge's answer was lost" }));
+				return;
+			}
+			res.end(JSON.stringify({ ok: true, id: `bridge-${prompts.length}` }));
+			echo(text);
 		} else if (url.startsWith(`${session}/rpc`)) {
-			res.end(JSON.stringify({ ok: true, response: { success: true, data: {} } }));
+			const chunks: Buffer[] = [];
+			for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+			const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+			const data =
+				isRecord(parsed) && parsed.type === "get_state" ? { thinkingLevel: "high", isStreaming: false } : {};
+			res.end(JSON.stringify({ ok: true, response: { success: true, data } }));
 		} else {
 			res.statusCode = 404;
 			res.end(JSON.stringify({ error: "not found" }));
 		}
 	});
 	server.on("upgrade", (req, raw) => {
-		if (!(req.url ?? "").startsWith(`${session}/ws`)) {
+		if (relayState.offline || !(req.url ?? "").startsWith(`${session}/ws`)) {
 			raw.destroy();
 			return;
 		}
@@ -83,6 +139,10 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 		});
 		ws.onMessage((text) => {
 			const msg: unknown = JSON.parse(text);
+			if (isRecord(msg) && msg.type === "ping") {
+				ws.send(JSON.stringify({ type: "pong", t: Date.now() }));
+				return;
+			}
 			if (!isRecord(msg) || msg.type !== "browser_result" || typeof msg.id !== "string") return;
 			pending.get(msg.id)?.({
 				ok: msg.ok === true,
@@ -97,7 +157,28 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 	return {
 		base,
 		prompts,
+		get repeats() {
+			return relayState.repeats;
+		},
+		get offline() {
+			return relayState.offline;
+		},
+		set offline(v: boolean) {
+			relayState.offline = v;
+		},
+		get swallowPrompt() {
+			return relayState.swallowPrompt;
+		},
+		set swallowPrompt(v: boolean) {
+			relayState.swallowPrompt = v;
+		},
 		openSockets: () => sockets.length,
+		dropSockets: () => {
+			for (const ws of [...sockets]) ws.close();
+		},
+		flushEchoes: () => {
+			for (const held of heldEchoes.splice(0)) echo(String(held.text));
+		},
 		async call(tool, args = {}) {
 			const ws = sockets[sockets.length - 1];
 			if (!ws) throw new Error("the panel has no relay socket");

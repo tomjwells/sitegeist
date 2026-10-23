@@ -107,17 +107,23 @@ export async function primeHydrate(agentId: string, sessionId: string): Promise<
 	};
 }
 
+/** How long one prompt POST may take. The relay itself waits at most 30 s for the bridge; a retry is safe (clientMessageId). */
+const PROMPT_TIMEOUT_MS = 45_000;
+
 export async function primePrompt(
 	agentId: string,
 	sessionId: string,
 	message: string,
 	images?: Json[],
 	streamingBehavior?: "steer" | "followUp",
+	clientMessageId?: string,
 ): Promise<Json> {
 	const body: Json = { message };
 	if (images && images.length > 0) body.images = images;
 	if (streamingBehavior) body.streamingBehavior = streamingBehavior;
-	return request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/prompt`, body);
+	// The relay prompts the bridge once per clientMessageId; a repeat gets duplicate:true back (2026-10-18).
+	if (clientMessageId) body.clientMessageId = clientMessageId;
+	return request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/prompt`, body, PROMPT_TIMEOUT_MS);
 }
 
 export interface PrimeStoredFile {
@@ -258,53 +264,106 @@ export interface PrimeSocketHandlers {
 	onBrowserCall: (id: string, tool: string, args: Json) => void;
 	onBrowserCancel: (id: string, reason: string) => void;
 	onAttachments: (items: PrimeAttachment[]) => void;
+	/** detail: plain words for the status light's tooltip (why it closed, when it retries). */
 	onStatus: (status: "connecting" | "open" | "closed", detail?: string) => void;
 }
 
-/** One WebSocket per session; reconnects with backoff, resumes from the last seen log offset. */
+const PING_EVERY_MS = 20_000;
+/** Two pings without a pong: the connection is dead even if the browser has not noticed (a train tunnel). */
+const PONG_OVERDUE_MS = 45_000;
+
+/**
+ * One WebSocket per session; reconnects with backoff, resumes from the last seen log offset. Not polling: the
+ * relay pushes events. The panel pings every 20 s and expects a pong; a connection that stops answering is closed
+ * and reopened, so the status light follows reality within ~45 s instead of waiting for the browser's own TCP
+ * timeout. The browser's online/offline events shortcut the backoff (2026-10-18, Tom on a train).
+ */
 export class PrimeSocket {
 	private ws: WebSocket | undefined;
 	private closed = false;
 	private attempt = 0;
+	private lastPong = 0;
 	private pingTimer: ReturnType<typeof setInterval> | undefined;
 	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+	private readonly onOnline = (): void => {
+		// Back online: do not sit out the rest of a 30 s backoff.
+		if (this.closed || this.ws) return;
+		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = undefined;
+		this.attempt = 0;
+		void this.connect();
+	};
+	private readonly onOffline = (): void => {
+		// The browser says the network is gone: show it now; the backoff then waits for "online".
+		if (this.ws) this.drop(this.ws, "browser offline");
+	};
 
 	constructor(
 		private readonly agentId: string,
 		private readonly sessionId: string,
 		private offset: number,
 		private readonly handlers: PrimeSocketHandlers,
-	) {}
+	) {
+		window.addEventListener("online", this.onOnline);
+		window.addEventListener("offline", this.onOffline);
+	}
 
 	async connect(): Promise<void> {
-		if (this.closed) return;
+		if (this.closed || this.ws) return;
 		const base = await primeBaseUrl(this.agentId);
 		// Browsers cannot set headers on a WebSocket handshake, so the token travels as a query parameter.
 		const token = await proxyToken();
 		const url = `${base.replace(/^http/, "ws")}/sessions/${encodeURIComponent(this.sessionId)}/ws?offset=${this.offset}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
-		this.handlers.onStatus("connecting");
+		this.handlers.onStatus("connecting", this.attempt > 0 ? `attempt ${this.attempt + 1}` : undefined);
 		const ws = new WebSocket(url);
 		this.ws = ws;
 		ws.onopen = () => {
 			this.attempt = 0;
+			this.lastPong = Date.now();
 			this.handlers.onStatus("open");
-			this.pingTimer = setInterval(() => this.send({ type: "ping" }), 20_000);
+			this.pingTimer = setInterval(() => {
+				if (Date.now() - this.lastPong > PONG_OVERDUE_MS)
+					this.drop(ws, `no answer to pings for ${Math.round(PONG_OVERDUE_MS / 1000)} s`);
+				else this.send({ type: "ping" });
+			}, PING_EVERY_MS);
 		};
 		ws.onmessage = (ev) => this.handleMessage(ev.data);
 		ws.onerror = () => {
 			/* onclose follows; nothing to do here */
 		};
-		ws.onclose = (ev) => {
-			if (this.pingTimer) clearInterval(this.pingTimer);
-			this.pingTimer = undefined;
-			if (this.ws !== ws) return;
-			this.ws = undefined;
-			this.handlers.onStatus("closed", `${ev.code}${ev.reason ? ` ${ev.reason}` : ""}`);
-			if (!this.closed) {
-				const delay = Math.min(30_000, 1_000 * 2 ** Math.min(this.attempt++, 5));
-				this.reconnectTimer = setTimeout(() => void this.connect(), delay);
-			}
-		};
+		ws.onclose = (ev) =>
+			this.drop(ws, ev.reason ? ev.reason : ev.code === 1006 ? "connection lost" : `closed (${ev.code})`);
+	}
+
+	/**
+	 * Give up on `ws` now and schedule the next attempt. Also used before the browser reports the close: a dead
+	 * socket's own onclose can take Chrome a minute to arrive, and the light should not lie that long.
+	 */
+	private drop(ws: WebSocket, why: string): void {
+		if (this.ws !== ws) return;
+		this.ws = undefined;
+		if (this.pingTimer) clearInterval(this.pingTimer);
+		this.pingTimer = undefined;
+		ws.onopen = null;
+		ws.onmessage = null;
+		ws.onclose = null;
+		ws.onerror = null;
+		if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+		if (this.closed) {
+			this.handlers.onStatus("closed", why);
+			return;
+		}
+		const delay = Math.min(30_000, 1_000 * 2 ** Math.min(this.attempt++, 5));
+		this.handlers.onStatus("closed", `${why}; retrying in ${Math.round(delay / 1000)} s (attempt ${this.attempt})`);
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			void this.connect();
+		}, delay);
+	}
+
+	/** Reconnect now (after a failed send): skips the rest of the backoff. */
+	reconnectNow(): void {
+		this.onOnline();
 	}
 
 	private handleMessage(raw: unknown): void {
@@ -316,6 +375,10 @@ export class PrimeSocket {
 			return;
 		}
 		if (!isJson(msg)) return;
+		if (msg.type === "pong") {
+			this.lastPong = Date.now();
+			return;
+		}
 		if (msg.type === "events") {
 			const events = Array.isArray(msg.events) ? msg.events.filter(isJson) : [];
 			if (typeof msg.offset === "number") this.offset = msg.offset;
@@ -346,6 +409,8 @@ export class PrimeSocket {
 
 	close(): void {
 		this.closed = true;
+		window.removeEventListener("online", this.onOnline);
+		window.removeEventListener("offline", this.onOffline);
 		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
 		if (this.pingTimer) clearInterval(this.pingTimer);
 		this.ws?.close();
