@@ -15,6 +15,7 @@ import {
 	ChatPanel,
 	createExtractDocumentTool,
 	createStreamFn,
+	type MessageEditor,
 	ModelSelector,
 	ProxyTab,
 	SettingsDialog,
@@ -72,6 +73,14 @@ import {
 import { SEND_ACTION_EVENT, sendActionOf } from "./prime/send-state.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
+import {
+	claimParkedDraftAttachments,
+	clearDraftAttachments,
+	configureDraftAttachments,
+	parkDraftAttachments,
+	promoteDraftAttachments,
+	seedDraftAttachments,
+} from "./storage/draft-attachments.js";
 import {
 	clearPromptDraft,
 	configurePromptDraft,
@@ -695,6 +704,7 @@ const createAgent = async (
 	}
 	if (isPrimeAgent(agent)) agent.detach();
 	configurePromptDraft(draftScope(), currentSessionId);
+	configureDraftAttachments(draftScope(), currentSessionId);
 	agentKind = kind;
 
 	// Mark all loaded messages as already recorded (by object identity)
@@ -955,6 +965,7 @@ const createAgent = async (
 				// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
 				currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
 				promotePromptDraft(draftScope(), currentSessionId);
+				void promoteDraftAttachments(draftScope(), currentSessionId);
 				if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
 
 				port
@@ -1154,6 +1165,7 @@ const loadSession = (sessionId: string) => {
 const newSession = (kind: AgentKind = "browser") => {
 	suppressAutoResumeForActivePage();
 	clearPromptDraft(draftScope()); // Explicit New starts empty; saved-chat drafts remain separate.
+	void clearDraftAttachments(draftScope());
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
 	url.search = kind !== "browser" ? `?new=true&agent=${encodeURIComponent(kind)}` : "?new=true";
@@ -1161,15 +1173,18 @@ const newSession = (kind: AgentKind = "browser") => {
 	window.location.href = url.toString();
 };
 
-/** Panel tab: unsent text that came along with a moved chat (see moveBesidePage and utils/open-beside). */
+/** Panel tab: unsent text and files that came along with a moved chat (see moveBesidePage and utils/open-beside). */
 async function adoptDraftHandoff(sessionId: string | undefined, pageTabId: number | undefined): Promise<void> {
 	if (!isPanelTab()) return;
 	const key = draftHandoffKey(sessionId, pageTabId);
 	const data = await chrome.storage.session.get(key);
 	const text: unknown = data[key];
-	if (typeof text !== "string" || !text) return;
-	await chrome.storage.session.remove(key);
-	seedPromptDraft(draftScope(), sessionId, text);
+	if (typeof text === "string" && text) {
+		await chrome.storage.session.remove(key);
+		seedPromptDraft(draftScope(), sessionId, text);
+	}
+	const parked = await claimParkedDraftAttachments(key);
+	if (parked.length > 0) await seedDraftAttachments(draftScope(), sessionId, parked);
 }
 
 const SPLIT_HINT_SHOWN_KEY = "sg.splitHintShown";
@@ -1222,6 +1237,14 @@ function moveBesidePage(): void {
 		Toast.show("This chat is not saved yet. Try again in a moment.", "info", 4000);
 		return;
 	}
+	// The files are parked in IndexedDB under the handoff key (they can be MBs; chrome.storage.session caps at 10 MB
+	// and the message channel would copy them); the new tab claims them once it has loaded. Only the text rides the
+	// message, which goes out NOW: Firefox / Zen close the sidebar from inside this click, so nothing may be awaited
+	// before it. The park runs alongside; the new tab's claim retries briefly in case the write lands after its load.
+	void parkDraftAttachments(
+		draftHandoffKey(currentSessionId, pageTabId),
+		document.querySelector<MessageEditor>("message-editor")?.attachments ?? [],
+	);
 	const sent: Promise<unknown> = chrome.runtime.sendMessage({
 		type: "sg-open-beside",
 		pageTabId,
@@ -1230,8 +1253,11 @@ function moveBesidePage(): void {
 		draft: currentPromptDraftText(),
 		from: panelOwner,
 	});
-	// The unsent text moves with the chat: it must not come back here later.
-	const clearMovedDraft = () => clearPromptDraft(draftScope(), currentSessionId);
+	// The unsent text and files move with the chat: they must not come back here later.
+	const clearMovedDraft = () => {
+		clearPromptDraft(draftScope(), currentSessionId);
+		void clearDraftAttachments(draftScope(), currentSessionId);
+	};
 	const sidebar = sidebarActionApi();
 	if (!hasSidePanelApi() && sidebar) {
 		clearMovedDraft();
@@ -1464,6 +1490,7 @@ const renderApp = () => {
 					.onNew=${() => newSession()}
 					.onDeleted=${(deletedSessionId: string) => {
 						clearPromptDraft(draftScope(), deletedSessionId);
+						void clearDraftAttachments(draftScope(), deletedSessionId);
 						void anchors.removeSession(deletedSessionId);
 						if (isPrimeSessionId(deletedSessionId))
 							void primeDeleteArtifacts(agentIdFromSessionId(deletedSessionId), deletedSessionId).catch(

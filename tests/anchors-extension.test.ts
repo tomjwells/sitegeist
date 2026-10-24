@@ -211,7 +211,8 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 		const video = session("s-video", "Life of a Process Q&A", "2026-09-29T01:00:00.000Z");
 		const shop = session("s-shop", "Split keyboard research", "2026-09-29T02:00:00.000Z");
 		const prime = session("sg-abcdef123456", "Help me with this video.", "2026-09-27T22:25:00.000Z");
-		await seedSessions(boot, [video, shop, prime]);
+		const docs = session("s-docs", "Docs intro notes", "2026-09-28T02:00:00.000Z");
+		await seedSessions(boot, [video, shop, prime, docs]);
 		await seedSetting(boot, "sync.url", `${base}/sitegeist`);
 		const windowId = await boot.evaluate(async () => (await chrome.windows.getCurrent()).id);
 		assert.ok(typeof windowId === "number");
@@ -234,6 +235,14 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 					sessionId: "s-shop",
 					lastActive: "2026-09-29T02:00:00.000Z",
 					pinned: true,
+				},
+				{
+					key: `${host}/docs/intro`,
+					url: `${base}/docs/intro`,
+					pageTitle: "Docs intro",
+					sessionId: "s-docs",
+					lastActive: "2026-09-28T02:00:00.000Z",
+					pinned: false,
 				},
 			],
 		);
@@ -391,6 +400,122 @@ test("built extension: sessions resume from the page they belong to", { timeout:
 			"badge",
 		);
 		assert.equal(badge, "1");
+
+		// 6. An unsent draft WITH FILES survives the reload a tab switch causes (Tom, 2026-10-24: "If I try to attach
+		//    things, then change the browser tab, it reloads but loses the attachments"). The video page's chat is open
+		//    (suppressed for the shop page since Undo). Attach + type there, switch to a third page that has its own chat
+		//    (the panel reloads onto it: that chat's draft is empty), switch back (the panel reloads onto the video chat:
+		//    text and file are both back).
+		await videoTab.bringToFront();
+		await until(
+			() => panel.evaluate(() => location.search),
+			(s) => s.includes("session=s-video"),
+			10_000,
+			"on video chat",
+		);
+		await panel.waitForSelector("message-editor textarea", { timeout: 15_000, state: "attached" });
+		await panel.setInputFiles("message-editor input[type=file]", {
+			name: "screenshot.png",
+			mimeType: "image/png",
+			buffer: Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+				"base64",
+			),
+		});
+		await until(
+			() => panel.evaluate(() => document.querySelectorAll("message-editor attachment-tile").length),
+			(n) => n === 1,
+			10_000,
+			"attachment tile",
+		);
+		await panel.fill("message-editor textarea", "What is wrong with this layout?");
+		await new Promise((r) => setTimeout(r, 400)); // the save is async (IndexedDB)
+		const docsTab = await context.newPage();
+		await docsTab.goto(`${base}/docs/intro`);
+		await docsTab.bringToFront();
+		await until(
+			() => panel.evaluate(() => location.search),
+			(s) => s.includes("session=s-docs"),
+			30_000,
+			"switched to the docs chat",
+		);
+		await dismissPermissionDialog(panel);
+		await panel.waitForSelector("message-editor textarea", { timeout: 15_000, state: "attached" });
+		await new Promise((r) => setTimeout(r, 600));
+		assert.deepEqual(
+			await panel.evaluate(() => ({
+				text: (document.querySelector("message-editor textarea") as HTMLTextAreaElement | null)?.value ?? "",
+				files: document.querySelectorAll("message-editor attachment-tile").length,
+			})),
+			{ text: "", files: 0 },
+			"another chat's draft is its own",
+		);
+		await videoTab.bringToFront();
+		await until(
+			() => panel.evaluate(() => location.search),
+			(s) => s.includes("session=s-video"),
+			30_000,
+			"back on the video chat",
+		);
+		await dismissPermissionDialog(panel);
+		await panel.waitForSelector("message-editor textarea", { timeout: 15_000, state: "attached" });
+		const back = await until(
+			() =>
+				panel.evaluate(() => ({
+					text: (document.querySelector("message-editor textarea") as HTMLTextAreaElement | null)?.value ?? "",
+					files: Array.from(document.querySelectorAll("message-editor attachment-tile")).map(
+						(el) => (el as { attachment?: { fileName?: string } }).attachment?.fileName ?? "",
+					),
+				})),
+			(v) => v.files.length === 1,
+			10_000,
+			"draft files back after the reload",
+		);
+		assert.deepEqual(back, { text: "What is wrong with this layout?", files: ["screenshot.png"] });
+		// Remove the file from the draft: that is remembered too.
+		await panel.evaluate(() =>
+			(document.querySelector("message-editor attachment-tile button") as HTMLButtonElement | null)?.click(),
+		);
+		await until(
+			() => panel.evaluate(() => document.querySelectorAll("message-editor attachment-tile").length),
+			(n) => n === 0,
+			5_000,
+			"file removed",
+		);
+		await new Promise((r) => setTimeout(r, 400));
+		await docsTab.bringToFront();
+		await until(
+			() => panel.evaluate(() => location.search),
+			(s) => s.includes("session=s-docs"),
+			30_000,
+			"docs again",
+		);
+		await dismissPermissionDialog(panel);
+		await panel.waitForSelector("message-editor textarea", { timeout: 15_000, state: "attached" }); // reload settled
+		await videoTab.bringToFront();
+		await until(
+			() => panel.evaluate(() => location.search),
+			(s) => s.includes("session=s-video"),
+			30_000,
+			"video again",
+		);
+		await dismissPermissionDialog(panel);
+		await panel.waitForSelector("message-editor textarea", { timeout: 15_000, state: "attached" });
+		await until(
+			() =>
+				panel.evaluate(
+					() => (document.querySelector("message-editor textarea") as HTMLTextAreaElement | null)?.value ?? "",
+				),
+			(v) => v === "What is wrong with this layout?",
+			10_000,
+			"text back",
+		);
+		await new Promise((r) => setTimeout(r, 600)); // a restore of files would have landed by now
+		assert.equal(
+			await panel.evaluate(() => document.querySelectorAll("message-editor attachment-tile").length),
+			0,
+			"a removed file stays removed",
+		);
 	} finally {
 		await context.close();
 		server.close();

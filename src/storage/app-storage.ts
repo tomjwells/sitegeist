@@ -6,7 +6,9 @@ import {
 	SessionsStore,
 	SettingsStore,
 } from "@mariozechner/pi-web-ui";
+import { setDraftAttachmentsStore } from "./draft-attachments.js";
 import { CostStore } from "./stores/cost-store.js";
+import { DraftAttachmentsStore } from "./stores/draft-attachments-store.js";
 import { SitegeistProviderKeysStore } from "./stores/provider-keys-store.js";
 import { SessionSearchStore } from "./stores/session-search-store.js";
 import { SitegeistSessionsStore } from "./stores/sessions-store.js";
@@ -20,6 +22,8 @@ export class SitegeistAppStorage extends BaseAppStorage {
 	readonly costs: CostStore;
 	/** Full-text index for the sessions sidebar search. */
 	readonly sessionSearch: SessionSearchStore;
+	/** Unsent attachments of a draft, keyed like the text draft (src/storage/draft-attachments.ts). */
+	readonly draftAttachments: DraftAttachmentsStore;
 	/** Narrowed type of the base `providerKeys` so callers can pass `{ sync: false }`. */
 	declare readonly providerKeys: SitegeistProviderKeysStore;
 
@@ -32,6 +36,7 @@ export class SitegeistAppStorage extends BaseAppStorage {
 		const skills = new SkillsStore();
 		const costs = new CostStore();
 		const sessionSearch = new SessionSearchStore();
+		const draftAttachments = new DraftAttachmentsStore();
 
 		// 2. Gather configs from all stores
 		const configs = [
@@ -43,12 +48,13 @@ export class SitegeistAppStorage extends BaseAppStorage {
 			skills.getConfig(),
 			costs.getConfig(),
 			sessionSearch.getConfig(),
+			draftAttachments.getConfig(),
 		];
 
 		// 3. Create backend with all configs
 		const backend = new IndexedDBStorageBackend({
 			dbName: "sitegeist-storage",
-			version: 4, // v3 custom-providers; v4 sessions-search (full-text index, 2026-10-03)
+			version: 5, // v3 custom-providers; v4 sessions-search (full-text index, 2026-10-03); v5 draft-attachments (2026-10-24)
 			stores: configs,
 		});
 
@@ -60,6 +66,7 @@ export class SitegeistAppStorage extends BaseAppStorage {
 		skills.setBackend(backend);
 		costs.setBackend(backend);
 		sessionSearch.setBackend(backend);
+		draftAttachments.setBackend(backend);
 
 		// 5. Pass base stores to parent
 		super(settings, providerKeys, sessions, customProviders, backend);
@@ -68,6 +75,8 @@ export class SitegeistAppStorage extends BaseAppStorage {
 		this.skills = skills;
 		this.costs = costs;
 		this.sessionSearch = sessionSearch;
+		this.draftAttachments = draftAttachments;
+		setDraftAttachmentsStore(draftAttachments);
 	}
 }
 

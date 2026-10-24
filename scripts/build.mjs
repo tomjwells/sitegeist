@@ -56,8 +56,16 @@ const piWebUiPatches = [
 		imports: [
 			`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/"))};`,
 			`import { connectPromptDraft, disconnectPromptDraft, rememberPromptDraft } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
+			`import { connectDraftAttachments, disconnectDraftAttachments, rememberDraftAttachments } from ${JSON.stringify(join(packageRoot, "src/storage/draft-attachments.ts").replace(/\\/g, "/"))};`,
 		],
 		replacements: [
+			{
+				// Unsent files stay with the draft (2026-10-24): every change of the list is saved at once.
+				find: "this.onFilesChange?.(this.attachments);",
+				replace:
+					"rememberDraftAttachments(this, this.attachments);\n        this.onFilesChange?.(this.attachments);",
+				all: true,
+			},
 			{
 				find: '        this._value = val;\n        this.requestUpdate("value", oldValue);',
 				replace:
@@ -66,7 +74,7 @@ const piWebUiPatches = [
 			{
 				find: "    firstUpdated() {\n",
 				replace:
-					"    connectedCallback() {\n        super.connectedCallback();\n        connectPromptDraft(this);\n    }\n    disconnectedCallback() {\n        disconnectPromptDraft(this);\n        super.disconnectedCallback();\n    }\n    firstUpdated() {\n",
+					"    connectedCallback() {\n        super.connectedCallback();\n        connectPromptDraft(this);\n        connectDraftAttachments(this);\n    }\n    disconnectedCallback() {\n        disconnectPromptDraft(this);\n        disconnectDraftAttachments(this);\n        super.disconnectedCallback();\n    }\n    firstUpdated() {\n",
 			},
 			{
 				find: /options: \[\n\s*\{ value: "off"[\s\S]*?\],/,
@@ -163,6 +171,7 @@ const piWebUiPatches = [
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]AgentInterface\.js$/,
 		imports: [
 			`import { beginPromptSubmission, restoreRejectedPrompt } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
+			`import { rememberDraftAttachments } from ${JSON.stringify(join(packageRoot, "src/storage/draft-attachments.ts").replace(/\\/g, "/"))};`,
 			`import { footerInfo as __sgFooterInfo } from ${JSON.stringify(join(packageRoot, "src/components/footer-info.ts").replace(/\\/g, "/"))};`,
 		],
 		replacements: [
@@ -180,7 +189,7 @@ const piWebUiPatches = [
 			{
 				find: '        this._messageEditor.value = "";\n        this._messageEditor.attachments = [];',
 				replace:
-					"        const draftSubmission = beginPromptSubmission(this._messageEditor, input);\n        if (this._messageEditor.attachments === attachments) this._messageEditor.attachments = [];",
+					"        const draftSubmission = beginPromptSubmission(this._messageEditor, input);\n        if (this._messageEditor.attachments === attachments) { this._messageEditor.attachments = []; rememberDraftAttachments(this._messageEditor, []); }",
 			},
 			{
 				find: "        // Compose message with attachments if any\n",
@@ -189,7 +198,7 @@ const piWebUiPatches = [
 			{
 				find: "            await this.session?.prompt(input);\n        }\n    }",
 				replace:
-					"            await this.session?.prompt(input);\n        }\n        } catch (error) {\n            restoreRejectedPrompt(draftSubmission);\n            if (attachments && this._messageEditor.attachments.length === 0) this._messageEditor.attachments = attachments;\n            throw error;\n        }\n    }",
+					"            await this.session?.prompt(input);\n        }\n        } catch (error) {\n            restoreRejectedPrompt(draftSubmission);\n            if (attachments && this._messageEditor.attachments.length === 0) { this._messageEditor.attachments = attachments; rememberDraftAttachments(this._messageEditor, attachments); }\n            throw error;\n        }\n    }",
 			},
 		],
 	},
@@ -281,13 +290,15 @@ export const piWebUiPatchPlugin = {
 			build.onLoad({ filter: patch.file }, async (args) => {
 				const { readFile } = await import("node:fs/promises");
 				let source = await readFile(args.path, "utf8");
-				for (const { find, replace } of patch.replacements) {
+				for (const { find, replace, all } of patch.replacements) {
 					const hit = typeof find === "string" ? source.includes(find) : find.test(source);
 					if (!hit)
 						throw new Error(
 							`pi-web-ui-patches: ${args.path} no longer contains the expected snippet: ${String(find).slice(0, 80)}`,
 						);
-					source = source.replace(find, replace);
+					// `all`: every occurrence of a string snippet (the editor changes its attachment list in four places)
+					source =
+						all && typeof find === "string" ? source.split(find).join(replace) : source.replace(find, replace);
 				}
 				return { contents: `${patch.imports.join("\n")}\n${source}`, loader: "js", resolveDir: dirname(args.path) };
 			});
