@@ -103,6 +103,7 @@ import {
 } from "./tools/repl/runtime-providers.js";
 import { hasSidePanelApi, isFirefoxExtension, sidebarActionApi } from "./utils/browser-compat.js";
 import { draftHandoffKey } from "./utils/open-beside.js";
+import type { AcquireLockMessage } from "./utils/port.js";
 import * as port from "./utils/port.js";
 import {
 	clearAgentTab,
@@ -308,7 +309,7 @@ let authLabel = "";
 
 const DEFAULT_MODELS: Record<string, string> = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-	anthropic: "claude-sonnet-4-6",
+	anthropic: "claude-opus-5-5",
 	"azure-openai-responses": "gpt-5.2",
 	cerebras: "zai-glm-4.6",
 	"github-copilot": "gpt-4o",
@@ -753,9 +754,17 @@ const createAgent = async (
 			}
 		}
 	}
-	// Final fallback
+	// Final fallback: the same interactive default as a new main-pi / coach chat (Tom, 2026-10-25: "why is it
+	// defaulting to sonnet?" - the Browser agent still had upstream's claude-sonnet-4-6). claude-opus-5-5 comes from
+	// the R730 catalog (/models); before that has loaded (first run, offline) the bundled list's newest Opus is used.
 	if (!defaultModel && !initialState?.model) {
-		defaultModel = getModel("anthropic", "claude-sonnet-4-6");
+		const anthropic = getModels("anthropic");
+		defaultModel =
+			anthropic.find((m) => m.id === PRIME_INTERACTIVE_DEFAULT_MODEL) ??
+			anthropic
+				.filter((m) => /^claude-opus-\d+-\d+$/.test(m.id))
+				.sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true }))[0] ??
+			getModel("anthropic", "claude-sonnet-4-6");
 	}
 
 	if (kind !== "browser") {
@@ -1810,6 +1819,13 @@ async function initApp() {
 
 	// Initialize port communication system (session locks are per panel)
 	port.initialize(panelOwner);
+	port.onLockTaken((msg) => {
+		if (msg.sessionId !== currentSessionId) return;
+		// Another panel took this chat over ("Open here anyway"): let go here. Unsent text/files stay in this panel's draft.
+		Toast.show("This chat was opened in another panel; this one starts fresh.", "info", 6000);
+		if (agent && !isPrimeAgent(agent) && agent.state.isStreaming) agent.abort();
+		newSession(agentKind);
+	});
 
 	// TODO reenable Request persistent storage
 	// if (storage.sessions) {
@@ -1930,7 +1946,11 @@ async function initApp() {
 			});
 
 			if (!lockResponse.success) {
-				// Session is locked in another window - show landing page instead
+				// The chat is open in another panel (another window's sidebar, or a panel tab). Say so - it used to fall back
+				// to the landing page without a word (Tom, 2026-10-25: "why can't I select this conversation in Zen?") -
+				// and offer to take it over: that panel is told and moves to a new chat.
+				const wanted = sessionIdFromUrl;
+				const title = (await storage.sessions.getMetadata(wanted))?.title || "This chat";
 				await createAgent();
 				if (agent) {
 					const welcomeMessage = createWelcomeMessage(tutorials);
@@ -1938,6 +1958,22 @@ async function initApp() {
 				}
 				appReady = true;
 				renderApp();
+				const where = lockResponse.owner?.startsWith("t:") ? "a sitegeist tab" : "another window's panel";
+				Toast.show(`"${title}" is open in ${where}.`, "info", 12_000, {
+					label: "Open here anyway",
+					onClick: () => {
+						const take: AcquireLockMessage = {
+							type: "acquireLock",
+							sessionId: wanted,
+							owner: panelOwner,
+							force: true,
+						};
+						void port.sendMessage(take).then((taken) => {
+							if (taken.success) loadSession(wanted);
+							else Toast.error("Could not take the chat over.", 5000);
+						});
+					},
+				});
 				return;
 			}
 

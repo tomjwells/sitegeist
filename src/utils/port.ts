@@ -44,6 +44,8 @@ export interface AcquireLockMessage {
 	type: "acquireLock";
 	sessionId: string;
 	owner: PanelOwner;
+	/** Take the chat over from the panel that has it (Tom clicked "Open here anyway"); that panel is told to let go. */
+	force?: boolean;
 }
 
 /**
@@ -86,6 +88,13 @@ export type MessagePair =
 	| { request: AcquireLockMessage; response: LockResultMessage }
 	| { request: GetLockedSessionsMessage; response: LockedSessionsMessage };
 
+/** Pushed by the background to the panel that lost a chat to another panel's "Open here anyway". */
+export interface LockTakenMessage {
+	type: "lockTaken";
+	sessionId: string;
+	by: PanelOwner;
+}
+
 /**
  * All messages that can be sent from sidepanel to background.
  */
@@ -123,6 +132,21 @@ export const REQUEST_TO_RESPONSE_TYPE: Record<
 let port: chrome.runtime.Port | null = null;
 let currentOwnerId: PanelOwner | undefined;
 const responseHandlers = new Map<string, (msg: BackgroundToSidepanelMessage) => void>();
+let lockTakenHandler: ((msg: LockTakenMessage) => void) | undefined;
+
+/** Called when another panel takes this panel's chat over. */
+export function onLockTaken(handler: (msg: LockTakenMessage) => void): void {
+	lockTakenHandler = handler;
+}
+
+function isLockTaken(msg: unknown): msg is LockTakenMessage {
+	return (
+		typeof msg === "object" &&
+		msg !== null &&
+		(msg as { type?: unknown }).type === "lockTaken" &&
+		typeof (msg as { sessionId?: unknown }).sessionId === "string"
+	);
+}
 
 /**
  * Initialize port system with this panel's owner id.
@@ -151,7 +175,11 @@ function connect(): chrome.runtime.Port {
 	const tmpPort = chrome.runtime.connect({ name: `sidepanel:${currentOwnerId}` });
 
 	// Set up message listener to dispatch responses
-	tmpPort.onMessage.addListener((msg: BackgroundToSidepanelMessage) => {
+	tmpPort.onMessage.addListener((msg: BackgroundToSidepanelMessage | LockTakenMessage) => {
+		if (isLockTaken(msg)) {
+			lockTakenHandler?.(msg);
+			return;
+		}
 		// Dispatch to registered response handlers
 		const handler = responseHandlers.get(msg.type);
 		if (handler) {

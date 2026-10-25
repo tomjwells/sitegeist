@@ -89,6 +89,11 @@ class Driver {
 	async switchTo(handle: string): Promise<void> {
 		await this.cmd("POST", this.s("/window"), { handle });
 	}
+	async handle(): Promise<string> {
+		const v = await this.cmd("GET", this.s("/window"));
+		if (typeof v !== "string") throw new Error("no window handle");
+		return v;
+	}
 	async element(using: "xpath" | "css selector", value: string): Promise<string> {
 		const v = await this.cmd("POST", this.s("/element"), { using, value });
 		const id = isRecord(v) ? Object.values(v)[0] : undefined;
@@ -754,6 +759,99 @@ test(
 			);
 			assert.equal(await where(), "Article|/article", "the page beside the panel, not the tab Tom went to");
 			assert.ok(String(await selected()).includes("/other"), "Tom stays on the tab he went to");
+		} finally {
+			await stop();
+			relay.close();
+		}
+	},
+);
+
+test(
+	"Zen: a chat open in another window's sidebar says so and can be taken over",
+	{ skip, timeout: 180_000 },
+	async () => {
+		// Tom, 2026-10-25: a chat in the sessions list would not open - the panel fell back to the landing page without a
+		// word. The chat was held by another panel (its sidebar in another window had auto-resumed it from a page anchor).
+		const SID = "sg-5d5d5d5d5d5d";
+		const seeded = seededPrimeSession(SID, "Held elsewhere");
+		const relay = await startStandInRelay(SID, seeded.messages);
+		const { base } = relay;
+		const { d, stop } = await startZen();
+		try {
+			// Panel A (a tab stands in for window 1's sidebar) seeds the chat and opens it: A holds the lock.
+			await d.openTab(`${BASE}/sidepanel.html?new=true`);
+			await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("Grant Permission"),
+				20_000,
+				"permission dialog",
+			);
+			await d.click("xpath", "//button[normalize-space(.)='Grant Permission']");
+			await d.runAsync(
+				`const [data, metadata, syncUrl] = arguments;
+			 const db = await new Promise((res, rej) => { const q = indexedDB.open("sitegeist-storage"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+			 await new Promise((res, rej) => { const tx = db.transaction(["sessions", "sessions-metadata", "settings"], "readwrite"); tx.objectStore("sessions").put(data); tx.objectStore("sessions-metadata").put(metadata); tx.objectStore("settings").put(syncUrl, "sync.url"); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+			 db.close(); location.href = "sidepanel.html?session=" + data.id;`,
+				[seeded.data, seeded.metadata, `${base}/sitegeist`],
+			);
+			await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("ask away"),
+				30_000,
+				"panel A shows the chat",
+			);
+			const panelA = await d.handle();
+
+			// Panel B, in a SECOND Zen window (another owner, like another window's sidebar), opens the same chat by URL -
+			// what a click in its sessions list does.
+			const before = new Set(await d.handles());
+			await inChrome(d, `Services.wm.getMostRecentWindow("navigator:browser").OpenBrowserWindow(); return true;`);
+			await until(
+				() => d.handles(),
+				(hs) => hs.some((h) => !before.has(h)),
+				20_000,
+				"second window",
+			);
+			await inChrome(
+				d,
+				`const wins = [...Services.wm.getEnumerator("navigator:browser")]; const nw = wins[wins.length - 1];
+			 nw.gBrowser.selectedTab = nw.gBrowser.addTab(arguments[0], { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() });
+			 return wins.length;`,
+				[`${BASE}/sidepanel.html?session=${SID}`],
+			);
+			const panelB = await until(
+				() => d.handles(),
+				(hs) => hs.filter((h) => !before.has(h)).length >= 2,
+				20_000,
+				"panel B's tab",
+			).then((hs) => hs.filter((h) => !before.has(h)).pop());
+			assert.ok(panelB);
+			await d.switchTo(panelB);
+			const notice = await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("is open in"),
+				30_000,
+				"panel B says where the chat is",
+			);
+			assert.match(String(notice), /"Held elsewhere" is open in another window's panel\./);
+			assert.ok(String(notice).includes("Open here anyway"));
+			assert.ok(!String(notice).includes("ask away"), "B does not show the chat yet");
+
+			// Take it over: B gets the chat, A is told and starts fresh.
+			await d.click("xpath", "//toast-notification//button[normalize-space(.)='Open here anyway']");
+			await untilOk(
+				() => d.run(`return location.search + "|" + (document.body?.innerText ?? "")`),
+				(t) => typeof t === "string" && t.includes(`session=${SID}`) && t.includes("ask away"),
+				30_000,
+				"panel B has the chat",
+			);
+			await d.switchTo(panelA);
+			await untilOk(
+				() => d.run(`return location.search + "|" + (document.body?.innerText ?? "")`),
+				(t) => typeof t === "string" && t.includes("new=true") && !t.includes("ask away"),
+				30_000,
+				"panel A let go (new chat)",
+			);
 		} finally {
 			await stop();
 			relay.close();

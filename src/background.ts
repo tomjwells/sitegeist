@@ -4,6 +4,7 @@ import { openBeside } from "./utils/open-beside.js";
 import {
 	type LockedSessionsMessage,
 	type LockResultMessage,
+	type LockTakenMessage,
 	type PanelOwner,
 	parsePanelOwner,
 	type SidepanelToBackgroundMessage,
@@ -215,6 +216,8 @@ async function releaseLock(sessionId: string, owner: PanelOwner): Promise<void> 
 // Synchronously readable cache of which panels are open
 // Gets populated on startup and updated by port events
 let openSidepanels = new Set<PanelOwner>();
+// Live ports per panel, to tell a panel its chat was taken over ("Open here anyway" in another panel).
+const portsByOwner = new Map<PanelOwner, Set<chrome.runtime.Port>>();
 
 // Initialize cache from storage on startup
 chrome.storage.session.get(SIDEPANEL_OPEN_KEY, (data) => {
@@ -230,6 +233,9 @@ chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
 
 	// Update cache synchronously
 	openSidepanels.add(owner);
+	const ports = portsByOwner.get(owner) ?? new Set<chrome.runtime.Port>();
+	ports.add(port);
+	portsByOwner.set(owner, ports);
 
 	// Mark the panel as open in persistent storage (survives service worker sleep)
 	chrome.storage.session.get(SIDEPANEL_OPEN_KEY, (data) => {
@@ -243,13 +249,24 @@ chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
 			const { sessionId, owner: requester } = msg;
 
 			// Read current locks from persistent storage
-			chrome.storage.session.get(SESSION_LOCKS_KEY, (data) => {
+			chrome.storage.session.get(SESSION_LOCKS_KEY, async (data) => {
 				const sessionLocks = readLocks(data[SESSION_LOCKS_KEY]);
 				const current = sessionLocks[sessionId];
-				const currentOpen = current !== undefined && openSidepanels.has(current);
+				const currentOpen = current !== undefined && openSidepanels.has(current) && (await panelExists(current));
 
-				// Grant lock if: no owner, owner panel closed, or the requesting panel is the owner
-				const success = !current || !currentOpen || current === requester;
+				// Grant lock if: no owner, owner panel closed (or gone without telling us), the requesting panel is the owner,
+				// or Tom asked to take the chat over (force): the other panel is told and moves to a new chat.
+				const success = !current || !currentOpen || current === requester || msg.force === true;
+				if (success && current !== undefined && current !== requester && currentOpen) {
+					const taken: LockTakenMessage = { type: "lockTaken", sessionId, by: requester };
+					for (const p of portsByOwner.get(current) ?? []) {
+						try {
+							p.postMessage(taken);
+						} catch {
+							/* that port is gone; its lock is being replaced anyway */
+						}
+					}
+				}
 
 				const response: LockResultMessage = success
 					? {
@@ -273,18 +290,25 @@ chrome.runtime.onConnect.addListener((port: chrome.runtime.Port) => {
 				port.postMessage(response);
 			});
 		} else if (msg.type === "getLockedSessions") {
-			// Read current locks from persistent storage
-			chrome.storage.session.get(SESSION_LOCKS_KEY, (data) => {
-				const response: LockedSessionsMessage = {
-					type: "lockedSessions",
-					locks: readLocks(data[SESSION_LOCKS_KEY]),
-				};
+			// Read current locks from persistent storage; locks of panels that no longer exist are dropped here, so the
+			// sidebar never greys out a chat for a sidebar that is gone (Zen, 2026-10-25).
+			chrome.storage.session.get(SESSION_LOCKS_KEY, async (data) => {
+				const locks = readLocks(data[SESSION_LOCKS_KEY]);
+				const alive: Record<string, PanelOwner> = {};
+				let dropped = false;
+				for (const [sessionId, owner] of Object.entries(locks)) {
+					if (openSidepanels.has(owner) && (await panelExists(owner))) alive[sessionId] = owner;
+					else dropped = true;
+				}
+				if (dropped) chrome.storage.session.set({ [SESSION_LOCKS_KEY]: alive });
+				const response: LockedSessionsMessage = { type: "lockedSessions", locks: alive };
 				port.postMessage(response);
 			});
 		}
 	});
 
 	port.onDisconnect.addListener(() => {
+		portsByOwner.get(owner)?.delete(port);
 		closeSidepanel(owner, false);
 	});
 });
@@ -323,6 +347,44 @@ chrome.commands.onCommand.addListener((command: string, sender?: chrome.tabs.Tab
 		}
 	}
 });
+
+/**
+ * Does the panel still exist in the browser? A panel tab: its tab. A side panel / sidebar: its window - and in
+ * Firefox / Zen, which have no side panel API, the sidebar document itself must still be there: Zen can close the
+ * sidebar without the extension's port disconnect ever firing (2026-10-25: a chat stayed "Locked" after its sidebar
+ * was long gone). `extension.getViews({ type: "sidebar" })` lists the live sidebar documents (Firefox only; the
+ * background there is a persistent page, so the call is available).
+ */
+async function panelExists(owner: PanelOwner): Promise<boolean> {
+	const windowId = sidePanelWindow(owner);
+	try {
+		if (windowId === undefined) {
+			await chrome.tabs.get(Number(owner.slice(2)));
+			return true;
+		}
+		await chrome.windows.get(windowId);
+		if (hasSidePanelApi()) return true;
+		return sidebarDocumentExists(windowId);
+	} catch {
+		return false;
+	}
+}
+
+function sidebarDocumentExists(windowId: number): boolean {
+	// @types/chrome only knows Chrome's view types ("tab" | "popup"); Firefox adds "sidebar". Read the function off the
+	// namespace as unknown and call it with Firefox's shape.
+	const api: unknown = chrome.extension;
+	const getViews =
+		typeof api === "object" && api !== null && "getViews" in api && typeof api.getViews === "function"
+			? (api.getViews as (fetch: { type: string; windowId?: number }) => Window[]) // Firefox's getViews signature
+			: undefined;
+	if (!getViews) return true; // cannot tell: assume it is there (the port disconnect still clears it)
+	try {
+		return getViews.call(api, { type: "sidebar", windowId }).length > 0;
+	} catch {
+		return true;
+	}
+}
 
 function closeSidepanel(owner: PanelOwner, callCloseOnSidePanelAPI: boolean = true) {
 	const windowId = sidePanelWindow(owner);
