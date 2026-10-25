@@ -167,3 +167,9 @@ body {
 	border-color: rgba(239, 68, 68, 0.6);
 	border-style: dashed;
 }
+
+/* A message waiting in the R730's queue (Queue / Alt+Enter): dashed and faded until it runs. */
+.user-message-container.sg-queued {
+	border-style: dashed;
+	opacity: 0.7;
+}

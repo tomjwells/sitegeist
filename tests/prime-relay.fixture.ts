@@ -24,6 +24,17 @@ export interface StandInRelay {
 	swallowPrompt: boolean;
 	/** Sessions the panel created (POST /sessions). */
 	created(): number;
+	/** A turn starts on the R730 and keeps running (like prime working on a task) until endTurn(). */
+	startTurn(): void;
+	/**
+	 * The running turn ends; then each queued follow-up runs as its own turn, in order, like prime: agent_start,
+	 * the user message, an answer "Answer: <text>", agent_end.
+	 */
+	endTurn(): void;
+	/** Texts waiting in the follow-up queue (sent with streamingBehavior "followUp" during a turn). */
+	queued(): string[];
+	/** The agent restarted: its in-memory queue is gone. */
+	dropQueue(): void;
 	/** Open panel sockets for the session; tool calls go to the newest. */
 	openSockets(): number;
 	/** Close every panel socket (the connection died). */
@@ -44,6 +55,30 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 	const history: unknown[] = [...messages]; // what hydrate returns; accepted prompts are appended like the bridge log
 	let offset = 0;
 	let created = 0;
+	let busy = false; // a turn is running (startTurn .. endTurn)
+	const queue: string[] = []; // follow-ups waiting for the turn to end
+	const assistant = (text: string) => ({
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-haiku-4-5",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+	const user = (text: string) => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
+	const emit = (events: unknown[]): void => {
+		offset += events.length;
+		for (const ws of sockets) ws.send(JSON.stringify({ type: "events", events, offset }));
+	};
 	const prime = "/sitegeist/agents/prime";
 	const session = `${prime}/sessions/${sessionId}`;
 	const relayState = { offline: false, swallowPrompt: false, repeats: 0 };
@@ -84,7 +119,11 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 					ok: true,
 					sessionId,
 					offset,
-					state: { thinkingLevel: "high", isStreaming: false },
+					state: {
+						thinkingLevel: "high",
+						isStreaming: busy,
+						sessionActions: { queuedCount: queue.length, steering: [], followUps: [...queue] },
+					},
 					messages: history,
 				}),
 			);
@@ -118,6 +157,24 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 				return;
 			}
 			const text = typeof body.message === "string" ? body.message : "";
+			if (busy) {
+				// Like prime mid-turn: "followUp" waits in the queue until the turn ends, "steer" goes in at the next tool
+				// boundary (echoed now, the turn keeps running), nothing = rejected.
+				if (body.streamingBehavior !== "followUp" && body.streamingBehavior !== "steer") {
+					res.statusCode = 502;
+					res.end(JSON.stringify({ ok: false, error: "agent is streaming; streamingBehavior required" }));
+					return;
+				}
+				if (id) accepted.set(id, new Date().toISOString());
+				prompts.push(body);
+				if (body.streamingBehavior === "followUp") queue.push(text);
+				else {
+					history.push(user(text));
+					emit([{ type: "message_end", message: user(text) }]);
+				}
+				res.end(JSON.stringify({ ok: true, id: `bridge-${prompts.length}` }));
+				return;
+			}
 			if (id) accepted.set(id, new Date().toISOString());
 			prompts.push(body);
 			history.push({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
@@ -190,6 +247,30 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 			relayState.swallowPrompt = v;
 		},
 		created: () => created,
+		startTurn: () => {
+			busy = true;
+			emit([{ type: "agent_start" }, { type: "turn_start" }]);
+		},
+		endTurn: () => {
+			const done = assistant("Done working.");
+			history.push(done);
+			emit([{ type: "message_end", message: done }, { type: "turn_end" }, { type: "agent_end", messages: [] }]);
+			busy = false;
+			for (const text of queue.splice(0)) {
+				const answer = assistant(`Answer: ${text.slice(text.lastIndexOf("\n") + 1)}`);
+				history.push(user(text), answer);
+				emit([
+					{ type: "agent_start" },
+					{ type: "message_end", message: user(text) },
+					{ type: "message_end", message: answer },
+					{ type: "agent_end", messages: [] },
+				]);
+			}
+		},
+		queued: () => [...queue],
+		dropQueue: () => {
+			queue.length = 0;
+		},
 		openSockets: () => sockets.length,
 		dropSockets: () => {
 			for (const ws of [...sockets]) ws.close();

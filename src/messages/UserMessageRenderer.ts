@@ -28,12 +28,17 @@ export class SitegeistUserMessage extends LitElement {
 		);
 	}
 
-	/** Under the bubble: nothing when the R730 has the message, "sending" while it is on its way, Retry/Discard when it failed. */
+	/**
+	 * Under the bubble: nothing when the R730 has the message, "sending" while it is on its way, "queued" while it waits
+	 * in the R730's queue for the turn to end, Retry/Discard when it failed.
+	 */
 	private renderSendState() {
 		const send = sendStateOf(this.message);
 		if (!send) return nothing;
 		if (send.state === "sending")
-			return html`<div class="sg-send-state ml-4 mt-1 text-xs text-muted-foreground" data-send-state="sending">Sending…</div>`;
+			return html`<div class="sg-send-state ml-4 mt-1 text-xs text-muted-foreground" data-send-state="sending">${send.mode === "followUp" ? "Queueing…" : "Sending…"}</div>`;
+		if (send.state === "queued")
+			return html`<div class="sg-send-state ml-4 mt-1 text-xs text-muted-foreground" data-send-state="queued">Queued: runs when the current turn ends.</div>`;
 		return html`<div class="sg-send-state ml-4 mt-1 text-xs text-red-500 flex flex-wrap items-center gap-x-3 gap-y-1" data-send-state="failed">
 			<span>Not sent${send.error ? ` (${send.error})` : ""}. It goes out when the connection is back.</span>
 			<button type="button" class="underline hover:no-underline" @click=${() => this.sendAction({ id: send.id, action: "retry" })}>Retry now</button>
@@ -51,7 +56,7 @@ export class SitegeistUserMessage extends LitElement {
 
 		return html`
 			<div class="flex justify-start ml-4">
-				<div class="user-message-container py-2 px-4 rounded-xl ${send?.state === "failed" ? "sg-unsent" : ""}">
+				<div class="user-message-container py-2 px-4 rounded-xl ${send?.state === "failed" ? "sg-unsent" : send?.state === "queued" ? "sg-queued" : ""}">
 					<markdown-block .content=${content}></markdown-block>
 					${
 						this.message.attachments && this.message.attachments.length > 0

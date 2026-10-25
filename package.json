@@ -29,6 +29,7 @@
 		"test:model-image": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/model-image.test.ts",
 		"test:send-retry:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-send-retry.test.ts",
 		"test:open-by-id:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-open-by-id.test.ts",
+		"test:queue:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-queue.test.ts",
 		"test:tabs:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/tab-actions-extension.test.ts"
 	},
 	"dependencies": {

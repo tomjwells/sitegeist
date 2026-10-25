@@ -44,7 +44,8 @@ const modelsRegistryPlugin = {
 // instantiates). Each patch is an exact-string replace that fails the build loudly if upstream changes
 // shape, so a bump of pi-web-ui never silently loses fork behaviour.
 //  - MessageEditor: thinking dropdown follows the model (src/thinking-options.ts);
-//    prime-agent sessions can send while streaming = steering (Enter or the extra send button).
+//    prime-agent sessions can send while streaming: steer (Enter or the steer button) or queue for after the turn
+//    (Alt+Enter or the queue button; src/prime/send-state.ts markNextSendQueued).
 //  - AgentInterface: lets prime-agent sessions prompt while streaming (PrimeRemoteAgent turns it into a steer).
 //  - ArtifactsPanel + ChatPanel: PDF artifacts in Chrome's PDF viewer, maximize toggle (see the entries below).
 const PRIME = 'this.currentModel?.provider === "prime"';
@@ -57,6 +58,8 @@ const piWebUiPatches = [
 			`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/"))};`,
 			`import { connectPromptDraft, disconnectPromptDraft, rememberPromptDraft } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
 			`import { connectDraftAttachments, disconnectDraftAttachments, rememberDraftAttachments } from ${JSON.stringify(join(packageRoot, "src/storage/draft-attachments.ts").replace(/\\/g, "/"))};`,
+			srcImport("markNextSendQueued as __sgMarkNextSendQueued", "src/prime/send-state.ts"),
+			'import { ListEnd as __SgListEnd } from "lucide";',
 		],
 		replacements: [
 			{
@@ -89,12 +92,13 @@ const piWebUiPatches = [
 					"onChange: (value) => {\n                    this.thinkingLevel = value;\n                    this.onThinkingChange?.(value);\n                },",
 			},
 			{
-				find: "if (!this.isStreaming && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {",
-				replace: `if ((!this.isStreaming || ${PRIME}) && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {`,
+				// Mid-turn in a prime session: Enter steers, Alt+Enter queues for after the turn (Tom, 2026-10-25).
+				find: "if (!this.isStreaming && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {\n                    this.handleSend();",
+				replace: `if ((!this.isStreaming || ${PRIME}) && !this.processingFiles && (this.value.trim() || this.attachments.length > 0)) {\n                    if (e.altKey && this.isStreaming) __sgMarkNextSendQueued();\n                    this.handleSend();`,
 			},
 			{
 				find: 'placeholder=${i18n("Type a message...")}',
-				replace: `placeholder=\${this.isStreaming && ${PRIME} ? "Steer the agent… (Enter delivers mid-turn)" : i18n("Type a message...")}`,
+				replace: `placeholder=\${this.isStreaming && ${PRIME} ? "Enter steers now · Alt+Enter queues it for after this turn" : i18n("Type a message...")}`,
 			},
 			{
 				// streaming footer: prime sessions get a steer-send button next to the stop button
@@ -102,7 +106,7 @@ const piWebUiPatches = [
 				replace:
 					"${this.isStreaming\n            ? html `\n\t\t\t\t\t\t\t\t\t${" +
 					PRIME +
-					' && (this.value.trim() || this.attachments.length > 0) ? Button({ variant: "ghost", size: "icon", onClick: this.handleSend, title: "Steer: deliver this now, mid-turn", children: html `<div style="transform: rotate(-45deg)">${icon(Send, "sm")}</div>`, className: "h-8 w-8" }) : ""}\n\t\t\t\t\t\t\t\t\t${Button({\n                variant: "ghost",\n                size: "icon",\n                onClick: this.onAbort,',
+					' && (this.value.trim() || this.attachments.length > 0) ? html `${Button({ variant: "ghost", size: "icon", onClick: () => { __sgMarkNextSendQueued(); this.handleSend(); }, title: "Queue: send when this turn ends (Alt+Enter)", children: icon(__SgListEnd, "sm"), className: "h-8 w-8 sg-queue-send" })}${Button({ variant: "ghost", size: "icon", onClick: this.handleSend, title: "Steer: deliver this now, mid-turn (Enter)", children: html `<div style="transform: rotate(-45deg)">${icon(Send, "sm")}</div>`, className: "h-8 w-8 sg-steer-send" })}` : ""}\n\t\t\t\t\t\t\t\t\t${Button({\n                variant: "ghost",\n                size: "icon",\n                onClick: this.onAbort,',
 			},
 		],
 	},

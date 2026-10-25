@@ -11,7 +11,13 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 export interface SendState {
 	/** The panel's id for this send; a retry repeats it and the relay answers duplicate:true instead of a second prompt. */
 	id: string;
-	state: "sending" | "failed";
+	/**
+	 * "queued": the R730 has it in its follow-up queue (sent with Queue / Alt+Enter while a turn ran); it runs when
+	 * the current turn ends, and the bubble stays at the bottom of the chat until then (Tom, 2026-10-25).
+	 */
+	state: "sending" | "failed" | "queued";
+	/** "followUp": sent with Queue / Alt+Enter - waits for the turn to end instead of steering it. */
+	mode?: "followUp";
 	/** Why the last attempt failed, short, for the bubble. */
 	error?: string;
 	/** When the last attempt started (ms since epoch). */
@@ -25,12 +31,14 @@ export function sendStateOf(message: unknown): SendState | undefined {
 	const raw: unknown = (message as Record<string, unknown>)[SEND_FIELD];
 	if (typeof raw !== "object" || raw === null) return undefined;
 	const r = raw as Record<string, unknown>;
-	if (typeof r.id !== "string" || (r.state !== "sending" && r.state !== "failed")) return undefined;
+	if (typeof r.id !== "string" || (r.state !== "sending" && r.state !== "failed" && r.state !== "queued"))
+		return undefined;
 	return {
 		id: r.id,
 		state: r.state,
 		at: typeof r.at === "number" ? r.at : 0,
 		...(typeof r.error === "string" && r.error ? { error: r.error } : {}),
+		...(r.mode === "followUp" ? { mode: "followUp" as const } : {}),
 	};
 }
 
@@ -42,7 +50,29 @@ export function withSendState(message: AgentMessage, state: SendState | undefine
 	return copy as AgentMessage; // the same shape as `message`: only the panel's own field changed
 }
 
-export const isUnsent = (message: AgentMessage): boolean => sendStateOf(message) !== undefined;
+/** In flight or failed: the R730 does not have it yet. */
+export const isUnsent = (message: AgentMessage): boolean => {
+	const s = sendStateOf(message)?.state;
+	return s === "sending" || s === "failed";
+};
+
+/** In the R730's follow-up queue: runs when the current turn ends. */
+export const isQueued = (message: AgentMessage): boolean => sendStateOf(message)?.state === "queued";
+
+/**
+ * Queue (Alt+Enter or the Queue button) instead of steer: the editor marks the send it is about to make, and
+ * PrimeRemoteAgent.prompt() takes the mark. The mark only counts for a moment, so a send that never happened (empty
+ * text) cannot turn a later Enter into a queued message.
+ */
+let nextSendQueued = 0;
+export function markNextSendQueued(): void {
+	nextSendQueued = Date.now();
+}
+export function takeNextSendMode(): "followUp" | undefined {
+	const marked = nextSendQueued;
+	nextSendQueued = 0;
+	return marked > 0 && Date.now() - marked < 2000 ? "followUp" : undefined;
+}
 
 /** DOM event the user bubble dispatches for its Retry / Discard buttons; the side panel routes it to the agent. */
 export const SEND_ACTION_EVENT = "sg-send-action";
