@@ -176,6 +176,8 @@ export class PrimeRemoteAgent extends Agent {
 	onAttachments: ((items: PrimeAttachment[]) => Promise<void>) | undefined;
 	/** After attach(): the side panel compares the R730's stored artifacts with the panel and restores what is missing. */
 	onArtifactsReconcile: (() => Promise<void>) | undefined;
+	/** The R730 session for a new chat exists now (its first message is already in `messages`). */
+	onSessionCreated: ((sessionId: string) => void) | undefined;
 
 	private readonly remote: AgentState;
 	private readonly remoteListeners = new Set<(e: AgentEvent) => void>();
@@ -316,6 +318,7 @@ export class PrimeRemoteAgent extends Agent {
 			this.setStatus("creating");
 			this.createInFlight = primeCreateSession(this.agentId, name).then(async ({ sessionId, state }) => {
 				this.primeSessionId = sessionId;
+				this.onSessionCreated?.(sessionId);
 				this.applyRemoteState(state);
 				await this.applyChosenSettings(sessionId);
 				this.openSocket(0);

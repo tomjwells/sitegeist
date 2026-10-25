@@ -155,6 +155,18 @@ export async function primeUploadFile(
 }
 
 /**
+ * Is this chat on the agent's host, and what is it called there? The relay reads the log size only, so asking never
+ * starts (or creates) a session: a mistyped id is just "not there".
+ */
+export async function primeSessionExists(
+	agentId: string,
+	sessionId: string,
+): Promise<{ exists: boolean; name: string }> {
+	const r = await request(agentId, "GET", `/sessions/${encodeURIComponent(sessionId)}/exists`, undefined, 10_000);
+	return { exists: r.exists === true, name: typeof r.name === "string" ? r.name : "" };
+}
+
+/**
  * sg-… panel session id → the harness's own session UUIDs on the R730 (what session-finder and Telegram's
  * /session_resume show). Main-pi only; worker agents answer with an empty map.
  */

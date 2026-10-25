@@ -69,6 +69,7 @@ import {
 	primeDeleteArtifacts,
 	primeFetchArtifact,
 	primeListArtifacts,
+	primeSessionExists,
 } from "./prime/prime-client.js";
 import { SEND_ACTION_EVENT, sendActionOf } from "./prime/send-state.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
@@ -452,10 +453,16 @@ const generateTitle = (messages: AgentMessage[]): string => {
 	return text.length <= 50 ? text : `${text.substring(0, 47)}...`;
 };
 
+/**
+ * A chat goes into the list once it has a reply - or, for an R730 chat, as soon as the R730 has it (a session id and
+ * a first message). Tom, 2026-10-25: a new Jennifer chat never reached the list - the panel left it before the first
+ * reply arrived, so only the R730 knew it existed.
+ */
 const shouldSaveSession = (messages: AgentMessage[]): boolean => {
 	const hasUserMsg = messages.some((m: AgentMessage) => m.role === "user");
-	const hasAssistantMsg = messages.some((m: AgentMessage) => m.role === "assistant");
-	return hasUserMsg && hasAssistantMsg;
+	if (!hasUserMsg) return false;
+	if (isPrimeAgent(agent) && agent.primeSessionId) return true;
+	return messages.some((m: AgentMessage) => m.role === "assistant");
 };
 
 const saveSession = async () => {
@@ -694,6 +701,44 @@ const updateUrl = (sessionId: string) => {
 	window.history.replaceState({}, "", url);
 };
 
+/**
+ * Put a new chat into the list and keep saving it: once it has a reply, or (R730 chats) once the R730 has its first
+ * message - see shouldSaveSession. Runs on every agent event and when the R730 session for a new chat is created.
+ */
+function keepSession(messages: AgentMessage[]): void {
+	if (!currentTitle && shouldSaveSession(messages)) {
+		currentTitle = generateTitle(messages);
+	}
+
+	if (!currentSessionId && shouldSaveSession(messages)) {
+		// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
+		currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
+		promotePromptDraft(draftScope(), currentSessionId);
+		void promoteDraftAttachments(draftScope(), currentSessionId);
+		if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
+
+		port
+			.sendMessage({
+				type: "acquireLock",
+				sessionId: currentSessionId,
+				owner: panelOwner,
+			})
+			.then((lockResponse) => {
+				if (!lockResponse.success) {
+					console.warn("Failed to acquire lock for newly created session", currentSessionId);
+				}
+			});
+		updateUrl(currentSessionId);
+	}
+
+	if (currentSessionId) {
+		saveSession();
+		if (pendingAnchor) void flushPendingAnchor();
+	}
+
+	renderApp();
+}
+
 const createAgent = async (
 	initialState?: Partial<AgentState>,
 	shouldSave = true,
@@ -868,6 +913,11 @@ const createAgent = async (
 		};
 		// The R730 keeps a copy of every file it sent this session (relay /artifacts). On resume, recreate any the
 		// panel does not have (lost before it was saved, or sent while the panel was closed).
+		// The R730 has the chat now: list it at once, not only when the first reply arrives (that may never reach a panel
+		// that went away or lost its connection).
+		prime.onSessionCreated = () => {
+			if (shouldSave && agent === prime) keepSession(prime.state.messages);
+		};
 		prime.onArtifactsReconcile = async () => {
 			const sessionId = prime.primeSessionId;
 			if (!sessionId) return;
@@ -966,37 +1016,7 @@ const createAgent = async (
 				}
 			}
 
-			if (!currentTitle && shouldSaveSession(messages)) {
-				currentTitle = generateTitle(messages);
-			}
-
-			if (!currentSessionId && shouldSaveSession(messages)) {
-				// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
-				currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
-				promotePromptDraft(draftScope(), currentSessionId);
-				void promoteDraftAttachments(draftScope(), currentSessionId);
-				if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
-
-				port
-					.sendMessage({
-						type: "acquireLock",
-						sessionId: currentSessionId,
-						owner: panelOwner,
-					})
-					.then((lockResponse) => {
-						if (!lockResponse.success) {
-							console.warn("Failed to acquire lock for newly created session", currentSessionId);
-						}
-					});
-				updateUrl(currentSessionId);
-			}
-
-			if (currentSessionId) {
-				saveSession();
-				if (pendingAnchor) void flushPendingAnchor();
-			}
-
-			renderApp();
+			keepSession(messages);
 		});
 	}
 
@@ -1788,6 +1808,26 @@ async function checkForUpdates() {
 // ============================================================================
 // INIT
 // ============================================================================
+/**
+ * Is this R730 chat (sg-…) on its agent's host? Its title there ("sitegeist / <first message>") becomes the list title;
+ * other names leave it empty so the first message names it once the history is in.
+ */
+async function findOnR730(
+	sessionId: string,
+): Promise<{ found: true; title: string } | { found: false; reason: string } | undefined> {
+	if (!isPrimeSessionId(sessionId)) return undefined;
+	try {
+		const r = await primeSessionExists(agentIdFromSessionId(sessionId), sessionId);
+		if (!r.exists) return { found: false, reason: "the R730 has no chat with that id." };
+		return { found: true, title: r.name.startsWith("sitegeist / ") ? r.name.slice("sitegeist / ".length) : "" };
+	} catch (err) {
+		return {
+			found: false,
+			reason: `the R730 could not be asked (${err instanceof Error ? err.message : String(err)}).`,
+		};
+	}
+}
+
 async function initApp() {
 	// Show loading
 	render(
@@ -1936,7 +1976,27 @@ async function initApp() {
 	}
 
 	if (sessionIdFromUrl && storage.sessions) {
-		const sessionData = await storage.sessions.loadSession(sessionIdFromUrl);
+		const stored = await storage.sessions.loadSession(sessionIdFromUrl);
+		// An R730 chat this browser has no record of (started in another browser, or left before its first reply reached
+		// the panel - Tom, 2026-10-25): open it from the R730 if the R730 has it. Asking never creates a session.
+		const remote = stored ? undefined : await findOnR730(sessionIdFromUrl);
+		if (remote && !remote.found) {
+			const wanted = sessionIdFromUrl;
+			await createAgent(undefined, true, requestedKind);
+			if (agent && !isPrimeAgent(agent)) agent.appendMessage(createWelcomeMessage(tutorials));
+			currentAnchors = [];
+			appReady = true;
+			renderApp();
+			const clean = new URL(window.location.href);
+			clean.searchParams.delete("session");
+			window.history.replaceState({}, "", clean);
+			Toast.error(`Could not open ${wanted}: ${remote.reason}`, 10_000);
+			return;
+		}
+		const sessionData:
+			| (Pick<NonNullable<typeof stored>, "messages"> &
+					Partial<Pick<NonNullable<typeof stored>, "model" | "thinkingLevel">>)
+			| undefined = stored ?? (remote?.found ? { messages: [] } : undefined);
 		if (sessionData) {
 			// Try to acquire lock if we don't already have it (in case user navigated directly via URL)
 			const lockResponse = await port.sendMessage({
@@ -1979,7 +2039,7 @@ async function initApp() {
 
 			currentSessionId = sessionIdFromUrl;
 			const metadata = await storage.sessions.getMetadata(sessionIdFromUrl);
-			currentTitle = metadata?.title || "";
+			currentTitle = metadata?.title || (remote?.found ? remote.title : "");
 			if (currentTitle.startsWith("[sitegeist browser context]")) {
 				// titles saved before the context prefix was stripped from prime user messages
 				currentTitle = generateTitle(stripBrowserContext(sessionData.messages));
@@ -2002,6 +2062,7 @@ async function initApp() {
 			await refreshCurrentAnchors();
 			appReady = true;
 			renderApp();
+			if (remote?.found) Toast.success("Opened from the R730 and added to this browser's list", 5000);
 			if (resumedKey !== undefined) {
 				const previous = resumedFrom;
 				Toast.show(`Resumed "${currentTitle || "session"}" for this page`, "success", 6000, {

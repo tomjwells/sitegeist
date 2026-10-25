@@ -22,6 +22,8 @@ export interface StandInRelay {
 	offline: boolean;
 	/** The prompt lands but its answer is lost (a 504 after the relay recorded it); no echo until flushEchoes(). */
 	swallowPrompt: boolean;
+	/** Sessions the panel created (POST /sessions). */
+	created(): number;
 	/** Open panel sockets for the session; tool calls go to the newest. */
 	openSockets(): number;
 	/** Close every panel socket (the connection died). */
@@ -41,6 +43,7 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 	const heldEchoes: Array<Record<string, unknown>> = [];
 	const history: unknown[] = [...messages]; // what hydrate returns; accepted prompts are appended like the bridge log
 	let offset = 0;
+	let created = 0;
 	const prime = "/sitegeist/agents/prime";
 	const session = `${prime}/sessions/${sessionId}`;
 	const relayState = { offline: false, swallowPrompt: false, repeats: 0 };
@@ -84,6 +87,20 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 					state: { thinkingLevel: "high", isStreaming: false },
 					messages: history,
 				}),
+			);
+		} else if (url === `${session}/exists` && req.method === "GET") {
+			// The real relay asks the bridge for the log size only; a chat with history exists, named after its first message.
+			const first = history.find((m) => isRecord(m) && m.role === "user");
+			const firstText = isRecord(first) && typeof first.content === "string" ? first.content : "";
+			const exists = history.length > 0 || prompts.length > 0;
+			res.end(JSON.stringify({ ok: true, sessionId, exists, name: exists ? `sitegeist / ${firstText}` : "" }));
+		} else if (/^\/sitegeist\/agents\/prime\/sessions\/[^/]+\/exists$/.test(url) && req.method === "GET") {
+			res.end(JSON.stringify({ ok: true, exists: false, name: "" })); // any other id: not on the R730
+		} else if (url === `${prime}/sessions` && req.method === "POST") {
+			// A new chat: the stand-in has one session, so a new chat is that one (start the relay with no history).
+			created++;
+			res.end(
+				JSON.stringify({ ok: true, sessionId, name: `sitegeist / ${sessionId}`, state: { thinkingLevel: "high" } }),
 			);
 		} else if (url === `${session}/artifacts`) {
 			res.end(JSON.stringify({ ok: true, artifacts: [] }));
@@ -172,6 +189,7 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 		set swallowPrompt(v: boolean) {
 			relayState.swallowPrompt = v;
 		},
+		created: () => created,
 		openSockets: () => sockets.length,
 		dropSockets: () => {
 			for (const ws of [...sockets]) ws.close();

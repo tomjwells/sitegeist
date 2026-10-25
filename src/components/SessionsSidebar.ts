@@ -278,6 +278,25 @@ export class SessionsSidebar extends LitElement {
 		return hits.map((h) => byId.get(h.id)).filter((s): s is SessionMetadata => s !== undefined);
 	}
 
+	/**
+	 * A pasted sg-… id (or the R730 UUID of one) that is not in this browser's list: the R730 may still have the chat
+	 * (started in another browser, or left before its first reply - Tom, 2026-10-25), so offer to open it from there.
+	 */
+	private openableId(): string | undefined {
+		const pasted = pastedSessionId(this.query.trim());
+		if (!pasted) return undefined;
+		const sg = isPrimeSessionId(pasted) ? pasted : sgIdForNative(pasted, this.nativeIds);
+		// a whole id only (sg-<hex12> or sg-<agent>-<hex12>): search matches partial ids, opening needs the real one
+		if (!sg || !/^sg-(?:[a-z0-9]+-)?[0-9a-f]{12}$/.test(sg) || this.sessions.some((s) => s.id === sg))
+			return undefined;
+		return sg;
+	}
+
+	private openFromR730(): void {
+		const id = this.openableId();
+		if (id) this.onSelect(id);
+	}
+
 	private noMatchText(): string {
 		const q = this.query.trim();
 		if (!q) return i18n("No sessions yet");
@@ -288,6 +307,8 @@ export class SessionsSidebar extends LitElement {
 				return `${pasted} is sitegeist session ${sg}, but that session is not in this browser's list (it was started from another browser or profile).`;
 			if (/^[0-9a-f]{8}-/.test(pasted) && this.nativeIdsLoaded)
 				return `${pasted} is not a main-pi sitegeist session — it is a Telegram or CLI session (open it with /session_resume in Telegram). For a coach's sitegeist session, paste its sg-<coach>-… id.`;
+			if (isPrimeSessionId(pasted))
+				return `${pasted} is not in this browser's list (started in another browser, or left before its first reply).`;
 			return `No session with id ${pasted} in this browser.`;
 		}
 		if (this.indexing > 0)
@@ -455,7 +476,10 @@ export class SessionsSidebar extends LitElement {
 						<div class="px-2 pt-2 pb-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">${this.query.trim() ? `${filtered.length} result${filtered.length === 1 ? "" : "s"}` : i18n("Recent")}</div>
 						${
 							recent.length === 0 && pinnedRows.length === 0
-								? html`<div class="px-2 py-4 text-center text-xs text-muted-foreground">${this.noMatchText()}</div>`
+								? html`<div class="px-2 py-4 text-center text-xs text-muted-foreground">
+										${this.noMatchText()}
+										${this.openableId() ? html`<div class="mt-2"><button class="sg-open-r730 px-2 py-1 rounded border border-border text-foreground hover:bg-secondary" @click=${() => this.openFromR730()}>Open it from the R730</button></div>` : ""}
+									</div>`
 								: recent.map((s) => this.row(s, undefined))
 						}
 					</div>
