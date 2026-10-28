@@ -542,17 +542,17 @@ async function evalAcrossUrls(args: Json, code: string, windowId: number, callId
 	};
 }
 
-function waitForLoad(tabId: number, timeoutMs: number): Promise<void> {
+function waitForLoad(tabId: number, timeoutMs: number): Promise<boolean> {
 	return new Promise((resolve) => {
-		const done = () => {
+		const done = (loaded: boolean) => {
 			chrome.tabs.onUpdated.removeListener(listener);
 			clearTimeout(timer);
-			resolve();
+			resolve(loaded);
 		};
 		const listener = (id: number, info: chrome.tabs.OnUpdatedInfo) => {
-			if (id === tabId && info.status === "complete") done();
+			if (id === tabId && info.status === "complete") done(true);
 		};
-		const timer = setTimeout(done, timeoutMs);
+		const timer = setTimeout(() => done(false), timeoutMs);
 		chrome.tabs.onUpdated.addListener(listener);
 	});
 }
@@ -575,12 +575,19 @@ async function navigate(args: Json, windowId: number): Promise<BrowserToolResult
 		if (args.background !== true && args.focus === true && tab.windowId !== undefined)
 			await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
 	}
-	await waitForLoad(tabId, 30_000);
-	await new Promise((r) => setTimeout(r, 300));
+	// New tabs: answer within 15 s with the tab id even if Chrome never reports "complete" (Amazon prerendered
+	// pages), so the R730 call (60 s) never times out on a tab that opened fine (Jennifer aeb4dfe6, 2026-10-28).
+	const loaded = await waitForLoad(tabId, args.newTab === true ? 15_000 : 30_000);
+	if (loaded) await new Promise((r) => setTimeout(r, 300));
 	const after = await chrome.tabs.get(tabId);
 	return {
-		content: [{ type: "text", text: `Loaded tab ${tabId}: ${after.title ?? ""} — ${after.url ?? ""}` }],
-		details: { tabId, url: after.url, title: after.title },
+		content: [
+			{
+				type: "text",
+				text: `${loaded ? "Loaded" : "Opened (still loading)"} tab ${tabId}: ${after.title ?? ""} — ${after.url ?? ""}`,
+			},
+		],
+		details: { tabId, url: after.url, title: after.title, loaded },
 	};
 }
 
