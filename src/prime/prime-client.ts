@@ -41,7 +41,7 @@ export async function primeAgents(): Promise<PrimeAgentInfo[]> {
 
 async function request(
 	agentId: string,
-	method: "GET" | "POST",
+	method: "GET" | "POST" | "DELETE" | "PATCH",
 	path: string,
 	body?: Json,
 	timeoutMs = TIMEOUT_MS,
@@ -91,10 +91,35 @@ export async function primeCreateSession(agentId: string, name: string): Promise
 	return { sessionId: r.sessionId, state: isJson(r.state) ? r.state : {} };
 }
 
+/** A message waiting in the relay's queue for the session to be idle (Queue / Alt+Enter). */
+export interface PrimeQueuedItem {
+	id: string;
+	text: string;
+	at: string;
+	error?: string;
+}
+
+function queuedItems(v: unknown): PrimeQueuedItem[] {
+	if (!Array.isArray(v)) return [];
+	return v.flatMap((e: unknown): PrimeQueuedItem[] => {
+		if (!isJson(e) || typeof e.id !== "string" || typeof e.text !== "string") return [];
+		return [
+			{
+				id: e.id,
+				text: e.text,
+				at: typeof e.at === "string" ? e.at : "",
+				...(typeof e.error === "string" && e.error ? { error: e.error } : {}),
+			},
+		];
+	});
+}
+
 export interface PrimeHydration {
 	offset: number;
 	state: Json;
 	messages: Json[];
+	/** Messages waiting in the relay's queue, in order. */
+	queue: PrimeQueuedItem[];
 }
 
 export async function primeHydrate(agentId: string, sessionId: string): Promise<PrimeHydration> {
@@ -104,7 +129,42 @@ export async function primeHydrate(agentId: string, sessionId: string): Promise<
 		offset: typeof r.offset === "number" ? r.offset : 0,
 		state: isJson(r.state) ? r.state : {},
 		messages: Array.isArray(r.messages) ? r.messages.filter(isJson) : [],
+		queue: queuedItems(r.queue),
 	};
+}
+
+/**
+ * Queue a message (Queue / Alt+Enter): the relay keeps it, in front of prime, and sends it as a plain prompt as soon
+ * as the session is idle - so it can still be edited or cancelled while it waits, and runs even if the panel is
+ * closed by then. The same id again is not a second message.
+ */
+export async function primeQueue(
+	agentId: string,
+	sessionId: string,
+	clientMessageId: string,
+	text: string,
+	message: string,
+	images?: Json[],
+): Promise<Json> {
+	const body: Json = { clientMessageId, text, message };
+	if (images && images.length > 0) body.images = images;
+	return request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/queue`, body, PROMPT_TIMEOUT_MS);
+}
+
+/** Take a waiting message out of the relay's queue. `found: false` when it already went in (or was never there). */
+export async function primeDequeue(
+	agentId: string,
+	sessionId: string,
+	itemId: string,
+): Promise<{ found: boolean; started: boolean }> {
+	const r = await request(
+		agentId,
+		"DELETE",
+		`/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(itemId)}`,
+		undefined,
+		15_000,
+	);
+	return { found: r.found === true, started: r.started === true };
 }
 
 /** How long one prompt POST may take. The relay itself waits at most 30 s for the bridge; a retry is safe (clientMessageId). */

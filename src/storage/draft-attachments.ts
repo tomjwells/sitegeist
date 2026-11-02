@@ -114,6 +114,21 @@ export async function seedDraftAttachments(
 	}
 }
 
+/** Edit on a queued message with files: the files go back into the composer, after any already there. */
+export async function putBackDraftAttachments(
+	scope: DraftScope,
+	sessionId: string | undefined,
+	attachments: Attachment[],
+): Promise<void> {
+	if (attachments.length === 0) return;
+	const key = draftKey(scope, sessionId);
+	const next = [...(await readStored(key)), ...attachments];
+	await write(key, next);
+	for (const editor of connectedEditors) {
+		if (bindings.get(editor)?.key === key) editor.attachments = next.slice();
+	}
+}
+
 /** The unsent files of the chat this panel shows. */
 export async function currentDraftAttachments(): Promise<Attachment[]> {
 	return currentKey ? readStored(currentKey) : [];

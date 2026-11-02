@@ -18,6 +18,8 @@ export interface SendState {
 	state: "sending" | "failed" | "queued";
 	/** "followUp": sent with Queue / Alt+Enter - waits for the turn to end instead of steering it. */
 	mode?: "followUp";
+	/** Failed, and only a click sends it again (e.g. a queued message the relay no longer lists: cancelled elsewhere?). */
+	hold?: boolean;
 	/** Why the last attempt failed, short, for the bubble. */
 	error?: string;
 	/** When the last attempt started (ms since epoch). */
@@ -39,6 +41,7 @@ export function sendStateOf(message: unknown): SendState | undefined {
 		at: typeof r.at === "number" ? r.at : 0,
 		...(typeof r.error === "string" && r.error ? { error: r.error } : {}),
 		...(r.mode === "followUp" ? { mode: "followUp" as const } : {}),
+		...(r.hold === true ? { hold: true } : {}),
 	};
 }
 
@@ -74,17 +77,18 @@ export function takeNextSendMode(): "followUp" | undefined {
 	return marked > 0 && Date.now() - marked < 2000 ? "followUp" : undefined;
 }
 
-/** DOM event the user bubble dispatches for its Retry / Discard buttons; the side panel routes it to the agent. */
+/** DOM event the user bubble dispatches for its Retry / Discard / Edit / Cancel buttons; the side panel routes it to the agent. */
 export const SEND_ACTION_EVENT = "sg-send-action";
 export interface SendActionDetail {
 	id: string;
-	action: "retry" | "discard";
+	action: "retry" | "discard" | "cancel" | "edit";
 }
 export function sendActionOf(event: Event): SendActionDetail | undefined {
 	const detail: unknown = event instanceof CustomEvent ? event.detail : undefined;
 	if (typeof detail !== "object" || detail === null) return undefined;
 	const d = detail as Record<string, unknown>;
-	return typeof d.id === "string" && (d.action === "retry" || d.action === "discard")
+	return typeof d.id === "string" &&
+		(d.action === "retry" || d.action === "discard" || d.action === "cancel" || d.action === "edit")
 		? { id: d.id, action: d.action }
 		: undefined;
 }

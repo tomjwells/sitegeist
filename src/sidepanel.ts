@@ -80,6 +80,7 @@ import {
 	configureDraftAttachments,
 	parkDraftAttachments,
 	promoteDraftAttachments,
+	putBackDraftAttachments,
 	seedDraftAttachments,
 } from "./storage/draft-attachments.js";
 import {
@@ -89,6 +90,7 @@ import {
 	DRAFT_STORAGE_WARNING_EVENT,
 	type DraftScope,
 	promotePromptDraft,
+	putBackPromptDraft,
 	seedPromptDraft,
 } from "./storage/prompt-drafts.js";
 import { DebuggerTool } from "./tools/debugger.js";
@@ -228,12 +230,22 @@ function liveConnectionTitle(agent: PrimeRemoteAgent): string {
 	return `Live connection to the R730: ${state}${unsent}${session}`;
 }
 
-// Retry / Discard under a message the R730 never got (the bubble dispatches; the chat's agent acts).
+// Retry / Discard under a message the R730 never got, Edit / Cancel under a queued one (the bubble dispatches; the
+// chat's agent acts). Edit = cancel, then the text and files go back into the composer.
 document.addEventListener(SEND_ACTION_EVENT, (event: Event) => {
 	const action = sendActionOf(event);
 	if (!action || !isPrimeAgent(agent)) return;
-	if (action.action === "retry") agent.retrySend(action.id);
-	else agent.discardSend(action.id);
+	const prime = agent;
+	if (action.action === "retry") prime.retrySend(action.id);
+	else if (action.action === "discard") prime.discardSend(action.id);
+	else {
+		const editing = action.action === "edit";
+		void prime.cancelQueued(action.id).then((was) => {
+			if (!was || !editing) return;
+			putBackPromptDraft(draftScope(), currentSessionId, was.text);
+			void putBackDraftAttachments(draftScope(), currentSessionId, was.attachments);
+		});
+	}
 });
 
 window.addEventListener(DRAFT_STORAGE_WARNING_EVENT, () => {

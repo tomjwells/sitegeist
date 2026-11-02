@@ -23,10 +23,13 @@ import {
 	isJson,
 	type Json,
 	type PrimeAttachment,
+	type PrimeQueuedItem,
 	PrimeSocket,
 	primeCreateSession,
+	primeDequeue,
 	primeHydrate,
 	primePrompt,
+	primeQueue,
 	primeRpc,
 	primeUploadFile,
 } from "./prime-client.js";
@@ -159,16 +162,6 @@ function beforeQueued(messages: AgentMessage[], message: AgentMessage): AgentMes
 		cut--;
 	}
 	return [...messages.slice(0, cut), message, ...messages.slice(cut)];
-}
-
-/** The texts the R730 still has queued (get_state sessionActions: follow-ups, steers, and the one starting now). */
-function queuedOnR730(state: Json): string[] {
-	const actions = isJson(state.sessionActions) ? state.sessionActions : undefined;
-	if (!actions) return [];
-	const texts = (v: unknown): string[] =>
-		Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : [];
-	const active = isJson(actions.active) && typeof actions.active.label === "string" ? [actions.active.label] : [];
-	return [...texts(actions.followUps), ...texts(actions.steering), ...active];
 }
 
 function payloadFromMessage(m: AgentMessage): SendPayload {
@@ -329,27 +322,7 @@ export class PrimeRemoteAgent extends Agent {
 			});
 			this.pendingEchoes = [];
 			const history = toAgentMessages(h.messages);
-			// Queued messages (Queue / Alt+Enter while a turn ran): still waiting on the R730 -> they stay at the bottom;
-			// already run while the panel was away -> the history shows them; neither (the agent restarted and lost its
-			// queue) -> failed, with a NEW id so Retry really sends it (the relay treats a repeated id as already sent).
-			const waiting = queuedOnR730(h.state);
-			const ran = history
-				.filter((m) => m.role === "user")
-				.map((m) => userText(stripBrowserContext([m])[0] ?? m).trim());
-			const queued = this.remote.messages.filter(isQueued).flatMap((m): AgentMessage[] => {
-				const t = userText(m).trim();
-				if (waiting.some((w) => w.includes(t))) return [m];
-				if (ran.some((r) => r.startsWith(t))) return [];
-				const lost: SendState = {
-					id: crypto.randomUUID(),
-					state: "failed",
-					at: Date.now(),
-					error: "the agent restarted before it ran",
-					mode: "followUp",
-				};
-				return [withSendState(m, lost)];
-			});
-			this.remote.messages = [...history, ...artifacts, ...unsent, ...queued];
+			this.remote.messages = [...history, ...artifacts, ...unsent, ...this.reconcileQueued(h.queue, history)];
 			this.openSocket(h.offset);
 			this.emitRemote({ type: "agent_end", messages: [] });
 			void this.onArtifactsReconcile?.().catch((err) => console.warn("[prime] artifact reconcile failed", err));
@@ -363,6 +336,49 @@ export class PrimeRemoteAgent extends Agent {
 				}, delay);
 			throw err;
 		}
+	}
+
+	/**
+	 * Queued messages (Queue / Alt+Enter) after a hydrate. The relay's queue is the truth: a bubble it still lists
+	 * stays queued, in the relay's order; a bubble it no longer lists is gone if the history shows it ran, otherwise
+	 * (cancelled from another panel, or the relay lost it) it is shown as not sent, with a NEW id so a retry really
+	 * queues it again (a repeated id counts as already sent). Items queued from another browser get a bubble too.
+	 */
+	private reconcileQueued(queue: PrimeQueuedItem[], history: AgentMessage[]): AgentMessage[] {
+		const local = new Map(this.remote.messages.filter(isQueued).map((m) => [sendStateOf(m)?.id ?? "", m] as const));
+		const ran = history
+			.filter((m) => m.role === "user")
+			.map((m) => userText(stripBrowserContext([m])[0] ?? m).trim());
+		const out: AgentMessage[] = queue.map((item) => {
+			const mine = local.get(item.id);
+			local.delete(item.id);
+			const state: SendState = {
+				id: item.id,
+				state: "queued",
+				at: Date.parse(item.at) || Date.now(),
+				mode: "followUp",
+			};
+			return withSendState(
+				mine ??
+					({ role: "user", content: [{ type: "text", text: item.text }], timestamp: state.at } as AgentMessage),
+				state,
+			);
+		});
+		for (const m of local.values()) {
+			const t = userText(m).trim();
+			if (t === "" || ran.some((r) => r.startsWith(t))) continue;
+			out.push(
+				withSendState(m, {
+					id: crypto.randomUUID(),
+					state: "failed",
+					at: Date.now(),
+					error: "it is no longer queued",
+					mode: "followUp",
+					hold: true, // cancelled from another panel, most likely: never re-queue it by itself
+				}),
+			);
+		}
+		return out;
 	}
 
 	private async ensureSession(name: string): Promise<string> {
@@ -644,6 +660,32 @@ export class PrimeRemoteAgent extends Agent {
 		void this.deliver(id);
 	}
 
+	/**
+	 * Take a queued message out of the relay's queue (the bubble's Cancel, and the first half of Edit). Resolves with
+	 * what it was made of when it was still waiting; undefined when it had already gone in (the bubble then stays and
+	 * turns into the sent message when its echo arrives).
+	 */
+	async cancelQueued(id: string): Promise<{ text: string; attachments: Attachment[] } | undefined> {
+		const bubble = this.findSend(id);
+		if (!bubble || !this.primeSessionId || sendStateOf(bubble)?.state !== "queued") return undefined;
+		let r: { found: boolean; started: boolean };
+		try {
+			r = await primeDequeue(this.agentId, this.primeSessionId, id);
+		} catch (err) {
+			this.onNotice?.(`Could not reach the R730 to cancel it: ${describeSendError(err)}`);
+			return undefined;
+		}
+		if (!r.found) {
+			this.onNotice?.(r.started ? "Too late: it has already gone in." : "It is no longer queued.");
+			if (!r.started) this.discardSend(id);
+			return undefined;
+		}
+		const text = userText(bubble);
+		const attachments = attachmentsOf(bubble) ?? [];
+		this.discardSend(id);
+		return { text, attachments };
+	}
+
 	/** Drop a failed message without sending it (the bubble's Discard). */
 	discardSend(id: string): void {
 		this.sendPayloads.delete(id);
@@ -654,7 +696,7 @@ export class PrimeRemoteAgent extends Agent {
 
 	/** After a reconnect: failed sends go out again, oldest first; one failure stops the run until the next reconnect. */
 	private async retryUnsent(): Promise<void> {
-		for (const m of this.remote.messages.filter((x) => sendStateOf(x)?.state === "failed")) {
+		for (const m of this.remote.messages.filter((x) => sendStateOf(x)?.state === "failed" && !sendStateOf(x)?.hold)) {
 			const id = sendStateOf(m)?.id;
 			if (id && !(await this.deliver(id))) break;
 		}
@@ -691,11 +733,13 @@ export class PrimeRemoteAgent extends Agent {
 		this.markSend(id, { id, state: "sending", at: Date.now(), ...modeField });
 		// Sent while a turn is running = steering, like a Telegram message mid-turn: delivered at the next
 		// tool boundary (bridge streamingBehavior "steer"); the turn keeps going. Queue / Alt+Enter = "followUp":
-		// the R730 keeps it until the turn ends, then runs it as the next turn (several run one after another).
-		const steering = this.remote.isStreaming;
-		const queueing = steering && mode === "followUp";
+		// the relay keeps it (in front of prime, like the Telegram router's own queue) and sends it as a plain prompt
+		// as soon as the session is idle, so it can be edited or cancelled while it waits and runs even if this panel
+		// is closed by then. Several run one after another.
+		const queueing = mode === "followUp";
+		const steering = !queueing && this.remote.isStreaming;
 		this.remote.error = undefined;
-		if (!steering) {
+		if (!steering && !queueing) {
 			this.remote.isStreaming = true;
 			this.emitRemote({ type: "agent_start" });
 		} else {
@@ -723,18 +767,14 @@ export class PrimeRemoteAgent extends Agent {
 					.filter((part) => part.trim().length > 0)
 					.join("\n\n");
 			}
-			const reply = await primePrompt(
-				this.agentId,
-				sessionId,
-				payload.outbound,
-				payload.modelImages && payload.modelImages.length > 0 ? payload.modelImages : undefined,
-				steering ? (queueing ? "followUp" : "steer") : undefined,
-				id,
-			);
-			// Accepted. A queued one waits in the R730's queue (bottom of the chat, "Queued") until its echo arrives.
-			const accepted: SendState | undefined = queueing
-				? { id, state: "queued", at: Date.now(), mode: "followUp" }
-				: undefined;
+			const images = payload.modelImages && payload.modelImages.length > 0 ? payload.modelImages : undefined;
+			const reply = queueing
+				? await primeQueue(this.agentId, sessionId, id, payload.text, payload.outbound, images)
+				: await primePrompt(this.agentId, sessionId, payload.outbound, images, steering ? "steer" : undefined, id);
+			// Accepted. A queued one waits in the relay's queue (bottom of the chat, "Queued") until its echo arrives;
+			// queued:false means the relay had already sent it (a repeat after a reload).
+			const accepted: SendState | undefined =
+				queueing && reply.queued !== false ? { id, state: "queued", at: Date.now(), mode: "followUp" } : undefined;
 			this.sendPayloads.delete(id);
 			this.newChatAttempt = 0;
 			const acceptedAt = typeof reply.acceptedAt === "string" ? Date.parse(reply.acceptedAt) : Number.NaN;
@@ -764,7 +804,7 @@ export class PrimeRemoteAgent extends Agent {
 		} catch (err) {
 			const error = describeSendError(err);
 			this.markSend(id, { id, state: "failed", at: Date.now(), error, ...modeField });
-			if (!steering) {
+			if (!steering && !queueing) {
 				this.remote.isStreaming = false;
 				this.emitRemote({ type: "agent_end", messages: [] });
 			} else {

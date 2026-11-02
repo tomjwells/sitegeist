@@ -38,7 +38,11 @@ export class SitegeistUserMessage extends LitElement {
 		if (send.state === "sending")
 			return html`<div class="sg-send-state ml-4 mt-1 text-xs text-muted-foreground" data-send-state="sending">${send.mode === "followUp" ? "Queueing…" : "Sending…"}</div>`;
 		if (send.state === "queued")
-			return html`<div class="sg-send-state ml-4 mt-1 text-xs text-muted-foreground" data-send-state="queued">Queued: runs when the current turn ends.</div>`;
+			return html`<div class="sg-send-state ml-4 mt-1 text-xs text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1" data-send-state="queued">
+			<span>Queued: runs when the agent is free.</span>
+			<button type="button" class="underline hover:no-underline" @click=${() => this.sendAction({ id: send.id, action: "edit" })}>Edit</button>
+			<button type="button" class="underline hover:no-underline opacity-80" @click=${() => this.sendAction({ id: send.id, action: "cancel" })}>Cancel</button>
+		</div>`;
 		return html`<div class="sg-send-state ml-4 mt-1 text-xs text-red-500 flex flex-wrap items-center gap-x-3 gap-y-1" data-send-state="failed">
 			<span>Not sent${send.error ? ` (${send.error})` : ""}. It goes out when the connection is back.</span>
 			<button type="button" class="underline hover:no-underline" @click=${() => this.sendAction({ id: send.id, action: "retry" })}>Retry now</button>

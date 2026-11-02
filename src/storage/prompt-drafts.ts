@@ -103,6 +103,20 @@ export function seedPromptDraft(scope: DraftScope, sessionId: string | undefined
 	if (text && !readDraft(key, true).text) writeDraft(key, text);
 }
 
+/**
+ * Edit on a queued message: its text goes back into the composer, above anything typed there since, and every
+ * connected editor shows it (the draft rail is the one source the editor follows).
+ */
+export function putBackPromptDraft(scope: DraftScope, sessionId: string | undefined, text: string): void {
+	const key = draftKey(scope, sessionId);
+	const existing = readDraft(key, true).text;
+	const next = existing.trim() ? `${text}\n\n${existing}` : text;
+	writeDraft(key, next);
+	for (const editor of connectedEditors) {
+		if (bindings.get(editor)?.key === key && editor.value !== next) editor.value = next;
+	}
+}
+
 /** The unsent text of the chat this panel shows ("" when there is none). */
 export function currentPromptDraftText(): string {
 	return currentKey ? readDraft(currentKey, true).text : "";
