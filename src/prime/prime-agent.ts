@@ -17,7 +17,7 @@ import { catalogProviders, getModels as registryModels } from "../models-registr
 import { fitImageForModel, type ImageFit } from "../utils/model-image.js";
 import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
 import { bridgeNoticeToast, isBridgeNotice } from "./bridge-notice.js";
-import { cancelBrowserCall, handleBrowserCall } from "./browser-tools.js";
+import { cancelBrowserCall, handleBrowserCallBounded } from "./browser-tools.js";
 import { MAIN_AGENT_ID, PRIME_PROVIDER } from "./constants.js";
 import {
 	isJson,
@@ -42,6 +42,7 @@ import {
 	takeNextSendMode,
 	withSendState,
 } from "./send-state.js";
+import { ensurePrimeToolRenderers } from "./tool-renderer.js";
 
 export {
 	agentIdFromSessionId,
@@ -269,6 +270,8 @@ export class PrimeRemoteAgent extends Agent {
 			streamMessage: null,
 			pendingToolCalls: new Set(),
 		};
+		// R730 tool calls render compactly (tool-renderer.ts); the renderer is registered per tool name as names appear.
+		ensurePrimeToolRenderers(this.remote.messages);
 		// AgentInterface only wires its own streamFn/getApiKey when these are missing.
 		this.getApiKey = async () => "remote";
 		window.addEventListener("online", this.onBrowserOnline);
@@ -323,6 +326,7 @@ export class PrimeRemoteAgent extends Agent {
 			this.pendingEchoes = [];
 			const history = toAgentMessages(h.messages);
 			this.remote.messages = [...history, ...artifacts, ...unsent, ...this.reconcileQueued(h.queue, history)];
+			ensurePrimeToolRenderers(history);
 			this.openSocket(h.offset);
 			this.emitRemote({ type: "agent_end", messages: [] });
 			void this.onArtifactsReconcile?.().catch((err) => console.warn("[prime] artifact reconcile failed", err));
@@ -474,7 +478,7 @@ export class PrimeRemoteAgent extends Agent {
 
 	private async runBrowserCall(id: string, tool: string, args: Json): Promise<void> {
 		try {
-			const result = await handleBrowserCall(tool, args, this.windowId, id);
+			const result = await handleBrowserCallBounded(tool, args, this.windowId, id);
 			this.socket?.replyBrowserCall(id, true, result);
 		} catch (err) {
 			this.socket?.replyBrowserCall(id, false, undefined, err instanceof Error ? err.message : String(err));
@@ -537,10 +541,12 @@ export class PrimeRemoteAgent extends Agent {
 				case "message_update":
 					if (!isAgentMessage(event.message)) continue;
 					this.remote.streamMessage = event.message.role === "user" ? null : event.message;
+					if (event.message.role === "assistant") ensurePrimeToolRenderers([event.message]);
 					break;
 				case "message_end": {
 					if (!isAgentMessage(event.message)) continue;
 					this.remote.streamMessage = null;
+					if (event.message.role === "assistant") ensurePrimeToolRenderers([event.message]);
 					this.appendRemoteMessage(event.message);
 					break;
 				}

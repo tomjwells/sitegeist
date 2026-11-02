@@ -30,7 +30,9 @@
 		"test:send-retry:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-send-retry.test.ts",
 		"test:open-by-id:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-open-by-id.test.ts",
 		"test:queue:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-queue.test.ts",
-		"test:tabs:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/tab-actions-extension.test.ts"
+		"test:tabs:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/tab-actions-extension.test.ts",
+		"test:tool-summary": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-tool-summary.test.ts",
+		"test:tool-render:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-tool-render-extension.test.ts"
 	},
 	"dependencies": {
 		"@mariozechner/jailjs": "^0.1.0",

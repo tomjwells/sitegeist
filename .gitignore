@@ -10,3 +10,4 @@ sitegeist-latest.zip
 *.screenflow/
 *.mp4
 version.json
+tests/.out/
