@@ -37,10 +37,43 @@ const USER_SCRIPT_WORLD = "sitegeist-prime";
 
 /** No tabId: the page sitegeist works on (side panel: the active tab; panel in a tab: the page beside it). */
 async function resolveTab(tabId: number | undefined, _windowId: number): Promise<chrome.tabs.Tab> {
-	if (tabId !== undefined) return chrome.tabs.get(tabId);
-	const target = await targetTab();
-	if (target) return target;
-	throw new Error("no active tab");
+	const tab = tabId !== undefined ? await chrome.tabs.get(tabId) : await targetTab();
+	if (!tab) throw new Error("no active tab");
+	return wakeIfDiscarded(tab);
+}
+
+/**
+ * An unloaded tab (Zen's tab unloader, Chrome's Memory Saver: `discarded`) runs no scripts, so a page call into it
+ * would never answer (2026-11-02: three calls into a LinkedIn tab waited 35 s each and came back as bare timeouts).
+ * Reload it first, the way the browser does when Tom clicks it, and wait for the load (bounded).
+ */
+async function wakeIfDiscarded(tab: chrome.tabs.Tab): Promise<chrome.tabs.Tab> {
+	const id = tab.id;
+	if (id === undefined || tab.discarded !== true) return tab;
+	await chrome.tabs.reload(id).catch(() => undefined);
+	const deadline = Date.now() + 15_000;
+	while (Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 250));
+		const now = await chrome.tabs.get(id).catch(() => undefined);
+		if (now && now.discarded !== true && now.status === "complete") return now;
+	}
+	return (await chrome.tabs.get(id).catch(() => undefined)) ?? tab;
+}
+
+/** One line about a tab's state for error messages: what the agent needs to decide what to do next. */
+async function describeTab(tabId: number | undefined): Promise<string> {
+	const tab =
+		tabId !== undefined
+			? await chrome.tabs.get(tabId).catch(() => undefined)
+			: await targetTab().catch(() => undefined);
+	if (!tab) return tabId !== undefined ? `tab ${tabId} no longer exists` : "no active tab";
+	const bits = [
+		`tab ${tab.id ?? "?"} "${(tab.title ?? "").slice(0, 60)}" ${tab.url ?? ""}`,
+		`status ${tab.status ?? "?"}`,
+	];
+	if (tab.discarded) bits.push("unloaded (discarded)");
+	if (!tab.active) bits.push("not the active tab of its window");
+	return bits.join("; ");
 }
 
 /**
@@ -93,6 +126,8 @@ async function listTabs(): Promise<BrowserToolResult> {
 			target: t.id !== undefined && t.id === target?.id,
 			title: t.title ?? "",
 			url: t.url ?? "",
+			discarded: t.discarded === true,
+			status: t.status ?? "",
 		}));
 	const mark = (r: { active: boolean; onScreen: boolean; target: boolean }): string =>
 		`${r.active ? "*" : r.onScreen ? "+" : ""}${r.target ? ">" : ""}` || " ";
@@ -335,8 +370,13 @@ async function runWithTimeout(
 		]);
 	} finally {
 		clearTimeout(timer);
+		// Bounded: when the page runs no scripts at all, the cancel would hang too and the reply would never go out
+		// (the relay then reported a bare browser_call_timeout, 2026-11-02).
 		if (timedOut)
-			await runUserScript(tabId, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`, world).catch(() => undefined);
+			await Promise.race([
+				runUserScript(tabId, `window.__sgEvalCancel?.[${key}]?.(); 'cancelled'`, world).catch(() => undefined),
+				new Promise<void>((r) => setTimeout(r, 2_000)),
+			]);
 	}
 }
 
@@ -757,6 +797,72 @@ async function manageInstructions(args: Json): Promise<BrowserToolResult> {
 		};
 	}
 	return text("browser_instructions: command must be get or set");
+}
+
+/**
+ * Every call answers before the relay gives up on it. Without this the agent got the relay's bare
+ * "browser_call_timeout" (49 times since September) and no idea whether the panel, the tab or the page was at fault.
+ * Caps: page-script tools get their own timeoutMs plus 3 s; navigation waits for the load (55 s); the rest are quick.
+ * No cap for browser_eval across `urls` (it reports per page and the R730 side sizes the relay timeout for the batch).
+ */
+function callCapMs(tool: string, args: Json): number | undefined {
+	const own = num(args.timeoutMs);
+	switch (tool) {
+		case "browser_eval":
+			return Array.isArray(args.urls) && args.urls.length > 0 ? undefined : (own ?? 30_000) + 3_000;
+		case "browser_page":
+		case "browser_pick_element":
+			return (own ?? 30_000) + 3_000;
+		case "browser_download":
+		case "browser_upload_file":
+			return (own ?? 60_000) + 3_000;
+		case "browser_navigate":
+			return 55_000;
+		case "browser_screenshot":
+			return 15_000;
+		default:
+			return 10_000;
+	}
+}
+
+const PAGE_SCRIPT_TOOLS = new Set([
+	"browser_page",
+	"browser_eval",
+	"browser_download",
+	"browser_upload_file",
+	"browser_pick_element",
+]);
+
+export async function handleBrowserCallBounded(
+	tool: string,
+	args: Json,
+	windowId: number,
+	callId: string,
+): Promise<BrowserToolResult> {
+	const cap = callCapMs(tool, args);
+	if (cap === undefined) return handleBrowserCall(tool, args, windowId, callId);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			handleBrowserCall(tool, args, windowId, callId),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(async () => {
+					void cancelBrowserCall(callId);
+					const where = await describeTab(num(args.tabId));
+					const hint = PAGE_SCRIPT_TOOLS.has(tool)
+						? " The page ran no script in that time: the tab may be asleep or unloaded, still loading, or extensions may be blocked on this site. browser_screenshot needs no page script; browser_navigate to the tab's URL reloads it; or ask Tom to click the tab once."
+						: " The browser did not finish the request in that time.";
+					reject(
+						new Error(
+							`${tool} did not finish in ${Math.round(cap / 1000)} s inside the browser (${where}).${hint}`,
+						),
+					);
+				}, cap);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 export async function handleBrowserCall(
