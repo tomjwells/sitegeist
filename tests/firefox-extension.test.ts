@@ -785,7 +785,7 @@ test(
 
 test(
 	"Zen: a chat open in another window's sidebar says so (by URL and in the sessions list) and can be taken over",
-	{ skip, timeout: 180_000 },
+	{ skip, timeout: 60_000 },
 	async () => {
 		// Tom, 2026-10-25: a chat in the sessions list would not open - the panel fell back to the landing page without a
 		// word. The chat was held by another panel (its sidebar in another window had auto-resumed it from a page anchor).
