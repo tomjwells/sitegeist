@@ -37,6 +37,8 @@ export interface StandInRelay {
 	dropQueue(): void;
 	/** Open panel sockets for the session; tool calls go to the newest. */
 	openSockets(): number;
+	/** RPC types the panel sent (get_state, get_available_models, set_model, …), in order. */
+	rpcCalls: Array<Record<string, unknown>>;
 	/** Close every panel socket (the connection died). */
 	dropSockets(): void;
 	/** Send the bridge's echo of accepted prompts that were held back (swallowPrompt) over the open sockets. */
@@ -46,7 +48,12 @@ export interface StandInRelay {
 	close(): void;
 }
 
-export async function startStandInRelay(sessionId: string, messages: unknown[]): Promise<StandInRelay> {
+export async function startStandInRelay(
+	sessionId: string,
+	messages: unknown[],
+	opts: { models?: unknown[] } = {},
+): Promise<StandInRelay> {
+	const rpcCalls: Array<Record<string, unknown>> = [];
 	const sockets: MiniSocket[] = [];
 	const pending = new Map<string, (reply: { ok: boolean; result: unknown; error: string }) => void>();
 	const prompts: Array<Record<string, unknown>> = [];
@@ -236,8 +243,13 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
 			const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+			if (isRecord(parsed)) rpcCalls.push(parsed);
 			const data =
-				isRecord(parsed) && parsed.type === "get_state" ? { thinkingLevel: "high", isStreaming: false } : {};
+				isRecord(parsed) && parsed.type === "get_state"
+					? { thinkingLevel: "high", isStreaming: false }
+					: isRecord(parsed) && parsed.type === "get_available_models"
+						? { models: opts.models ?? [] }
+						: {};
 			res.end(JSON.stringify({ ok: true, response: { success: true, data } }));
 		} else {
 			res.statusCode = 404;
@@ -307,6 +319,7 @@ export async function startStandInRelay(sessionId: string, messages: unknown[]):
 			queue.length = 0;
 		},
 		openSockets: () => sockets.length,
+		rpcCalls,
 		dropSockets: () => {
 			for (const ws of [...sockets]) ws.close();
 		},

@@ -1018,6 +1018,20 @@ export class PrimeRemoteAgent extends Agent {
 		return Array.isArray(data.models) ? data.models.filter(isModel) : [];
 	}
 
+	/**
+	 * Same list as availableModels(), but never creates a session: undefined on a brand-new coach chat that has not
+	 * started yet. Used to fill the model menu's cache in the background (src/prime/model-cache.ts).
+	 */
+	async availableModelsIfReady(): Promise<Model<any>[] | undefined> {
+		if (this.agentId === MAIN_AGENT_ID) {
+			const fromCatalog = catalogProviders().flatMap((p) => registryModels(p));
+			if (fromCatalog.length > 0) return fromCatalog;
+		}
+		if (!this.primeSessionId) return undefined;
+		const data = await primeRpc(this.agentId, this.primeSessionId, { type: "get_available_models" });
+		return Array.isArray(data.models) ? data.models.filter(isModel) : undefined;
+	}
+
 	async rename(name: string): Promise<void> {
 		if (!this.primeSessionId) return;
 		await primeRpc(this.agentId, this.primeSessionId, {

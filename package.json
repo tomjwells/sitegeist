@@ -32,7 +32,9 @@
 		"test:queue:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-queue.test.ts",
 		"test:tabs:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/tab-actions-extension.test.ts",
 		"test:tool-summary": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-tool-summary.test.ts",
-		"test:tool-render:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-tool-render-extension.test.ts"
+		"test:tool-render:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/prime-tool-render-extension.test.ts",
+		"test:model-menu": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/model-menu.test.ts",
+		"test:model-menu:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/model-menu-extension.test.ts"
 	},
 	"dependencies": {
 		"@mariozechner/jailjs": "^0.1.0",

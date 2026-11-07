@@ -40,6 +40,7 @@ import { InstructionsTab } from "./dialogs/InstructionsTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { catalogProviders, isCatalogProvider } from "./models-registry.js";
 import "./components/SessionsSidebar.js";
+import { ModelMenu } from "./components/ModelMenu.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
@@ -54,7 +55,7 @@ import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
-import { PrimeModelPicker } from "./prime/PrimeModelPicker.js";
+import { cachedModels, MODELS_FRESH_MS, refreshModels, warmModelCache } from "./prime/model-cache.js";
 import {
 	agentIdFromSessionId,
 	isPrimeSessionId,
@@ -279,6 +280,34 @@ const refreshAgentOptions = async (): Promise<void> => {
 	}
 };
 const isPrimeAgent = (a: Agent | undefined): a is PrimeRemoteAgent => a instanceof PrimeRemoteAgent;
+
+/** The composer's model button (pi-web-ui MessageEditor renders into light DOM): the anchor for the model menu. */
+function modelButton(): HTMLElement | null {
+	const id = agent?.state.model?.id;
+	const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("message-editor button"));
+	return (id ? buttons.find((b) => b.textContent?.trim() === id) : undefined) ?? null;
+}
+
+function focusComposer(): void {
+	document.querySelector<HTMLTextAreaElement>("message-editor textarea")?.focus();
+}
+
+/**
+ * Fill the model menu's cache for this agent in the background, so the menu opens instantly (Tom, 2026-11-07).
+ * Uses the stored list at once and refreshes it when stale; never creates a session for it.
+ */
+function prefetchModels(prime: PrimeRemoteAgent): void {
+	void warmModelCache(prime.agentId).then(() =>
+		refreshModels(prime.agentId, () => prime.availableModelsIfReady()).catch((err) =>
+			console.warn("[prime] model prefetch failed", err),
+		),
+	);
+}
+
+// Background refresh while the panel is open (cheap: skipped while the list is fresh; one request per agent).
+setInterval(() => {
+	if (isPrimeAgent(agent) && document.visibilityState === "visible") prefetchModels(agent);
+}, MODELS_FRESH_MS);
 let agentUnsubscribe: (() => void) | undefined;
 let currentWindowId: number;
 /** This panel: the side panel / sidebar of a window, or a panel tab (split view beside a page); owns session locks. */
@@ -966,6 +995,7 @@ const createAgent = async (
 			}
 		};
 		agent = prime;
+		prefetchModels(prime);
 	} else {
 		agent = new Agent({
 			initialState: initialState || {
@@ -1040,25 +1070,41 @@ const createAgent = async (
 			return await ApiKeyOrOAuthDialog.prompt(provider);
 		},
 		onModelSelect: async () => {
+			// A dropdown at the model button, filled from the cached list at once (Tom, 2026-11-07: "two clicks and
+			// bam, it's done", like the thinking menu). The list refreshes in the background; see src/prime/model-cache.ts.
+			const anchor = modelButton();
+			const afterPick = () => {
+				chatPanel.agentInterface?.requestUpdate();
+				updateAuthLabel().catch(() => {});
+				renderApp();
+				focusComposer();
+			};
 			if (isPrimeAgent(agent)) {
 				const prime = agent;
-				let models: Model<any>[] = [];
-				let failure = "";
-				try {
-					models = await prime.availableModels();
-				} catch (err) {
-					failure = err instanceof Error ? err.message : String(err);
-					console.warn("[prime] model list failed", err);
-				}
-				if (models.length === 0) {
-					alert(`prime-agent model list unavailable${failure ? `: ${failure}` : ""}`);
-					return;
-				}
-				PrimeModelPicker.open(models, prime.remoteModel, (model) => {
-					prime.setModel(model);
-					chatPanel.agentInterface?.requestUpdate();
-					renderApp();
+				await warmModelCache(prime.agentId);
+				const cached = cachedModels(prime.agentId);
+				const menu = ModelMenu.open({
+					anchor,
+					models: cached ?? [],
+					loading: !cached,
+					current: prime.remoteModel,
+					recentKey: `prime:${prime.agentId}`,
+					onPick: (model) => {
+						prime.setModel(model);
+						afterPick();
+					},
 				});
+				if (!menu) return; // the click closed an open menu
+				// Nothing cached yet (first use of this agent): fetch now, creating the session if needed, as before.
+				refreshModels(prime.agentId, () => (cached ? prime.availableModelsIfReady() : prime.availableModels()))
+					.then((models) => {
+						if (models && models.length > 0) menu.setModels(models);
+						else if (!cached) menu.setError("The R730 returned no models for this agent.");
+					})
+					.catch((err) => {
+						console.warn("[prime] model list failed", err);
+						menu.setError(`Model list unavailable: ${err instanceof Error ? err.message : String(err)}`);
+					});
 				return;
 			}
 			const providers = await getProvidersWithKeys();
@@ -1066,16 +1112,27 @@ const createAgent = async (
 				openApiKeysDialog();
 				return;
 			}
-			ModelSelector.open(
-				agent.state.model,
-				(model) => {
+			const openFullDialog = () =>
+				ModelSelector.open(
+					agent.state.model,
+					(model) => {
+						agent.setModel(model);
+						afterPick();
+					},
+					providers,
+				);
+			ModelMenu.open({
+				anchor,
+				// providers come from getProvidersWithKeys(): registry provider names, so the cast only narrows string -> KnownProvider
+				models: providers.flatMap((p) => getModels(p as Parameters<typeof getModels>[0])),
+				current: agent.state.model,
+				recentKey: "browser",
+				onPick: (model) => {
 					agent.setModel(model);
-					chatPanel.agentInterface?.requestUpdate();
-					updateAuthLabel().catch(() => {});
-					renderApp();
+					afterPick();
 				},
-				providers,
-			);
+				extra: { label: "More providers and settings…", onClick: openFullDialog },
+			});
 		},
 		onBeforeSend: async () => {
 			clearAgentTab(); // Tom's new prompt: the page beside a panel tab is the target again
