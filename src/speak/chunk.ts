@@ -4,14 +4,16 @@
  *
  * Blocks are separated by blank lines. A fenced code block, a table and a list (items, nested items, continuation
  * lines and the blank lines between items) each stay one block. Blocks are packed greedily up to a per-chunk target.
- * The targets ramp up (250, 500, then 800): speak renders about 2.5x faster than real time, so an 800-character
- * first chunk (~50 s of speech) would take ~20 s before anything plays; a 250-character one takes ~5 s, and every
- * later chunk renders while the one before it plays. Only a paragraph may be cut inside, at sentence ends, and only
- * when it is longer than the first chunk's target or longer than the hard cap. Tables, lists and code are cut (at
- * line ends) only above the hard cap, which keeps every request under speak's 5,000-character limit.
+ * The targets ramp up (120, 250, 500, then 800). Measured 2026-11-07 on the M4, model loaded: speech is ~10 characters
+ * per second and speak renders ~20-23 characters per second (149 chars: 13.1 s of audio in 7.4 s; 665 chars: 65.4 s
+ * in 28.4 s). An 800-character first chunk would mean ~35 s of silence; 120 characters start in ~6 s. Each target is
+ * at most about twice the one before, so the next chunk renders in about the time the current one plays.
+ * Only a paragraph is ever cut inside, at sentence ends: when it opens the message and is over 1.5x the first target
+ * (the first piece is then at least half the target), or when it is longer than the hard cap. Tables, lists and code
+ * are cut (at line ends) only above the hard cap, which keeps every request under speak's 5,000-character limit.
  */
 
-export const CHUNK_TARGETS: readonly number[] = [250, 500, 800];
+export const CHUNK_TARGETS: readonly number[] = [120, 250, 500, 800];
 /** speak's limit is 5,000 characters after prepare; prepare can lengthen text ("~2 GB" -> "about 2 gigabytes"). */
 export const HARD_CAP = 4000;
 
@@ -140,15 +142,16 @@ function cutSentences(text: string, max: number): string[] {
 }
 
 /**
- * The first whole sentences of a paragraph that fit in `room` characters (at least one sentence, if it is shorter than
- * the paragraph), and the rest. undefined when the paragraph is a single sentence or there is no room worth using.
+ * The first whole sentences of a paragraph that fit in `room` characters (at least half of `room`, so never a tiny
+ * first chunk), and the rest. undefined when the paragraph is a single sentence or there is no room worth using.
  */
 function leadingSentences(text: string, room: number): { head: string; rest: string } | undefined {
 	if (room < 60) return undefined;
 	const sentences = text.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) ?? [];
 	let head = "";
 	for (const s of sentences) {
-		if (head && head.length + s.length > room) break;
+		// at least half the room: a 40-character first chunk ends before the next one has rendered
+		if (head.length >= room / 2 && head.length + s.length > room) break;
 		head += s;
 		if (head.length >= room) break;
 	}
@@ -193,7 +196,7 @@ export function chunkMarkdown(markdown: string): string[] {
 		if (!piece) continue;
 		const target = targetFor(chunks.length);
 		// First chunk only: a long opening paragraph is cut after whole sentences, so speech starts within seconds.
-		if (chunks.length === 0 && piece.kind === "paragraph" && cur.length + 2 + piece.text.length > target) {
+		if (chunks.length === 0 && piece.kind === "paragraph" && cur.length + 2 + piece.text.length > target * 1.5) {
 			const split = leadingSentences(piece.text, target - (cur ? cur.length + 2 : 0));
 			if (split) {
 				chunks.push(cur ? `${cur}\n\n${split.head}` : split.head);

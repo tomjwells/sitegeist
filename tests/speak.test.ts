@@ -46,17 +46,19 @@ test("blocks: code, tables and lists stay whole across blank lines", () => {
 	assert.equal(blocks[4]?.text, "- item one\n  continued\n\n- item two\n  - nested");
 });
 
-test("chunks: targets ramp 250 -> 500 -> 800, packed at block boundaries, nothing lost", () => {
+test("chunks: targets ramp 120 -> 250 -> 500 -> 800, packed at block boundaries, nothing lost", () => {
 	const blocks = Array.from({ length: 16 }, (_, i) => para(24, `p${i}w`)); // ~130 characters each
 	const md = blocks.join("\n\n");
 	const chunks = chunkMarkdown(md);
 	assert.ok(chunks.length >= 4);
 	chunks.forEach((c, i) => {
 		const target = CHUNK_TARGETS[Math.min(i, CHUNK_TARGETS.length - 1)] ?? 800;
-		assert.ok(c.length <= target, `chunk ${i} is ${c.length} > ${target}`);
+		// a chunk may exceed its target only when it is a single block (blocks are never split here)
+		assert.ok(c.length <= target || !c.includes("\n\n"), `chunk ${i} is ${c.length} > ${target}`);
 		for (const b of c.split("\n\n")) assert.ok(blocks.includes(b), "every chunk is whole blocks");
 	});
-	assert.ok((chunks[0]?.length ?? 0) <= 250 && (chunks[2]?.length ?? 0) > 500, "ramp");
+	assert.equal(chunks[0], blocks[0], "first chunk = the first block (one sentence, not cut)");
+	assert.ok((chunks[1]?.length ?? 0) <= 250 && (chunks[3]?.length ?? 0) > 500, "ramp");
 	assert.equal(norm(chunks.join(" ")), norm(blocks.join(" ")));
 });
 
@@ -69,7 +71,10 @@ test("chunks: a long first paragraph is cut after whole sentences; tables and li
 	].join("\n");
 	const list = Array.from({ length: 30 }, (_, i) => `- point ${i} with a few words`).join("\n");
 	const chunks = chunkMarkdown(`${sentences.join(" ")}\n\n${table}\n\n${list}`);
-	assert.ok(chunks[0] && chunks[0].length <= 250 && chunks[0].endsWith("."), `first chunk: ${chunks[0]?.length}`);
+	assert.ok(
+		chunks[0] && chunks[0].length >= 60 && chunks[0].length <= 120 && chunks[0].endsWith("."),
+		`first chunk: ${chunks[0]?.length}`,
+	);
 	assert.ok(
 		sentences.some((s) => chunks[0]?.endsWith(s)),
 		"cut at a sentence end",
