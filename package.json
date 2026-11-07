@@ -36,7 +36,8 @@
 		"test:model-menu": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/model-menu.test.ts",
 		"test:model-menu:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/model-menu-extension.test.ts",
 		"test:speak": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/speak.test.ts",
-		"test:speak:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/speak-extension.test.ts"
+		"test:speak:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/speak-extension.test.ts",
+		"test:sessions-sidebar:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/sessions-sidebar-extension.test.ts"
 	},
 	"dependencies": {
 		"@mariozechner/jailjs": "^0.1.0",

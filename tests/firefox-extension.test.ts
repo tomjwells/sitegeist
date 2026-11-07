@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -544,6 +545,15 @@ async function inChrome(d: Driver, script: string, args: unknown[] = []): Promis
 }
 
 /** Polls a read that may fail while a page navigates (failures count as "not yet"). */
+/** Screenshot of the current tab's viewport (WebDriver) into tests/.out/, for a human look. */
+async function zenShot(d: Driver, name: string): Promise<void> {
+	const b64 = await d.cmd("GET", d.s("/screenshot"));
+	if (typeof b64 !== "string") return;
+	const dir = fileURLToPath(new URL("./.out/", import.meta.url));
+	await mkdir(dir, { recursive: true });
+	await writeFile(join(dir, name), Buffer.from(b64, "base64"));
+}
+
 async function untilOk<T>(read: () => Promise<T>, ok: (v: T) => boolean, timeoutMs: number, what: string): Promise<T> {
 	return until(
 		() => read().catch((): undefined => undefined),
@@ -774,7 +784,7 @@ test(
 );
 
 test(
-	"Zen: a chat open in another window's sidebar says so and can be taken over",
+	"Zen: a chat open in another window's sidebar says so (by URL and in the sessions list) and can be taken over",
 	{ skip, timeout: 180_000 },
 	async () => {
 		// Tom, 2026-10-25: a chat in the sessions list would not open - the panel fell back to the landing page without a
@@ -843,6 +853,47 @@ test(
 			assert.match(String(notice), /"Held elsewhere" is open in another window's panel\./);
 			assert.ok(String(notice).includes("Open here anyway"));
 			assert.ok(!String(notice).includes("ask away"), "B does not show the chat yet");
+
+			// The same from B's sessions list (Tom, 2026-11-07: a held chat was greyed out there and ignored the click; its
+			// "Locked" label was cut off). The row says where the chat is, and a click offers the take-over.
+			await d.run(`document.querySelectorAll("toast-notification").forEach((t) => t.remove()); return true;`);
+			await untilOk(
+				() =>
+					d.run(
+						`const s = document.querySelector("sessions-sidebar"); if (!s?.hasAttribute("open")) document.querySelector('button[title="Sessions"]')?.click(); return s?.hasAttribute("open") ?? false;`,
+					),
+				(open) => open === true,
+				20_000,
+				"B's sessions list open",
+			);
+			const row = await untilOk(
+				() =>
+					d.run(
+						`const r = document.querySelector('sessions-sidebar div[data-locked="true"]'); return r ? r.innerText + "|" + getComputedStyle(r).cursor : "";`,
+					),
+				(t) => typeof t === "string" && t.includes("Held elsewhere"),
+				15_000,
+				"the held chat in B's list",
+			);
+			assert.match(
+				String(row),
+				/Open in another window · /,
+				"the row says where the chat is, first on its second line",
+			);
+			assert.ok(String(row).endsWith("|pointer"), "the row is clickable");
+			await zenShot(d, "zen-locked-row.png");
+			await d.run(`document.querySelector('sessions-sidebar div[data-locked="true"]').click(); return true;`);
+			const offer = await untilOk(
+				() =>
+					d.run(
+						`return Array.from(document.querySelectorAll("toast-notification")).map((t) => t.innerText).join(" | ")`,
+					),
+				(t) => typeof t === "string" && t.includes("is open in"),
+				10_000,
+				"take-over offer after clicking the row",
+			);
+			assert.match(String(offer), /"Held elsewhere" is open in another window's panel\./);
+			await zenShot(d, "zen-locked-offer.png");
 
 			// Take it over: B gets the chat, A is told and starts fresh.
 			await d.click("xpath", "//toast-notification//button[normalize-space(.)='Open here anyway']");

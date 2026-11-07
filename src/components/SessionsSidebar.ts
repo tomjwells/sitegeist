@@ -1,6 +1,7 @@
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import i18n from "@mariozechner/mini-lit/dist/i18n.js";
 import { icon } from "@mariozechner/mini-lit/dist/icons.js";
+import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import type { SessionMetadata } from "@mariozechner/pi-web-ui";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -35,6 +36,11 @@ export class SessionsSidebar extends LitElement {
 	@property({ type: Boolean, reflect: true }) open = false;
 	@property({ type: String }) currentSessionId: string | undefined;
 	@property({ attribute: false }) onSelect: (sessionId: string) => void = () => {};
+	/**
+	 * A chat another panel has open (another window's sidebar, or a panel tab) was clicked. The panel offers to take it
+	 * over. These rows used to ignore the click (Tom, 2026-11-07, Zen: "I can't select it for whatever reason").
+	 */
+	@property({ attribute: false }) onSelectLocked: (sessionId: string, heldByTab: boolean) => void = () => {};
 	@property({ attribute: false }) onNew: () => void = () => {};
 	@property({ attribute: false }) onDeleted: (sessionId: string) => void = () => {};
 	@property({ attribute: false }) onToggle: (open: boolean) => void = () => {};
@@ -207,6 +213,20 @@ export class SessionsSidebar extends LitElement {
 		return owner !== undefined && owner !== this.owner;
 	}
 
+	/** Panel tabs are owners "t:<tabId>"; side panels / sidebars are "w:<windowId>" (utils/port.ts). */
+	private heldByTab(id: string): boolean {
+		return this.locks[id]?.startsWith("t:") === true;
+	}
+
+	/** Shown first on the row's second line, so the row never truncates it away (it used to say "Locked" at the end). */
+	private lockedLabel(id: string): string {
+		return this.heldByTab(id) ? "Open in a sitegeist tab" : "Open in another window";
+	}
+
+	private lockedWhere(id: string): string {
+		return this.heldByTab(id) ? "a sitegeist tab" : "another window's panel";
+	}
+
 	private formatDate(iso: string): string {
 		const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
 		if (days === 0) return i18n("Today");
@@ -220,6 +240,16 @@ export class SessionsSidebar extends LitElement {
 	}
 
 	/** All, Browser agent, then every relay agent that has at least one session. */
+	/**
+	 * Agent filter label. A dropdown, not a row of chips (Tom, 2026-11-07, Zen: with seven agents the chips ran off the
+	 * side of the sidebar).
+	 */
+	private filterLabel(f: string): string {
+		if (f === "all") return "All agents";
+		if (f === "browser") return "Browser agent";
+		return f === MAIN_AGENT_ID ? "prime-agent" : f;
+	}
+
 	private filterOptions(): string[] {
 		const agents = Array.from(
 			new Set(this.sessions.map((s) => this.agentOf(s.id)).filter((a) => a !== "browser")),
@@ -334,10 +364,12 @@ export class SessionsSidebar extends LitElement {
 		return html`
 			<div
 				class="group flex items-start gap-2 px-2 py-1.5 rounded-md border ${dropHere ? "border-primary" : "border-transparent"} ${
-					current ? "bg-secondary/60" : locked ? "opacity-50" : "hover:bg-secondary/40"
-				} ${locked ? "cursor-not-allowed" : "cursor-pointer"}"
+					current ? "bg-secondary/60" : locked ? "opacity-70 hover:bg-secondary/40" : "hover:bg-secondary/40"
+				} cursor-pointer"
+				title=${locked ? `Open in ${this.lockedWhere(session.id)}. Click to open it here.` : ""}
+				data-locked=${locked ? "true" : "false"}
 				draggable=${isPinned ? "true" : "false"}
-				@click=${() => !locked && this.onSelect(session.id)}
+				@click=${() => (locked ? this.onSelectLocked(session.id, this.heldByTab(session.id)) : this.onSelect(session.id))}
 				@dragstart=${(e: DragEvent) => {
 					if (!isPinned) return;
 					this.dragIndex = pinnedIndex;
@@ -363,11 +395,10 @@ export class SessionsSidebar extends LitElement {
 				<div class="flex-1 min-w-0">
 					<div class="text-sm text-foreground truncate" title=${session.title}>${session.title}</div>
 					<div class="text-[11px] text-muted-foreground truncate">
-						${this.formatDate(session.lastModified)} · ${session.messageCount} ${i18n("messages")} · $${session.usage.cost.total.toFixed(2)}
+						${locked ? html`<span class="text-amber-600 dark:text-amber-400 sg-locked-label">${this.lockedLabel(session.id)}</span> · ` : ""}${this.formatDate(session.lastModified)} · ${session.messageCount} ${i18n("messages")} · $${session.usage.cost.total.toFixed(2)}
 						${isPrimeSessionId(session.id) ? html` · <span class="text-primary/80">${this.agentOf(session.id)}</span>` : ""}
 						${pages > 0 ? html` · <span title=${`Bound to ${pages} page${pages === 1 ? "" : "s"}`}>${pages} ${pages === 1 ? "page" : "pages"}</span>` : ""}
 						${current ? html` · <span class="text-primary">${i18n("Current")}</span>` : ""}
-						${locked ? html` · <span class="text-destructive">${i18n("Locked")}</span>` : ""}
 					</div>
 					${this.snippet(session.id)}
 				</div>
@@ -445,15 +476,17 @@ export class SessionsSidebar extends LitElement {
 								? html`<div class="pt-1 text-[10px] text-muted-foreground">Indexing ${this.indexing} session${this.indexing === 1 ? "" : "s"} for search…</div>`
 								: ""
 						}
-						<div class="flex gap-1 pt-1.5">
-							${this.filterOptions().map(
-								(f) => html`<button
-									class="px-2 py-0.5 rounded text-[11px] ${this.agentFilter === f ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary/50"}"
-									@click=${() => {
-										this.agentFilter = f;
-									}}
-								>${f === "all" ? "All" : f === "browser" ? "Browser agent" : f === MAIN_AGENT_ID ? "prime-agent" : f}</button>`,
-							)}
+						<div class="pt-1.5 sg-agent-filter">
+							${Select({
+								value: this.agentFilter,
+								options: this.filterOptions().map((f) => ({ value: f, label: this.filterLabel(f) })),
+								onChange: (value: string) => {
+									this.agentFilter = value;
+								},
+								size: "sm",
+								variant: "outline",
+								fitContent: true,
+							})}
 						</div>
 					</div>
 					<div class="flex-1 overflow-y-auto px-1 pb-2">

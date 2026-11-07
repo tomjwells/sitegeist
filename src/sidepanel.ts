@@ -1269,6 +1269,25 @@ const loadSession = (sessionId: string) => {
 	window.location.href = url.toString();
 };
 
+/**
+ * A chat another panel holds (another window's sidebar, or a panel tab): say where, and offer to take it over. Taking
+ * it over tells that panel, which moves to a new chat, and opens the chat here. Used when a held chat is opened by URL
+ * and when Tom clicks a held chat in the sessions list (the list used to ignore that click; Tom, 2026-11-07, Zen).
+ */
+function offerTakeOver(sessionId: string, title: string, heldByTab: boolean): void {
+	const where = heldByTab ? "a sitegeist tab" : "another window's panel";
+	Toast.show(`"${title}" is open in ${where}.`, "info", 12_000, {
+		label: "Open here anyway",
+		onClick: () => {
+			const take: AcquireLockMessage = { type: "acquireLock", sessionId, owner: panelOwner, force: true };
+			void port.sendMessage(take).then((taken) => {
+				if (taken.success) loadSession(sessionId);
+				else Toast.error("Could not take the chat over.", 5000);
+			});
+		},
+	});
+}
+
 const newSession = (kind: AgentKind = "browser") => {
 	suppressAutoResumeForActivePage();
 	clearPromptDraft(draftScope()); // Explicit New starts empty; saved-chat drafts remain separate.
@@ -1595,6 +1614,11 @@ const renderApp = () => {
 					.activeKey=${activeTab?.key}
 					.activeTitle=${activeTab?.title ?? ""}
 					.onSelect=${(sessionId: string) => loadSession(sessionId)}
+					.onSelectLocked=${(sessionId: string, heldByTab: boolean) => {
+						void storage.sessions
+							.getMetadata(sessionId)
+							.then((m) => offerTakeOver(sessionId, m?.title || "This chat", heldByTab));
+					}}
 					.onNew=${() => newSession()}
 					.onDeleted=${(deletedSessionId: string) => {
 						clearPromptDraft(draftScope(), deletedSessionId);
@@ -2097,22 +2121,7 @@ async function initApp() {
 				}
 				appReady = true;
 				renderApp();
-				const where = lockResponse.owner?.startsWith("t:") ? "a sitegeist tab" : "another window's panel";
-				Toast.show(`"${title}" is open in ${where}.`, "info", 12_000, {
-					label: "Open here anyway",
-					onClick: () => {
-						const take: AcquireLockMessage = {
-							type: "acquireLock",
-							sessionId: wanted,
-							owner: panelOwner,
-							force: true,
-						};
-						void port.sendMessage(take).then((taken) => {
-							if (taken.success) loadSession(wanted);
-							else Toast.error("Could not take the chat over.", 5000);
-						});
-					},
-				});
+				offerTakeOver(wanted, title, lockResponse.owner?.startsWith("t:") === true);
 				return;
 			}
 
