@@ -115,7 +115,8 @@ const piWebUiPatches = [
 		// cards render as one compact row (status dot, tool name, one-line summary of the arguments); clicking
 		// a row expands that card, clicking the row above an expanded card collapses it again.
 		// AssistantMessage: footer row = usage + a small "copy answer as Markdown" button (mini-lit copy-button,
-		// text = the message's text parts joined, i.e. the Markdown the model wrote).
+		// text = the message's text parts joined, i.e. the Markdown the model wrote) + the 🔊 read-aloud button
+		// (sg-speak-button, src/components/SpeakButton.ts; same Markdown).
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]Messages\.js$/,
 		imports: [],
 		replacements: [
@@ -136,7 +137,7 @@ const piWebUiPatches = [
 					"				${!this.isStreaming && (this.message.usage || sgMarkdown)\n" +
 					'            ? html ` <div class="px-4 mt-1 text-xs text-muted-foreground flex items-center gap-1 min-h-6">' +
 					'${this.message.usage ? (this.onCostClick ? html `<span class="cursor-pointer hover:text-foreground transition-colors" @click=${this.onCostClick}>${formatUsage(this.message.usage)}</span>` : html `<span>${formatUsage(this.message.usage)}</span>`) : ""}' +
-					'${sgMarkdown ? html `<copy-button class="sg-copy-md [&>button]:!h-6 [&>button]:!w-6 [&>button]:!p-0 [&>button]:!bg-transparent [&>button]:hover:!bg-accent [&>button]:text-muted-foreground [&>button]:hover:text-foreground" .text=${sgMarkdown} title="Copy answer as Markdown"></copy-button>` : ""}' +
+					'${sgMarkdown ? html `<copy-button class="sg-copy-md [&>button]:!h-6 [&>button]:!w-6 [&>button]:!p-0 [&>button]:!bg-transparent [&>button]:hover:!bg-accent [&>button]:text-muted-foreground [&>button]:hover:text-foreground" .text=${sgMarkdown} title="Copy answer as Markdown"></copy-button><sg-speak-button .text=${sgMarkdown}></sg-speak-button>` : ""}' +
 					"</div> `\n" +
 					'            : ""}\n',
 			},

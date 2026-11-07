@@ -56,6 +56,8 @@ import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/Welcom
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { cachedModels, MODELS_FRESH_MS, refreshModels, warmModelCache } from "./prime/model-cache.js";
+import "./components/SpeakButton.js";
+import { SpeakTab } from "./dialogs/SpeakTab.js";
 import {
 	agentIdFromSessionId,
 	isPrimeSessionId,
@@ -74,6 +76,7 @@ import {
 } from "./prime/prime-client.js";
 import { SEND_ACTION_EVENT, sendActionOf } from "./prime/send-state.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
+import { initSpeak, setSpeakAgent } from "./speak/speak.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
 import {
 	claimParkedDraftAttachments,
@@ -304,6 +307,9 @@ function prefetchModels(prime: PrimeRemoteAgent): void {
 	);
 }
 
+// Read aloud (🔊 on answers): settings + the voice list, loaded once when the panel opens.
+void initSpeak();
+
 // Background refresh while the panel is open (cheap: skipped while the list is fresh; one request per agent).
 setInterval(() => {
 	if (isPrimeAgent(agent) && document.visibilityState === "visible") prefetchModels(agent);
@@ -437,6 +443,7 @@ function openApiKeysDialog(): Promise<void> {
 				new CostsTab(),
 				new SkillsTab(),
 				new ProxyTab(),
+				new SpeakTab(),
 				new AboutTab(),
 			],
 			resolve,
@@ -995,8 +1002,10 @@ const createAgent = async (
 			}
 		};
 		agent = prime;
+		setSpeakAgent(prime.agentId);
 		prefetchModels(prime);
 	} else {
+		setSpeakAgent(null);
 		agent = new Agent({
 			initialState: initialState || {
 				systemPrompt,
@@ -1568,6 +1577,7 @@ const renderApp = () => {
 								new CostsTab(),
 								new SkillsTab(),
 								new ProxyTab(),
+								new SpeakTab(),
 								new AboutTab(),
 							]),
 						title: "Settings",

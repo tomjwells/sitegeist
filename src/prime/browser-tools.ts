@@ -4,6 +4,8 @@
  * cookies) and answer with an AgentToolResult-shaped { content, details }.
  */
 import { CUSTOM_INSTRUCTIONS_SETTING } from "../sidepanel.js";
+import { speakPlayer } from "../speak/speak.js";
+import { speakSettings } from "../speak/speak-settings.js";
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import { CUSTOM_INSTRUCTIONS_UPDATED_SETTING, pushInstructions } from "../sync.js";
 import { AskUserWhichElementTool } from "../tools/ask-user-which-element.js";
@@ -113,11 +115,18 @@ const TAB_MARKS =
 /** One mark column: `*` in front of its window, `+` another pane on screen, `>` the default page (combined, e.g. `+>`). */
 const isExtensionPage = (url: string | undefined): boolean => /^(chrome|moz)-extension:\/\//.test(url ?? "");
 
-async function listTabs(): Promise<BrowserToolResult> {
+/**
+ * browser_tabs: every tab, in details.tabs; the R730 tool filters (query/limit/windows) and formats. A `query` is also
+ * applied here (2026-11-07): a raw relay call that passed one got every tab back, and main-pi closed all of them in
+ * Tom's Zen while cleaning up its own probe tabs. Words must all appear in the title or URL; no match -> no rows.
+ */
+async function listTabs(args: Json = {}): Promise<BrowserToolResult> {
 	const [tabs, target, onScreen] = await Promise.all([chrome.tabs.query({}), targetTab(), pagesOnScreen()]);
 	const screenIds = new Set(onScreen.map((t) => t.id));
+	const words = typeof args.query === "string" ? args.query.toLowerCase().split(/\s+/).filter(Boolean) : [];
 	const rows = tabs
 		.filter((t) => !isExtensionPage(t.url))
+		.filter((t) => words.every((w) => `${t.title ?? ""} ${t.url ?? ""}`.toLowerCase().includes(w)))
 		.map((t) => ({
 			id: t.id,
 			windowId: t.windowId,
@@ -136,6 +145,26 @@ async function listTabs(): Promise<BrowserToolResult> {
 		content: [{ type: "text", text: `id\tmark\ttitle\turl\n${lines.join("\n")}\n${TAB_MARKS}` }],
 		details: { tabs: rows },
 	};
+}
+
+/**
+ * sitegeist_speak (2026-11-07): lets main-pi check read-aloud in Tom's real panel through the relay (not an agent
+ * tool). status = the player's state, never the message text; click = press the 🔊 of the Nth assistant message in
+ * the open chat (negative counts from the end), the same code path as Tom's click; stop = stop playback.
+ */
+function speakDiagnostic(args: Json): BrowserToolResult {
+	const action = typeof args.action === "string" ? args.action : "status";
+	const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("sg-speak-button button.sg-speak"));
+	let clicked: number | null = null;
+	if (action === "click") {
+		const index = typeof args.index === "number" ? args.index : -1;
+		const button = buttons.at(index);
+		if (!button) return text(`no 🔊 button at index ${index} (${buttons.length} in the open chat)`);
+		button.click();
+		clicked = index < 0 ? buttons.length + index : index;
+	} else if (action === "stop") speakPlayer.stop();
+	const status = { ...speakPlayer.status(), action, clicked, buttons: buttons.length, settings: speakSettings() };
+	return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
 }
 
 /**
@@ -898,7 +927,9 @@ export async function handleBrowserCall(
 ): Promise<BrowserToolResult> {
 	switch (tool) {
 		case "browser_tabs":
-			return listTabs();
+			return listTabs(args);
+		case "sitegeist_speak":
+			return speakDiagnostic(args);
 		case "browser_tab_action":
 			return tabAction(args);
 		case "browser_screenshot":
