@@ -2,7 +2,7 @@
  * Read aloud in the real extension (Tom, 2026-11-07): an R730 chat against the stand-in relay, plus a stand-in speak
  * server that answers like the real one (no CORS headers, OpenAI-style errors, real mp3 audio made with ffmpeg).
  * Checks: 🔊 on each answer (tooltip names Fish Audio); click -> spinner while chunk 1 renders -> playing, the audio's
- * currentTime advances; the next chunk is requested while the current one plays; all chunks play in order and the
+ * currentTime advances; the next two chunks are requested while the current one plays, one request at a time; all chunks play in order and the
  * requests are exactly chunkMarkdown(message) in order; replay comes from memory (no request); click while playing
  * stops; with speak returning 503 the button shows "speak is offline (M4 asleep?)" after one request (no retry);
  * Settings → Read aloud switches the buttons off. Player state comes from the panel's sitegeist_speak diagnostic over
@@ -76,7 +76,7 @@ interface SpeechRequest {
 async function startStandInSpeak() {
 	const mp3 = tone(1.2);
 	const speech: SpeechRequest[] = [];
-	const state = { mode: "ok" as "ok" | "offline", firstDelayMs: 1500 };
+	const state = { mode: "ok" as "ok" | "offline", firstDelayMs: 1500, inFlight: 0, maxInFlight: 0 };
 	const server = createServer((req, res) => {
 		let body = "";
 		req.on("data", (c: Buffer) => {
@@ -107,7 +107,10 @@ async function startStandInSpeak() {
 			if (state.mode === "offline")
 				return json(503, { error: { message: "engine unavailable", type: "engine_unavailable" } });
 			const delay = speech.length === 1 ? state.firstDelayMs : 250;
+			state.inFlight++;
+			state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
 			setTimeout(() => {
+				state.inFlight--;
 				res.writeHead(200, { "content-type": "audio/mpeg", "x-speak-attribution": "Built with Fish Audio" });
 				res.end(mp3);
 			}, delay);
@@ -281,7 +284,10 @@ test(
 				s2.currentTime > s1.currentTime || s2.chunkIndex > s1.chunkIndex,
 				`currentTime advances (${s1.currentTime} -> ${s2.currentTime})`,
 			);
-			assert.ok(speak.speech.length >= 2, "the next chunk is fetched while the first one plays");
+			assert.ok(
+				speak.speech.length >= 3,
+				`the next two chunks are fetched while the first one plays (${speak.speech.length})`,
+			);
 			assert.equal(speak.speech[0]?.voice, "main-pi");
 
 			// 4. all chunks play, in order; the requests are the chunks, in order
@@ -299,6 +305,7 @@ test(
 				speak.speech.map((r) => r.input),
 				EXPECTED,
 			);
+			assert.equal(speak.state.maxInFlight, 1, "one request to speak at a time");
 			assert.deepEqual(await phases(page), ["idle", "idle"]);
 
 			// 5. replay: from memory (no request), starts at once

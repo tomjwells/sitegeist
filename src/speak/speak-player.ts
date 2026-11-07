@@ -4,8 +4,8 @@ import { errorNote, fetchVoices, pickVoice, SpeakError, synthesize } from "./spe
 
 /**
  * The read-aloud player (Tom, 2026-11-07). One audio element for the whole panel, so only one message plays at a
- * time. A message is split into chunks (chunk.ts); chunk 1 plays as soon as it arrives and the next chunk is fetched
- * while the current one plays. Every fetched chunk stays in memory per voice + message, so a replay is instant (the
+ * time. A message is split into chunks (chunk.ts); chunk 1 plays as soon as it arrives and the next two chunks are
+ * fetched, one after another, while the current one plays. Every fetched chunk stays in memory per voice + message, so a replay is instant (the
  * newest 40 messages are kept). A failed request is not retried: the button shows a short note and the next click
  * tries again. Requests still running when Tom stops are left to finish, so they land in the cache. Never logs the
  * message text.
@@ -42,6 +42,8 @@ export interface SpeakStatus {
 }
 
 const MAX_ENTRIES = 40;
+/** Chunks requested ahead of the one playing (see fetchAhead). */
+const LOOKAHEAD = 2;
 const VOICES_FRESH_MS = 10 * 60_000;
 const NOTE_MS = 10_000;
 
@@ -223,6 +225,23 @@ export class SpeakPlayer extends EventTarget {
 		return p;
 	}
 
+	/**
+	 * Keep speak busy while chunk `playing` plays: request the next LOOKAHEAD chunks one after another (speak renders one
+	 * at a time). Measured 2026-11-07 in Tom's Zen: with only the next chunk requested when the current one started, a
+	 * long chunk 3 (65 s of audio, ~25 s to render) followed a short chunk 2 (15 s) with 10 s of silence; chunk 2 had
+	 * been ready 12 s before it played. A failure stops the chain (no further requests) and shows when the play loop
+	 * reaches that chunk; a stopped run starts no new request. Cached and in-flight chunks are not requested again.
+	 */
+	private fetchAhead(entry: Entry, cacheKey: string, run: Run, url: string, voice: string, playing: number): void {
+		let chain: Promise<unknown> = Promise.resolve();
+		for (let j = playing + 1; j <= playing + LOOKAHEAD && j < entry.chunks.length; j++) {
+			chain = chain.then(() =>
+				this.run === run ? this.chunkAudio(entry, cacheKey, run, url, voice, j) : undefined,
+			);
+		}
+		chain.catch(() => undefined);
+	}
+
 	private playBlob(entry: Entry, i: number, blob: Blob, run: Run): Promise<void> {
 		const src = entry.urls[i] ?? URL.createObjectURL(blob);
 		entry.urls[i] = src;
@@ -283,10 +302,7 @@ export class SpeakPlayer extends EventTarget {
 				const got = await this.chunkAudio(entry, cacheKey, run, url, voice, i);
 				if (this.run !== run) return;
 				if (got === "skip") continue;
-				if (i + 1 < entry.chunks.length) {
-					// fetch the next chunk while this one plays; a failure surfaces when the loop gets there
-					this.chunkAudio(entry, cacheKey, run, url, voice, i + 1).catch(() => undefined);
-				}
+				this.fetchAhead(entry, cacheKey, run, url, voice, i);
 				await this.playBlob(entry, i, got, run);
 				playedAny = true;
 				if (this.run !== run) return;
