@@ -20,7 +20,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { type BrowserContext, chromium, type Page, type Worker } from "playwright";
-import { imageOf, seededPrimeSession, startStandInRelay, textOf } from "./prime-relay.fixture.ts";
+import {
+	assertDownloadsAndPageErrors,
+	imageOf,
+	seededPrimeSession,
+	startStandInRelay,
+	textOf,
+} from "./prime-relay.fixture.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const dist = join(root, "dist-chrome");
@@ -251,6 +257,7 @@ test(
 				);
 			assert.equal(await where(), "Article|/article");
 			assert.equal((await tab(worker, panelId)).active, true, "eval did not move the focus out of the chat");
+			await assertDownloadsAndPageErrors(relay);
 			assert.ok(textOf(await relay.call("browser_page")).includes("ARTICLE"));
 			const listed = textOf(await relay.call("browser_tabs"));
 			assert.ok(listed.includes(`${articleId}\t+>\tArticle`), `the page beside the panel is marked: ${listed}`);

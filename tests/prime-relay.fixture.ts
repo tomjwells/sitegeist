@@ -403,3 +403,42 @@ export function seededPrimeSession(id: string, title: string) {
 		},
 	};
 }
+
+/**
+ * browser_download `code` in the DEFAULT (isolated) world and page-script errors, checked through the real relay path
+ * (2026-11-07, Jennifer request 502b1bb0). In Zen every isolated-world download failed with "JSON.stringify(...) is
+ * undefined": the base64 step threw ("Permission denied to access property constructor") and Firefox hands a thrown
+ * Error back as `{}`, so the error was lost. Run against the page the tools work on (the stand-in /article).
+ */
+export async function assertDownloadsAndPageErrors(relay: Pick<StandInRelay, "call">): Promise<void> {
+	const dl = async (args: Record<string, unknown>) => {
+		const r = await relay.call("browser_download", args);
+		const d = isRecord(r) && isRecord(r.details) ? r.details : {};
+		return { bytes: d.bytes, mime: d.mime, text: Buffer.from(String(d.dataBase64 ?? ""), "base64").toString("utf8") };
+	};
+	const obj = await dl({ code: "return { mime: 'text/plain', base64: btoa('hello') }" });
+	if (obj.bytes !== 5 || obj.mime !== "text/plain" || obj.text !== "hello")
+		throw new Error(`isolated {mime, base64}: ${JSON.stringify(obj)}`);
+	const blob = await dl({ code: "return new Blob([document.documentElement.outerHTML], { type: 'text/html' })" });
+	if (blob.mime !== "text/html" || !blob.text.includes("ARTICLE"))
+		throw new Error(`isolated Blob: ${JSON.stringify(blob).slice(0, 300)}`);
+	const str = await dl({ code: "return '<p>é ✓</p>'" });
+	if (str.bytes !== 13 || str.text !== "<p>é ✓</p>")
+		throw new Error(`isolated string (UTF-8): ${JSON.stringify(str)}`);
+	const viaUrl = await dl({ url: "/article" });
+	if (!viaUrl.text.includes("ARTICLE")) throw new Error(`url fetch: ${JSON.stringify(viaUrl).slice(0, 300)}`);
+	const main = await dl({ code: "return { mime: 'text/plain', base64: btoa('main') }", world: "main" });
+	if (main.text !== "main") throw new Error(`main world: ${JSON.stringify(main)}`);
+	const rejects = async (tool: string, args: Record<string, unknown>, want: RegExp): Promise<void> => {
+		try {
+			const r = await relay.call(tool, args);
+			throw new Error(`${tool} should have failed, got ${JSON.stringify(r).slice(0, 300)}`);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!want.test(msg)) throw new Error(`${tool} error lost its message: ${msg}`);
+		}
+	};
+	await rejects("browser_download", { code: "return undefined" }, /got undefined/);
+	await rejects("browser_eval", { code: "throw new Error('boom 502b1bb0')" }, /boom 502b1bb0/);
+	await rejects("browser_eval", { code: "throw new Error('boom main')", world: "main" }, /boom main/);
+}

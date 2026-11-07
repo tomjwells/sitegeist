@@ -23,7 +23,13 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { syntheticInputInPage } from "../src/tools/synthetic-input.ts";
-import { imageOf, seededPrimeSession, startStandInRelay, textOf } from "./prime-relay.fixture.ts";
+import {
+	assertDownloadsAndPageErrors,
+	imageOf,
+	seededPrimeSession,
+	startStandInRelay,
+	textOf,
+} from "./prime-relay.fixture.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist-firefox");
@@ -693,6 +699,7 @@ test(
 			);
 			assert.equal(await where(), "Article|/article");
 			assert.ok(String(await selected()).includes("sidepanel.html?page="), "the chat keeps the focus");
+			await assertDownloadsAndPageErrors(relay);
 
 			// It knows every pane on screen: browser_tabs marks them, and the page context of a prompt lists them by tab id.
 			const listed = await untilOk(

@@ -284,8 +284,19 @@ async function runUserScript(tabId: number, code: string, world: EvalWorld = "US
 	};
 	const results = await chrome.userScripts.execute(injection);
 	const first: unknown = Array.isArray(results) ? results[0] : undefined;
-	if (isJson(first) && typeof first.error === "string") throw new Error(first.error);
+	// Chrome reports a page error as a string; Firefox / Zen passes a thrown Error object through as `{}`, which
+	// the old `typeof === "string"` check missed, so the error became `result: undefined` and browser_eval printed
+	// a silent "null" (2026-11-07, Jennifer request 502b1bb0). Any error value is an error.
+	if (isJson(first) && first.error !== undefined && first.error !== null) throw new Error(pageErrorText(first.error));
 	return isJson(first) ? first.result : undefined;
+}
+
+/** Best message for a page-script error, whatever shape the browser handed back. */
+function pageErrorText(error: unknown): string {
+	if (typeof error === "string" && error) return error;
+	if (isJson(error) && typeof error.message === "string" && error.message) return error.message;
+	const json = JSON.stringify(error);
+	return json && json !== "{}" ? json : "the page script threw an error and the browser passed on no message";
 }
 
 async function readPage(args: Json, windowId: number): Promise<BrowserToolResult> {
@@ -321,6 +332,9 @@ export async function cancelBrowserCall(id: string): Promise<void> {
 	if (cancel) await cancel().catch(() => undefined);
 }
 
+/** Prefix of a wrapped script's error result. JSON output never starts with a NUL, so it cannot collide with a value. */
+const PAGE_ERROR_TAG = "\u0000sitegeist-page-error:";
+
 function wrapEval(code: string, skillLibrary: string, key: string): string {
 	// Body of an async function; the result is JSON-serialised in-page so odd objects cannot break the bridge.
 	// Cancellation: `setTimeout` is shadowed inside the wrapper so every pending wait can be cleared when the
@@ -336,6 +350,11 @@ function wrapEval(code: string, skillLibrary: string, key: string): string {
 			${skillLibrary}
 			const __r = await (async () => { ${code}\n })();
 			try { return JSON.stringify(__r === undefined ? null : __r); } catch (e) { return JSON.stringify(String(__r)); }
+		} catch (__e) {
+			// Return the error as a tagged string, not a throw: Firefox / Zen hands a thrown Error back as {} (message
+			// lost) and Chrome drops a thrown string, so neither browser's error channel carries it reliably.
+			let __m; try { __m = __e && typeof __e.message === "string" ? (__e.name || "Error") + ": " + __e.message : String(__e); } catch { __m = "page script error"; }
+			return ${JSON.stringify(PAGE_ERROR_TAG)} + __m;
 		} finally { delete window.__sgEvalCancel[${key}]; }
 	})()`;
 }
@@ -359,7 +378,7 @@ async function runWithTimeout(
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let timedOut = false;
 	try {
-		return await Promise.race([
+		const raw = await Promise.race([
 			runUserScript(tabId, wrapped, world),
 			new Promise<never>((_, reject) => {
 				timer = setTimeout(() => {
@@ -368,6 +387,9 @@ async function runWithTimeout(
 				}, timeoutMs);
 			}),
 		]);
+		if (typeof raw === "string" && raw.startsWith(PAGE_ERROR_TAG))
+			throw new Error(raw.slice(PAGE_ERROR_TAG.length) || "page script error");
+		return raw;
 	} finally {
 		clearTimeout(timer);
 		// Bounded: when the page runs no scripts at all, the cancel would hang too and the reply would never go out
@@ -445,10 +467,11 @@ const DOWNLOAD_HELPER = `const __sgToTransfer = async (v, max) => {
 	else if (v && typeof v === "object" && typeof v.base64 === "string") blob = await (await fetch("data:" + (v.mime || "application/octet-stream") + ";base64," + v.base64)).blob();
 	else throw new Error("browser_download: code must return a Response, Blob, ArrayBuffer/typed array, data URL, {mime, base64} or text - got " + (v === null ? "null" : typeof v));
 	if (blob.size > max) throw new Error("browser_download: " + blob.size + " bytes exceeds the " + max + " byte limit");
-	const buf = new Uint8Array(await blob.arrayBuffer());
-	let bin = "";
-	for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
-	return { mime: blob.type || "application/octet-stream", bytes: buf.length, base64: btoa(bin), name: name || undefined };
+	// FileReader, not String.fromCharCode.apply(null, typedArray.subarray(...)): in Firefox / Zen's isolated world
+	// that throws "Permission denied to access property constructor", so every isolated-world download failed
+	// (2026-11-07, Jennifer request 502b1bb0). readAsDataURL is native base64 and works in both worlds.
+	const dataUrl = String(await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error || new Error("FileReader failed")); fr.readAsDataURL(blob); }));
+	return { mime: blob.type || "application/octet-stream", bytes: blob.size, base64: dataUrl.slice(dataUrl.indexOf(",") + 1), name: name || undefined };
 };`;
 
 /**
@@ -478,7 +501,9 @@ async function downloadFile(args: Json, windowId: number, callId: string): Promi
 		const raw = await runWithTimeout(id, wrapped, key, timeoutMs, world);
 		const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
 		if (!isJson(parsed) || typeof parsed.base64 !== "string" || typeof parsed.bytes !== "number")
-			return text(`browser_download: unexpected in-page result ${JSON.stringify(parsed).slice(0, 200)}`);
+			return text(
+				`browser_download: unexpected in-page result ${String(JSON.stringify(parsed) ?? parsed).slice(0, 200)} — the code must return a Response, Blob, ArrayBuffer/typed array, data URL, {mime, base64} or text`,
+			);
 		const filename = str(args.filename) ?? str(parsed.name);
 		return {
 			content: [
