@@ -4,6 +4,13 @@
 
 ### Added
 
+- **The agent's name is in the top bar; the Browser agent is retired for new chats** (Tom, 2026-11-08, Zen: "I should be able to tell quickly which agent this is. In the top bar please ... at the LHS before the chat title and more prominent"; "Just get rid of the browser agent please", after asking a Browser agent chat to build something it had no access to).
+  - Header: a bold filled badge (server icon + "main-pi" / "Sed Coach" / …) left of the chat title; the right-hand label shows only the model. On a new chat the agent menu sits in the same place, same weight.
+  - New chats are always R730 chats: `+` keeps the current agent, a fresh panel starts with the last agent used (`sg_last_agent`), else main-pi. The agent menu lists only R730 agents ("main-pi (prime-agent)" shortened to "main-pi"); `?agent=browser` links open main-pi. The Browser agent welcome card and the first-run provider-key dialog are gone.
+  - Old Browser agent chats still open read-only: badge "Browser agent (retired)"; sending shows a toast with **New chat** and keeps the text in the box. The sessions filter lists "Browser agent (old chats)" only while such chats exist; main-pi is "main-pi" there too.
+  - Before the R730 catalog has loaded, a new chat's placeholder model is the bundled list's newest Opus, never claude-sonnet-4-6 (a fresh profile's first chat is main-pi now).
+  - Tests: new `test:header-agent:extension` (badge left of the title, bold, at the left edge; new chat menu without Browser agent; no welcome card; `?agent=browser` → main-pi; screenshots `tests/.out/header-*.png`); prime-model and sessions-sidebar tests updated.
+
 - **Sessions list: agent dropdown, and chats open elsewhere can be opened** (Tom, 2026-11-07, Zen: "I really want the agents list to be a dropdown ... it goes off that sidebar"; "I can't select it for whatever reason").
   - The agent filter is one dropdown ("All agents", Browser agent, prime-agent, each coach): mini-lit `Select`, the same component as the thinking menu. Its popup is a fixed portal, so the sidebar never clips it. The row of chips ran off the sidebar with seven agents.
   - A chat another panel has open (another window's sidebar, or a panel tab) was greyed out, ignored clicks, and its "Locked" label was cut off at the end of the row. Now its second line starts with "Open in another window" / "Open in a sitegeist tab", and a click offers "Open here anyway" (the take-over the URL path already had: the other panel is told and moves to a new chat). `offerTakeOver()` in sidepanel.ts serves both paths.

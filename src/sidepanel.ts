@@ -23,8 +23,9 @@ import {
 	setAppStorage,
 	setShowJsonMode,
 } from "@mariozechner/pi-web-ui";
-import { html, render } from "lit";
-import { Columns2, History, Link2, Link2Off, Minus, Plus, Settings } from "lucide";
+import { html, render, type TemplateResult } from "lit";
+import { Columns2, Globe, History, Link2, Link2Off, Minus, Plus, Server, Settings } from "lucide";
+import { BrowserActivityReporter } from "./activity-report.js";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
 import { isArtifactsViewer } from "./components/artifacts-fullscreen.js";
 import { artifactsMaximizeActive, escapeRestoresChat, setArtifactsMaximized } from "./components/artifacts-maximize.js";
@@ -39,21 +40,15 @@ import { CostsTab } from "./dialogs/CostsTab.js";
 import { InstructionsTab } from "./dialogs/InstructionsTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { catalogProviders, isCatalogProvider } from "./models-registry.js";
-import { BrowserActivityReporter } from "./activity-report.js";
 import "./components/SessionsSidebar.js";
 import { ModelMenu } from "./components/ModelMenu.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
-import { WelcomeSetupDialog } from "./dialogs/WelcomeSetupDialog.js";
 import { browserMessageTransformer } from "./messages/message-transformer.js";
-import {
-	createNavigationMessage,
-	type NavigationMessage,
-	registerNavigationRenderer,
-} from "./messages/NavigationMessage.js";
+import { createNavigationMessage, registerNavigationRenderer } from "./messages/NavigationMessage.js";
 import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
-import { createWelcomeMessage, registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
+import { registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { cachedModels, MODELS_FRESH_MS, refreshModels, warmModelCache } from "./prime/model-cache.js";
@@ -128,7 +123,6 @@ import {
 import "./utils/i18n-extension.js";
 import "./utils/live-reload.js";
 import { proxyToken, syncWithServer } from "./sync.js";
-import { tutorials } from "./tutorials.js";
 import { selectionToMarkdown } from "./utils/selection-markdown.js";
 
 // Register custom message renderers
@@ -214,7 +208,8 @@ let currentTitle = "";
 const browserActivity = new BrowserActivityReporter();
 let nextBrowserSessionId: string | undefined;
 /** Row label for a browser-mode chat: its title, else its short id. */
-const browserActivityWhere = (id: string): string => (currentTitle ? currentTitle.replace(/\s+/g, " ").trim().slice(0, 80) : `browser-${id.slice(0, 8)}`);
+const browserActivityWhere = (id: string): string =>
+	currentTitle ? currentTitle.replace(/\s+/g, " ").trim().slice(0, 80) : `browser-${id.slice(0, 8)}`;
 let isEditingTitle = false;
 let sessionsSidebarOpen = false;
 let draftStorageWarning = false;
@@ -268,23 +263,56 @@ let toolCallsCollapsed = false;
 export const TOOL_CALLS_COLLAPSED_SETTING = "ui.toolCallsCollapsed";
 let agent: Agent;
 let chatPanel: ChatPanel;
-/** Which brain drives the current session: the in-browser agent (default) or a relay agent id ("prime" = main-pi, or a worker). */
+/**
+ * Which agent drives the current session: a relay agent id ("prime" = main-pi, or a coach). "browser" is only the
+ * kind of old chats: the in-browser agent was retired for new chats (Tom, 2026-11-08: "Just get rid of the browser
+ * agent please", after asking a Browser agent chat to build something it had no access to).
+ */
 type AgentKind = string;
-let agentKind: AgentKind = "browser";
-let agentOptions: { value: string; label: string }[] = [
-	{ value: "browser", label: "Browser agent" },
-	{ value: MAIN_AGENT_ID, label: "prime-agent" },
-];
+const LAST_AGENT_KEY = "sg_last_agent";
+let agentOptions: { value: string; label: string }[] = [{ value: MAIN_AGENT_ID, label: "main-pi" }];
+/** The agent a new chat starts with: the last one Tom used, else main-pi. */
+function defaultAgentKind(): AgentKind {
+	const last = localStorage.getItem(LAST_AGENT_KEY);
+	return last && /^[a-z0-9]{1,40}$/.test(last) && last !== "browser" ? last : MAIN_AGENT_ID;
+}
+let agentKind: AgentKind = defaultAgentKind();
 const agentLabelFor = (id: string): string => agentOptions.find((o) => o.value === id)?.label ?? id;
+
+/** Short name for the header badge: "Browser agent", "main-pi", "Sed Coach", … */
+function headerAgentName(a: Agent | PrimeRemoteAgent): string {
+	if (!isPrimeAgent(a)) return "Browser agent (retired)";
+	const label = agentLabelFor(a.agentId).replace(/\s*\(prime-agent\)$/, "");
+	return a.agentId === MAIN_AGENT_ID && (label === "prime-agent" || label === MAIN_AGENT_ID) ? "main-pi" : label;
+}
+
+/**
+ * Which agent this chat talks to, always in the top bar (Tom, 2026-11-08: "I should be able to tell quickly which
+ * agent this is. In the top bar please"). He asked a Browser agent chat to build something, thinking it was a coach;
+ * the header only said "anthropic via proxy". New chats show the agent menu here instead.
+ */
+function headerAgentBadge(a: Agent | PrimeRemoteAgent): TemplateResult {
+	const prime = isPrimeAgent(a);
+	const name = headerAgentName(a);
+	const tip = prime
+		? `${name}: an agent on the R730, with its own tools and memory`
+		: "An old Browser agent chat (retired 2026-11-08): read-only. Start a new chat with + to talk to an R730 agent.";
+	return html`<span
+		class="sg-agent-badge shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm font-semibold whitespace-nowrap max-w-[170px] ${prime ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}"
+		data-agent=${prime ? a.agentId : "browser"}
+		title=${tip}
+		>${icon(prime ? Server : Globe, "sm")}<span class="truncate">${name}</span></span
+	>`;
+}
 /** Refresh the agent dropdown from the relay (main-pi + worker prime sidecars); keeps the static pair on failure. */
 const refreshAgentOptions = async (): Promise<void> => {
 	try {
 		const list = await primeAgents();
 		if (list.length === 0) return;
-		agentOptions = [
-			{ value: "browser", label: "Browser agent" },
-			...list.map((a) => ({ value: a.id, label: a.ok ? a.label : `${a.label} (offline)` })),
-		];
+		agentOptions = list.map((a) => {
+			const label = a.label.replace(/\s*\(prime-agent\)$/, ""); // "main-pi (prime-agent)" -> "main-pi", as on the badge
+			return { value: a.id, label: a.ok ? label : `${label} (offline)` };
+		});
 	} catch (err) {
 		console.warn("[prime] agent list unavailable", err);
 	}
@@ -388,38 +416,6 @@ const DEFAULT_MODELS: Record<string, string> = {
 	zai: "glm-4.6",
 };
 
-async function selectDefaultModelForAvailableProvider() {
-	const providers = await getProvidersWithKeys();
-	if (providers.length === 0 || !agent) return;
-
-	// Try each provider with keys and find a default model
-	for (const provider of providers) {
-		const modelId = DEFAULT_MODELS[provider];
-		if (modelId) {
-			const model = getModel(provider as any, modelId);
-			if (model) {
-				agent.setModel(model);
-				await storage.settings.set("lastUsedModel", model);
-				await updateAuthLabel();
-				renderApp();
-				return;
-			}
-		}
-	}
-
-	// If no default found, try the first model for the first provider with a key
-	for (const provider of providers) {
-		const models = getModels(provider as any);
-		if (models.length > 0) {
-			agent.setModel(models[0]);
-			await storage.settings.set("lastUsedModel", models[0]);
-			await updateAuthLabel();
-			renderApp();
-			return;
-		}
-	}
-}
-
 /**
  * Providers the Browser agent can use: those served by the proxy catalog (callable with the shared proxy
  * token - the proxy injects the real credential, see /upstream on cors-proxy) plus any the user holds a
@@ -433,12 +429,6 @@ async function getProvidersWithKeys(): Promise<string[]> {
 		if (key) result.add(provider);
 	}
 	return Array.from(result);
-}
-
-async function hasAnyApiKey(): Promise<boolean> {
-	if ((await proxyToken()) && catalogProviders().length > 0) return true;
-	const providers = await storage.providerKeys.list();
-	return providers.length > 0;
 }
 
 function openApiKeysDialog(): Promise<void> {
@@ -767,7 +757,10 @@ function keepSession(messages: AgentMessage[]): void {
 
 	if (!currentSessionId && shouldSaveSession(messages)) {
 		// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
-		currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : (nextBrowserSessionId ?? crypto.randomUUID());
+		currentSessionId =
+			isPrimeAgent(agent) && agent.primeSessionId
+				? agent.primeSessionId
+				: (nextBrowserSessionId ?? crypto.randomUUID());
 		nextBrowserSessionId = undefined;
 		promotePromptDraft(draftScope(), currentSessionId);
 		void promoteDraftAttachments(draftScope(), currentSessionId);
@@ -798,7 +791,7 @@ function keepSession(messages: AgentMessage[]): void {
 const createAgent = async (
 	initialState?: Partial<AgentState>,
 	shouldSave = true,
-	kind: AgentKind = "browser",
+	kind: AgentKind = defaultAgentKind(),
 	primeSessionId?: string,
 ) => {
 	if (agentUnsubscribe) {
@@ -808,6 +801,7 @@ const createAgent = async (
 	configurePromptDraft(draftScope(), currentSessionId);
 	configureDraftAttachments(draftScope(), currentSessionId);
 	agentKind = kind;
+	if (kind !== "browser") localStorage.setItem(LAST_AGENT_KEY, kind);
 
 	// Mark all loaded messages as already recorded (by object identity)
 	for (const msg of initialState?.messages || []) {
@@ -880,8 +874,10 @@ const createAgent = async (
 			initialState?.model ??
 			interactiveDefault ??
 			getModels("anthropic").find((m) => m.id === "claude-opus-4-8") ??
-			getModel("anthropic", "claude-sonnet-4-6") ??
-			defaultModel;
+			// before the R730 catalog has loaded: the bundled list's newest Opus (computed above), never a Sonnet
+			// (2026-11-08: with the Browser agent retired, a fresh profile's first chat is main-pi and showed sonnet-4-6)
+			defaultModel ??
+			getModel("anthropic", "claude-sonnet-4-6");
 		if (!placeholder) throw new Error("No model available for the prime placeholder");
 		const prime: PrimeRemoteAgent = new PrimeRemoteAgent({
 			agentId: kind,
@@ -1055,17 +1051,30 @@ const createAgent = async (
 
 			if (!isPrimeAgent(agent)) {
 				if (event.type === "agent_start") {
-					const id = currentSessionId ?? (nextBrowserSessionId ??= crypto.randomUUID());
+					if (!currentSessionId && !nextBrowserSessionId) nextBrowserSessionId = crypto.randomUUID();
+					const id = currentSessionId ?? nextBrowserSessionId ?? "";
 					const lastUser = [...messages].reverse().find((m) => m.role === "user");
 					const content = lastUser && "content" in lastUser ? lastUser.content : "";
-					const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (c.type === "text" ? c.text : "")).join(" ") : "";
+					const text =
+						typeof content === "string"
+							? content
+							: Array.isArray(content)
+								? content.map((c) => (c.type === "text" ? c.text : "")).join(" ")
+								: "";
 					browserActivity.started(id, text, browserActivityWhere(id));
 				} else if (event.type === "agent_end") {
 					const last = [...event.messages].reverse().find((m) => m.role === "assistant");
 					const stop = last && "stopReason" in last ? last.stopReason : undefined;
-					const err = last && "errorMessage" in last && typeof last.errorMessage === "string" ? last.errorMessage : undefined;
+					const err =
+						last && "errorMessage" in last && typeof last.errorMessage === "string"
+							? last.errorMessage
+							: undefined;
 					const id = currentSessionId ?? nextBrowserSessionId ?? "";
-					browserActivity.ended(stop === "aborted" ? "stopped" : stop === "error" ? "failed" : "done", browserActivityWhere(id), err);
+					browserActivity.ended(
+						stop === "aborted" ? "stopped" : stop === "error" ? "failed" : "done",
+						browserActivityWhere(id),
+						err,
+					);
 				}
 			}
 
@@ -1168,32 +1177,20 @@ const createAgent = async (
 			});
 		},
 		onBeforeSend: async () => {
-			clearAgentTab(); // Tom's new prompt: the page beside a panel tab is the target again
-			if (!agent || isPrimeAgent(agent)) return; // prime gets its page context inside the prompt itself
-
-			// The page sitegeist works on (side panel: the active tab; panel tab: the page beside it)
-			const tab = await targetTab();
-			if (!tab?.url || tab.url.startsWith("chrome-extension://") || tab.url.startsWith("moz-extension://")) return;
-
-			// Find most recent navigation (either nav message or nav tool result)
-			let lastUrl: string | undefined;
-			for (let i = agent.state.messages.length - 1; i >= 0; i--) {
-				const msg = agent.state.messages[i];
-				if (msg.role === "navigation") {
-					lastUrl = (msg as NavigationMessage).url;
-					break;
-				}
-				if (msg.role === "toolResult" && (msg as any).toolName === "navigate") {
-					lastUrl = (msg as any).details?.finalUrl;
-					break;
-				}
+			if (agent && !isPrimeAgent(agent)) {
+				// Old Browser agent chats are read-only (retired 2026-11-08). Throwing here keeps the text in the box.
+				Toast.show(
+					"The Browser agent is retired, so this old chat is read-only. Start a new chat to talk to an R730 agent.",
+					"info",
+					10_000,
+					{
+						label: "New chat",
+						onClick: () => newSession(),
+					},
+				);
+				throw new Error("browser agent retired");
 			}
-
-			// Only add if URL changed
-			if (!lastUrl || lastUrl !== tab.url) {
-				const navMessage = await createNavigationMessage(tab.url, tab.title || "Untitled", tab.favIconUrl, tab.id);
-				agent.appendMessage(navMessage);
-			}
+			clearAgentTab(); // Tom's new prompt: the page beside a panel tab is the target again // prime gets its page context inside the prompt itself
 		},
 		onCostClick: () => {
 			if (!agent) return;
@@ -1312,13 +1309,13 @@ function offerTakeOver(sessionId: string, title: string, heldByTab: boolean): vo
 	});
 }
 
-const newSession = (kind: AgentKind = "browser") => {
+const newSession = (kind: AgentKind = agentKind !== "browser" ? agentKind : defaultAgentKind()) => {
 	suppressAutoResumeForActivePage();
 	clearPromptDraft(draftScope()); // Explicit New starts empty; saved-chat drafts remain separate.
 	void clearDraftAttachments(draftScope());
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
-	url.search = kind !== "browser" ? `?new=true&agent=${encodeURIComponent(kind)}` : "?new=true";
+	url.search = `?new=true&agent=${encodeURIComponent(kind)}`;
 	keepPanelPlace(url);
 	window.location.href = url.toString();
 };
@@ -1441,7 +1438,6 @@ const switchAgentKind = async (kind: AgentKind) => {
 		return;
 	}
 	await createAgent(undefined, true, kind);
-	if (kind === "browser" && agent) agent.appendMessage(createWelcomeMessage(tutorials));
 	renderApp();
 };
 
@@ -1473,18 +1469,20 @@ const renderApp = () => {
 					})}
 					${
 						// Agent is a choice for a brand-new session only (Tom, 2026-09-05): once anything has been sent the
-						// session is bound to its harness, so the control disappears (the model label still says prime/local).
-						!currentSessionId && !agent?.state.messages.some((m) => m.role === "user")
-							? Select({
+						// session is bound to its agent, so the menu becomes the agent badge (headerAgentBadge).
+						!currentSessionId && isPrimeAgent(agent) && !agent.state.messages.some((m) => m.role === "user")
+							? html`<span class="sg-agent-pick shrink-0">${Select({
 									value: agentKind,
 									options: agentOptions,
 									onChange: (value: string) => void switchAgentKind(value),
 									size: "sm",
-									variant: "ghost",
+									variant: "outline",
 									fitContent: true,
-									className: "text-xs",
-								})
-							: ""
+									className: "text-sm font-semibold",
+								})}</span>`
+							: agent
+								? headerAgentBadge(agent)
+								: ""
 					}
 					${
 						isPrimeAgent(agent)
@@ -1596,7 +1594,7 @@ const renderApp = () => {
 				<div class="flex items-center gap-1 px-2">
 					${
 						isPrimeAgent(agent)
-							? html`<span class="text-[10px] text-muted-foreground truncate max-w-[160px]" title="${agent.agentLabel} · ${agent.remoteModel?.provider ?? ""}/${agent.state.model.id} on the R730">${agent.agentLabel} · ${agent.state.model.id}</span>`
+							? html`<span class="text-[10px] text-muted-foreground truncate max-w-[160px]" title="${agent.remoteModel?.provider ?? ""}/${agent.state.model.id} on the R730">${agent.state.model.id}</span>`
 							: agent
 								? html`<span class="text-[10px] text-muted-foreground truncate max-w-[120px]" title="${agent.state.model.provider}/${agent.state.model.id}${authLabel ? ` (${authLabel})` : ""}">${agent.state.model.provider}${authLabel ? html` <span class="text-[9px] opacity-70">${authLabel}</span>` : ""}</span>`
 								: ""
@@ -2040,7 +2038,10 @@ async function initApp() {
 	let sessionIdFromUrl = urlParams.get("session");
 	const isNewSession = urlParams.get("new") === "true";
 	const requestedAgent = urlParams.get("agent");
-	const requestedKind: AgentKind = requestedAgent && /^[a-z0-9]+$/.test(requestedAgent) ? requestedAgent : "browser";
+	const requestedKind: AgentKind =
+		requestedAgent && /^[a-z0-9]+$/.test(requestedAgent) && requestedAgent !== "browser"
+			? requestedAgent
+			: defaultAgentKind();
 	let resumedKey = urlParams.get("resumed") ?? undefined;
 	let resumedFrom = urlParams.get("from") ?? undefined;
 	if (resumedKey !== undefined) {
@@ -2110,7 +2111,6 @@ async function initApp() {
 		if (remote && !remote.found) {
 			const wanted = sessionIdFromUrl;
 			await createAgent(undefined, true, requestedKind);
-			if (agent && !isPrimeAgent(agent)) agent.appendMessage(createWelcomeMessage(tutorials));
 			currentAnchors = [];
 			appReady = true;
 			renderApp();
@@ -2139,10 +2139,6 @@ async function initApp() {
 				const wanted = sessionIdFromUrl;
 				const title = (await storage.sessions.getMetadata(wanted))?.title || "This chat";
 				await createAgent();
-				if (agent) {
-					const welcomeMessage = createWelcomeMessage(tutorials);
-					agent.appendMessage(welcomeMessage);
-				}
 				appReady = true;
 				renderApp();
 				offerTakeOver(wanted, title, lockResponse.owner?.startsWith("t:") === true);
@@ -2190,26 +2186,11 @@ async function initApp() {
 		}
 	}
 
-	// No session - create new agent with welcome message
+	// No session: a new chat with an R730 agent (no Browser agent welcome card or provider-key setup any more)
 	await createAgent(undefined, true, requestedKind);
-
-	// Add welcome message for new sessions (the browser agent's tutorial card; prime has no use for it)
-	if (agent && !isPrimeAgent(agent)) {
-		const welcomeMessage = createWelcomeMessage(tutorials);
-		agent.appendMessage(welcomeMessage);
-	}
-
 	currentAnchors = [];
 	appReady = true;
 	renderApp();
-
-	// If no API keys configured, show welcome dialog, open settings, then auto-select model
-	if (!(await hasAnyApiKey())) {
-		await WelcomeSetupDialog.show();
-		await openApiKeysDialog();
-		await selectDefaultModelForAvailableProvider();
-		renderApp();
-	}
 }
 
 // Register custom user message renderer early, before any session loads

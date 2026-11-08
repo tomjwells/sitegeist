@@ -346,27 +346,27 @@ test(
 			await boot.goto(`${panelUrl}?new=true`);
 			await dismissPermissionDialog(boot);
 			await boot.waitForSelector("sessions-sidebar", { timeout: 30_000, state: "attached" });
-			// The Browser agent's default in a fresh profile is the interactive default too (Tom, 2026-10-25: "why is it
-			// defaulting to sonnet?" - upstream's claude-sonnet-4-6 was still the fallback). Before the R730 catalog has
-			// loaded (this first page: no catalog URL yet) the bundled list's newest Opus stands in; never a Sonnet.
+			// A new chat in a fresh profile (main-pi since the Browser agent was retired, 2026-11-08) shows the interactive
+			// default (Tom, 2026-10-25: "why is it defaulting to sonnet?"). Before the R730 catalog has loaded (this first
+			// page: no catalog URL yet) the bundled list's newest Opus stands in; never a Sonnet.
 			await until(
 				() => boot.evaluate(() => document.body.innerText),
 				(t) => /claude-opus-\d/.test(t) && !t.includes("claude-sonnet-4-6"),
 				15_000,
-				"browser agent default label (bundled list)",
+				"new chat default label (bundled list)",
 			);
 			await seedSetting(boot, "sync.url", `${base}/sitegeist`);
 			await seedSetting(boot, "models.catalogUrl", `${base}/models`);
 			await seedSetting(boot, "sync.token", "test-token");
 			const page = boot;
-			// With the catalog in: a fresh Browser-agent chat shows claude-opus-5-5 itself.
+			// With the catalog in: a fresh chat shows claude-opus-5-5 itself.
 			await page.goto(`${panelUrl}?new=true`);
 			await dismissPermissionDialog(page);
 			await until(
 				() => page.evaluate(() => document.body.innerText),
 				(t) => t.includes("claude-opus-5-5") && !t.includes("claude-sonnet-4-6"),
 				15_000,
-				"browser agent default label (catalog)",
+				"new chat default label (catalog)",
 			);
 			await page.goto(`${panelUrl}?new=true&agent=prime`);
 			await dismissPermissionDialog(page);

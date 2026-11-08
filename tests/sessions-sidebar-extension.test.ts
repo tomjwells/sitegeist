@@ -163,7 +163,7 @@ test(
 				5_000,
 				"dropdown options",
 			);
-			for (const want of ["All agents", "prime-agent", ...AGENTS])
+			for (const want of ["All agents", "main-pi", ...AGENTS])
 				assert.ok(options.includes(want), `option ${want} in ${JSON.stringify(options)}`);
 			await page.screenshot({ path: join(out, "sessions-agent-dropdown.png") });
 			await page.locator(".select-portal-container").getByText("sedcoach", { exact: true }).click();

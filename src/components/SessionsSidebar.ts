@@ -246,15 +246,15 @@ export class SessionsSidebar extends LitElement {
 	 */
 	private filterLabel(f: string): string {
 		if (f === "all") return "All agents";
-		if (f === "browser") return "Browser agent";
-		return f === MAIN_AGENT_ID ? "prime-agent" : f;
+		if (f === "browser") return "Browser agent (old chats)";
+		return f === MAIN_AGENT_ID ? "main-pi" : f;
 	}
 
 	private filterOptions(): string[] {
-		const agents = Array.from(
-			new Set(this.sessions.map((s) => this.agentOf(s.id)).filter((a) => a !== "browser")),
-		).sort();
-		return ["all", "browser", ...agents];
+		const all = this.sessions.map((s) => this.agentOf(s.id));
+		const agents = Array.from(new Set(all.filter((a) => a !== "browser"))).sort();
+		// The Browser agent is retired (2026-11-08): its option stays only while old chats of it exist
+		return ["all", ...agents, ...(all.includes("browser") ? ["browser"] : [])];
 	}
 
 	/** Search results computed in render (plain field, not @state: setting state during render would loop). */

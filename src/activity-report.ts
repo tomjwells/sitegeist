@@ -6,8 +6,9 @@
  * POST <sync base>/activity { sessionId, event, prompt?, where?, outcome?, error? } with the proxy token; the
  * relay forwards to the Telegram router's activity table. Best effort: never throws, never blocks a turn.
  */
-import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "./sync.js";
+
 import { getSitegeistStorage } from "./storage/app-storage.js";
+import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "./sync.js";
 
 const HEARTBEAT_MS = 60_000;
 const TIMEOUT_MS = 5000;
@@ -62,7 +63,13 @@ export class BrowserActivityReporter {
 		const run = this.running;
 		if (!run) return;
 		this.stopTimer();
-		void post({ sessionId: run.sessionId, event: "ended", outcome, where, ...(error ? { error: error.slice(0, 400) } : {}) });
+		void post({
+			sessionId: run.sessionId,
+			event: "ended",
+			outcome,
+			where,
+			...(error ? { error: error.slice(0, 400) } : {}),
+		});
 	}
 
 	private stopTimer(): void {
