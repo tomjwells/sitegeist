@@ -39,6 +39,7 @@ import { CostsTab } from "./dialogs/CostsTab.js";
 import { InstructionsTab } from "./dialogs/InstructionsTab.js";
 import { SessionCostDialog } from "./dialogs/SessionCostDialog.js";
 import { catalogProviders, isCatalogProvider } from "./models-registry.js";
+import { BrowserActivityReporter } from "./activity-report.js";
 import "./components/SessionsSidebar.js";
 import { ModelMenu } from "./components/ModelMenu.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
@@ -208,6 +209,12 @@ setAppStorage(storage);
 // ============================================================================
 let currentSessionId: string | undefined;
 let currentTitle = "";
+// Browser-mode turns are reported to the router's activity table (activity-report.ts). A new chat has no id until
+// its first reply is saved, so the id is chosen at the first turn's start and used when the chat is saved.
+const browserActivity = new BrowserActivityReporter();
+let nextBrowserSessionId: string | undefined;
+/** Row label for a browser-mode chat: its title, else its short id. */
+const browserActivityWhere = (id: string): string => (currentTitle ? currentTitle.replace(/\s+/g, " ").trim().slice(0, 80) : `browser-${id.slice(0, 8)}`);
 let isEditingTitle = false;
 let sessionsSidebarOpen = false;
 let draftStorageWarning = false;
@@ -760,7 +767,8 @@ function keepSession(messages: AgentMessage[]): void {
 
 	if (!currentSessionId && shouldSaveSession(messages)) {
 		// prime sessions reuse the bridge session id, so the sidebar entry IS the native harness session
-		currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : crypto.randomUUID();
+		currentSessionId = isPrimeAgent(agent) && agent.primeSessionId ? agent.primeSessionId : (nextBrowserSessionId ?? crypto.randomUUID());
+		nextBrowserSessionId = undefined;
 		promotePromptDraft(draftScope(), currentSessionId);
 		void promoteDraftAttachments(draftScope(), currentSessionId);
 		if (isPrimeAgent(agent) && currentTitle) void agent.rename(currentTitle);
@@ -1044,6 +1052,22 @@ const createAgent = async (
 			const messages = agent.state.messages;
 
 			if (event.type === "agent_start") void captureTurnAnchor();
+
+			if (!isPrimeAgent(agent)) {
+				if (event.type === "agent_start") {
+					const id = currentSessionId ?? (nextBrowserSessionId ??= crypto.randomUUID());
+					const lastUser = [...messages].reverse().find((m) => m.role === "user");
+					const content = lastUser && "content" in lastUser ? lastUser.content : "";
+					const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (c.type === "text" ? c.text : "")).join(" ") : "";
+					browserActivity.started(id, text, browserActivityWhere(id));
+				} else if (event.type === "agent_end") {
+					const last = [...event.messages].reverse().find((m) => m.role === "assistant");
+					const stop = last && "stopReason" in last ? last.stopReason : undefined;
+					const err = last && "errorMessage" in last && typeof last.errorMessage === "string" ? last.errorMessage : undefined;
+					const id = currentSessionId ?? nextBrowserSessionId ?? "";
+					browserActivity.ended(stop === "aborted" ? "stopped" : stop === "error" ? "failed" : "done", browserActivityWhere(id), err);
+				}
+			}
 
 			if (!isPrimeAgent(agent)) {
 				storage.settings
