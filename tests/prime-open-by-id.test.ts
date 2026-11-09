@@ -42,6 +42,20 @@ async function dismissPermissionDialog(page: Page): Promise<void> {
 	);
 }
 
+/**
+ * Dismiss the userScripts permission dialog until the panel has rendered. The dialog can appear after the first
+ * dismiss (about 1 run in 6 in a fresh profile), and it holds the panel on "Loading..." until closed.
+ */
+async function panelReady(page: Page): Promise<void> {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		await dismissPermissionDialog(page);
+		if (await page.$("sessions-sidebar")) return;
+		await new Promise((r) => setTimeout(r, 200));
+	}
+	throw new Error("panel did not render (sessions-sidebar missing)");
+}
+
 /** A fresh profile pointed at the stand-in relay; returns the panel URL. */
 async function openProfile(syncUrl: string): Promise<{ context: BrowserContext; panelUrl: string; dir: string }> {
 	const dir = await mkdtemp(join(tmpdir(), "sitegeist-open-by-id-"));
@@ -55,8 +69,7 @@ async function openProfile(syncUrl: string): Promise<{ context: BrowserContext; 
 	const panelUrl = `chrome-extension://${new URL(worker.url()).host}/sidepanel.html`;
 	const boot = await context.newPage();
 	await boot.goto(`${panelUrl}?new=true`);
-	await dismissPermissionDialog(boot);
-	await boot.waitForSelector("sessions-sidebar", { timeout: 30_000, state: "attached" });
+	await panelReady(boot);
 	await boot.evaluate(async (url) => {
 		const db = await new Promise<IDBDatabase>((resolve, reject) => {
 			const req = indexedDB.open("sitegeist-storage");
@@ -176,8 +189,7 @@ test("a pasted R730 chat id opens the chat from the R730; an unknown id says so"
 	try {
 		const page = await context.newPage();
 		await page.goto(`${panelUrl}?new=true`);
-		await dismissPermissionDialog(page);
-		await page.waitForSelector("sessions-sidebar", { timeout: 30_000, state: "attached" });
+		await panelReady(page);
 		assert.ok(!(SID in (await listed(page))), "this browser has never seen the chat");
 
 		// Paste the id: not in the list, but the sidebar offers to open it from the R730.
@@ -211,8 +223,7 @@ test("a pasted R730 chat id opens the chat from the R730; an unknown id says so"
 
 		// An id the R730 does not have: said so, back on a new chat, nothing created.
 		await page.goto(`${panelUrl}?new=true`);
-		await dismissPermissionDialog(page);
-		await page.waitForSelector("sessions-sidebar", { timeout: 30_000, state: "attached" });
+		await panelReady(page);
 		await search(page, "sg-3c3c3c3c3c3c");
 		await page.waitForSelector("sessions-sidebar .sg-open-r730", { timeout: 15_000 });
 		await page.evaluate(() =>

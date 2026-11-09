@@ -269,14 +269,15 @@ let chatPanel: ChatPanel;
  * agent please", after asking a Browser agent chat to build something it had no access to).
  */
 type AgentKind = string;
-const LAST_AGENT_KEY = "sg_last_agent";
 let agentOptions: { value: string; label: string }[] = [{ value: MAIN_AGENT_ID, label: "main-pi" }];
-/** The agent a new chat starts with: the last one Tom used, else main-pi. */
-function defaultAgentKind(): AgentKind {
-	const last = localStorage.getItem(LAST_AGENT_KEY);
-	return last && /^[a-z0-9]{1,40}$/.test(last) && last !== "browser" ? last : MAIN_AGENT_ID;
-}
-let agentKind: AgentKind = defaultAgentKind();
+let agentKind: AgentKind = MAIN_AGENT_ID;
+/**
+ * A new chat has no agent until Tom picks one (Tom, 2026-11-08: "when you create a new chat, you're forced to pick
+ * one of the agents"). Until then the panel holds a main-pi placeholder that never sends: the header menu says "Pick
+ * an agent" and a send is refused. A `?agent=<id>` in the URL (a pick that started a fresh chat, open-beside) counts
+ * as picked.
+ */
+let agentChosen = false;
 const agentLabelFor = (id: string): string => agentOptions.find((o) => o.value === id)?.label ?? id;
 
 /** Short name for the header badge: "Browser agent", "main-pi", "Sed Coach", … */
@@ -791,7 +792,7 @@ function keepSession(messages: AgentMessage[]): void {
 const createAgent = async (
 	initialState?: Partial<AgentState>,
 	shouldSave = true,
-	kind: AgentKind = defaultAgentKind(),
+	kind: AgentKind = MAIN_AGENT_ID,
 	primeSessionId?: string,
 ) => {
 	if (agentUnsubscribe) {
@@ -801,7 +802,6 @@ const createAgent = async (
 	configurePromptDraft(draftScope(), currentSessionId);
 	configureDraftAttachments(draftScope(), currentSessionId);
 	agentKind = kind;
-	if (kind !== "browser") localStorage.setItem(LAST_AGENT_KEY, kind);
 
 	// Mark all loaded messages as already recorded (by object identity)
 	for (const msg of initialState?.messages || []) {
@@ -1177,6 +1177,12 @@ const createAgent = async (
 			});
 		},
 		onBeforeSend: async () => {
+			if (isPrimeAgent(agent) && !currentSessionId && !agentChosen) {
+				// A new chat needs an agent first (Tom, 2026-11-08). Throwing keeps the text in the box.
+				Toast.show("Pick an agent for this chat first.", "info", 6000);
+				document.querySelector<HTMLButtonElement>(".sg-agent-pick button")?.click();
+				throw new Error("no agent picked");
+			}
 			if (agent && !isPrimeAgent(agent)) {
 				// Old Browser agent chats are read-only (retired 2026-11-08). Throwing here keeps the text in the box.
 				Toast.show(
@@ -1309,13 +1315,14 @@ function offerTakeOver(sessionId: string, title: string, heldByTab: boolean): vo
 	});
 }
 
-const newSession = (kind: AgentKind = agentKind !== "browser" ? agentKind : defaultAgentKind()) => {
+/** A fresh chat; with `kind` the agent is already picked, without it Tom picks one first. */
+const newSession = (kind?: AgentKind) => {
 	suppressAutoResumeForActivePage();
 	clearPromptDraft(draftScope()); // Explicit New starts empty; saved-chat drafts remain separate.
 	void clearDraftAttachments(draftScope());
 	// Navigation will disconnect port and auto-release locks. New sessions default to the browser agent (Tom, 2026-09-05).
 	const url = new URL(window.location.href);
-	url.search = `?new=true&agent=${encodeURIComponent(kind)}`;
+	url.search = kind ? `?new=true&agent=${encodeURIComponent(kind)}` : "?new=true";
 	keepPanelPlace(url);
 	window.location.href = url.toString();
 };
@@ -1431,12 +1438,17 @@ function moveBesidePage(): void {
 
 /** Per-session agent choice: swap in place while the session is still empty, otherwise start a fresh one. */
 const switchAgentKind = async (kind: AgentKind) => {
-	if (kind === agentKind) return;
+	if (kind === agentKind) {
+		agentChosen = true; // picking the placeholder agent itself (main-pi)
+		renderApp();
+		return;
+	}
 	const hasUserMessage = agent?.state.messages.some((m) => m.role === "user");
 	if (hasUserMessage || currentSessionId) {
 		newSession(kind);
 		return;
 	}
+	agentChosen = true;
 	await createAgent(undefined, true, kind);
 	renderApp();
 };
@@ -1471,15 +1483,18 @@ const renderApp = () => {
 						// Agent is a choice for a brand-new session only (Tom, 2026-09-05): once anything has been sent the
 						// session is bound to its agent, so the menu becomes the agent badge (headerAgentBadge).
 						!currentSessionId && isPrimeAgent(agent) && !agent.state.messages.some((m) => m.role === "user")
-							? html`<span class="sg-agent-pick shrink-0">${Select({
-									value: agentKind,
-									options: agentOptions,
-									onChange: (value: string) => void switchAgentKind(value),
-									size: "sm",
-									variant: "outline",
-									fitContent: true,
-									className: "text-sm font-semibold",
-								})}</span>`
+							? html`<span class="sg-agent-pick shrink-0 rounded-md ${agentChosen ? "" : "ring-2 ring-primary"}" data-picked=${agentChosen ? "true" : "false"}>${Select(
+									{
+										value: agentChosen ? agentKind : "",
+										placeholder: "Pick an agent",
+										options: agentOptions,
+										onChange: (value: string) => void switchAgentKind(value),
+										size: "sm",
+										variant: "outline",
+										fitContent: true,
+										className: "text-sm font-semibold",
+									},
+								)}</span>`
 							: agent
 								? headerAgentBadge(agent)
 								: ""
@@ -1989,7 +2004,7 @@ async function initApp() {
 		// Another panel took this chat over ("Open here anyway"): let go here. Unsent text/files stay in this panel's draft.
 		Toast.show("This chat was opened in another panel; this one starts fresh.", "info", 6000);
 		if (agent && !isPrimeAgent(agent) && agent.state.isStreaming) agent.abort();
-		newSession(agentKind);
+		newSession();
 	});
 
 	// TODO reenable Request persistent storage
@@ -2038,10 +2053,9 @@ async function initApp() {
 	let sessionIdFromUrl = urlParams.get("session");
 	const isNewSession = urlParams.get("new") === "true";
 	const requestedAgent = urlParams.get("agent");
-	const requestedKind: AgentKind =
-		requestedAgent && /^[a-z0-9]+$/.test(requestedAgent) && requestedAgent !== "browser"
-			? requestedAgent
-			: defaultAgentKind();
+	const explicitAgent = !!requestedAgent && /^[a-z0-9]+$/.test(requestedAgent) && requestedAgent !== "browser";
+	const requestedKind: AgentKind = explicitAgent && requestedAgent ? requestedAgent : MAIN_AGENT_ID;
+	agentChosen = explicitAgent;
 	let resumedKey = urlParams.get("resumed") ?? undefined;
 	let resumedFrom = urlParams.get("from") ?? undefined;
 	if (resumedKey !== undefined) {

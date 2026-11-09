@@ -1,7 +1,8 @@
 /**
  * Top bar names the agent (Tom, 2026-11-08: "I should be able to tell quickly which agent this is. In the top bar
  * please ... at the LHS before the chat title and more prominent"), and the Browser agent is gone from new chats
- * ("Just get rid of the browser agent please"). Real extension, stand-in relay. Screenshots in tests/.out/.
+ * ("Just get rid of the browser agent please"), and a new chat needs an agent picked first ("when you create a new chat,
+ * you're forced to pick one of the agents"). Real extension, stand-in relay. Screenshots in tests/.out/.
  */
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -120,7 +121,7 @@ test(
 				clip: { x: 0, y: 0, width: 520, height: 60 },
 			});
 
-			// 2. a new chat: an R730 agent menu (main-pi by default), no Browser agent, no welcome card
+			// 2. a new chat: no agent until Tom picks one ("Pick an agent", highlighted), no Browser agent option, no welcome card
 			await page.goto(`${panelUrl}?new=true`);
 			const fresh = await until(
 				async () => {
@@ -131,9 +132,20 @@ test(
 				20_000,
 				"agent menu on a new chat",
 			);
-			assert.equal(fresh.pick, "main-pi");
+			assert.equal(fresh.pick, "Pick an agent");
+			assert.equal(await page.getAttribute(".sg-agent-pick", "data-picked"), "false");
 			assert.equal(fresh.welcomeCard, false, "no Browser agent welcome card");
-			await page.click(".sg-agent-pick button");
+			await page.screenshot({
+				path: join(out, "header-new-chat.png"),
+				clip: { x: 0, y: 0, width: 520, height: 60 },
+			});
+
+			// sending before picking is refused: a note, the menu opens, the text stays, nothing reaches the R730
+			const promptsBefore = relay.prompts.length;
+			await page.fill("message-editor textarea", "hello there");
+			await page.keyboard.press("Enter");
+			await page.waitForSelector("toast-notification", { timeout: 5_000, state: "attached" });
+			assert.match((await page.textContent("toast-notification")) ?? "", /Pick an agent for this chat first/);
 			const options = await until(
 				() =>
 					page.evaluate(() =>
@@ -141,16 +153,28 @@ test(
 					),
 				(t) => t.length > 0,
 				5_000,
-				"agent menu options",
+				"agent menu opened by the refused send",
 			);
 			assert.ok(!options.includes("Browser agent"), `no Browser agent option: ${options}`);
+			assert.equal(await page.inputValue("message-editor textarea"), "hello there", "the text stays in the box");
+			assert.equal(relay.prompts.length, promptsBefore, "nothing sent");
 			await page.screenshot({
-				path: join(out, "header-new-chat.png"),
+				path: join(out, "header-pick-agent.png"),
 				clip: { x: 0, y: 0, width: 520, height: 160 },
 			});
-			await page.keyboard.press("Escape");
 
-			// 3. an old "?agent=browser" link also opens an R730 chat
+			// pick main-pi: the menu shows it, no longer highlighted
+			await page.locator(".select-portal-container").getByText("main-pi", { exact: true }).click();
+			const picked = await until(
+				() => headerLeft(page),
+				(h) => h.pick === "main-pi",
+				5_000,
+				"main-pi picked",
+			);
+			assert.equal(picked.pick, "main-pi");
+			assert.equal(await page.getAttribute(".sg-agent-pick", "data-picked"), "true");
+
+			// 3. an old "?agent=browser" link opens a new chat that still needs a pick; "?agent=prime" counts as picked
 			await page.goto(`${panelUrl}?new=true&agent=browser`);
 			const old = await until(
 				async () => {
@@ -161,7 +185,18 @@ test(
 				20_000,
 				"agent menu for an old browser link",
 			);
-			assert.equal(old.pick, "main-pi");
+			assert.equal(old.pick, "Pick an agent");
+			await page.goto(`${panelUrl}?new=true&agent=prime`);
+			const direct = await until(
+				async () => {
+					await dismiss(page);
+					return headerLeft(page);
+				},
+				(h) => h.pick !== null,
+				20_000,
+				"agent menu for ?agent=prime",
+			);
+			assert.equal(direct.pick, "main-pi");
 		} finally {
 			await context.close();
 			relay.close();
