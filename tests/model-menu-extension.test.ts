@@ -104,8 +104,7 @@ const menuRows = (page: Page) =>
 		return out;
 	});
 
-const getAvailable = (relay: { rpcCalls: Array<Record<string, unknown>> }) =>
-	relay.rpcCalls.filter((c) => c.type === "get_available_models").length;
+const getAvailable = (relay: { modelListRequests: number }) => relay.modelListRequests;
 
 test(
 	"model menu: loaded before the click, opens at once, filter + Enter picks, Recent, outside click, reload",

@@ -37,8 +37,10 @@ export interface StandInRelay {
 	dropQueue(): void;
 	/** Open panel sockets for the session; tool calls go to the newest. */
 	openSockets(): number;
-	/** RPC types the panel sent (get_state, get_available_models, set_model, …), in order. */
+	/** RPC types the panel sent (get_state, set_model, …), in order. */
 	rpcCalls: Array<Record<string, unknown>>;
+	/** How many times the panel asked for the agent's model list (GET …/models). */
+	readonly modelListRequests: number;
 	/** Close every panel socket (the connection died). */
 	dropSockets(): void;
 	/** Send the bridge's echo of accepted prompts that were held back (swallowPrompt) over the open sockets. */
@@ -54,6 +56,7 @@ export async function startStandInRelay(
 	opts: { models?: unknown[] } = {},
 ): Promise<StandInRelay> {
 	const rpcCalls: Array<Record<string, unknown>> = [];
+	let modelListRequests = 0;
 	const sockets: MiniSocket[] = [];
 	const pending = new Map<string, (reply: { ok: boolean; result: unknown; error: string }) => void>();
 	const prompts: Array<Record<string, unknown>> = [];
@@ -133,6 +136,10 @@ export async function startStandInRelay(
 		res.setHeader("access-control-allow-origin", "*");
 		if (url === "/sitegeist/agents") {
 			res.end(JSON.stringify({ agents: [{ id: "prime", label: "main-pi (prime-agent)", ok: true }] }));
+		} else if (url === `${prime}/models` && req.method === "GET") {
+			// The agent's model menu (the relay serves the Telegram router's /models list); needs no session.
+			modelListRequests++;
+			res.end(JSON.stringify({ ok: true, agent: "prime", models: opts.models ?? [], notice: null }));
 		} else if (url.startsWith(`${prime}/native-ids`)) {
 			res.end(JSON.stringify({ ok: true, agent: "prime", ids: {} }));
 		} else if (url === session && req.method === "GET") {
@@ -320,6 +327,9 @@ export async function startStandInRelay(
 		},
 		openSockets: () => sockets.length,
 		rpcCalls,
+		get modelListRequests() {
+			return modelListRequests;
+		},
 		dropSockets: () => {
 			for (const ws of [...sockets]) ws.close();
 		},

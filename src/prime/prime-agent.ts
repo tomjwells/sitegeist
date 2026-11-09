@@ -13,7 +13,6 @@ import {
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import type { Attachment, UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
-import { catalogProviders, getModels as registryModels } from "../models-registry.js";
 import { fitImageForModel, type ImageFit } from "../utils/model-image.js";
 import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
 import { bridgeNoticeToast, isBridgeNotice } from "./bridge-notice.js";
@@ -28,6 +27,7 @@ import {
 	primeCreateSession,
 	primeDequeue,
 	primeHydrate,
+	primeModels,
 	primePrompt,
 	primeQueue,
 	primeRpc,
@@ -1002,34 +1002,12 @@ export class PrimeRemoteAgent extends Agent {
 	}
 
 	/**
-	 * Model list from the bridge session's own registry. On a brand-new chat the session is created
-	 * here (cheap: the bridge spawns it once and the first prompt reuses it), so the picker works
-	 * before any message has been sent.
+	 * The models this agent offers: the same list Telegram /models shows for it (Tom, 2026-11-09: "make them use the
+	 * same source"). The relay gets it from the Telegram router (primeModels), so it is the same for main-pi and the
+	 * coaches, and needs no session: a brand-new chat can list them too.
 	 */
 	async availableModels(): Promise<Model<any>[]> {
-		// For main-pi the proxy catalog IS its registry (one source of truth), so no session is needed.
-		// Workers have their own credentials/registries: ask their session.
-		if (this.agentId === MAIN_AGENT_ID) {
-			const fromCatalog = catalogProviders().flatMap((p) => registryModels(p));
-			if (fromCatalog.length > 0) return fromCatalog;
-		}
-		const sessionId = await this.ensureSession("browser session");
-		const data = await primeRpc(this.agentId, sessionId, { type: "get_available_models" });
-		return Array.isArray(data.models) ? data.models.filter(isModel) : [];
-	}
-
-	/**
-	 * Same list as availableModels(), but never creates a session: undefined on a brand-new coach chat that has not
-	 * started yet. Used to fill the model menu's cache in the background (src/prime/model-cache.ts).
-	 */
-	async availableModelsIfReady(): Promise<Model<any>[] | undefined> {
-		if (this.agentId === MAIN_AGENT_ID) {
-			const fromCatalog = catalogProviders().flatMap((p) => registryModels(p));
-			if (fromCatalog.length > 0) return fromCatalog;
-		}
-		if (!this.primeSessionId) return undefined;
-		const data = await primeRpc(this.agentId, this.primeSessionId, { type: "get_available_models" });
-		return Array.isArray(data.models) ? data.models.filter(isModel) : undefined;
+		return (await primeModels(this.agentId)).filter(isModel);
 	}
 
 	async rename(name: string): Promise<void> {

@@ -309,6 +309,15 @@ export async function primeRpc(agentId: string, sessionId: string, command: Json
 	return response && isJson(response.data) ? response.data : {};
 }
 
+/**
+ * The agent's model menu: the list Telegram /models shows for this agent (Tom, 2026-11-09: "make them use the same
+ * source"). The relay asks the Telegram router for it, so the panel filters nothing itself. Needs no session.
+ */
+export async function primeModels(agentId: string): Promise<unknown[]> {
+	const r = await request(agentId, "GET", "/models", undefined, 60_000);
+	return Array.isArray(r.models) ? r.models : [];
+}
+
 export async function primeStop(agentId: string, sessionId: string): Promise<void> {
 	await request(agentId, "POST", `/sessions/${encodeURIComponent(sessionId)}/stop`, {});
 }

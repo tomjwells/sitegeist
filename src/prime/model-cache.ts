@@ -4,6 +4,9 @@
  * Before this, every click in an R730 chat asked the agent for its list over the relay (a coach: 210 KB, 0.2-1.9 s,
  * creating a session first on a new chat) and only then opened the picker.
  *
+ * The list itself is the one Telegram /models shows for the agent (2026-11-09: the relay asks the Telegram router;
+ * before that the panel showed the session's raw registry: aliases, K3 1M, ids the provider no longer lists).
+ *
  * One list per agent (main-pi or a coach), not per chat: an agent's models are the same in all its chats. Kept in
  * memory and in chrome.storage.local, so the menu opens instantly after a panel reload too. Refreshed in the
  * background (on chat open, every MODELS_FRESH_MS while the panel is open, and after a click if stale); concurrent
@@ -21,7 +24,8 @@ interface Entry {
 const memory = new Map<string, Entry>();
 const inflight = new Map<string, Promise<Model<any>[] | undefined>>();
 const listeners = new Set<(agentId: string) => void>();
-const storageKey = (agentId: string): string => `sg_models_${agentId}`;
+// v2 (2026-11-09): lists stored before the Telegram-router source were raw registries; never show one again.
+const storageKey = (agentId: string): string => `sg_models_v2_${agentId}`;
 
 function isModel(v: unknown): v is Model<any> {
 	if (typeof v !== "object" || v === null) return false;

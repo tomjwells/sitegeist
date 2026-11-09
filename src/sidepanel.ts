@@ -333,11 +333,12 @@ function focusComposer(): void {
 
 /**
  * Fill the model menu's cache for this agent in the background, so the menu opens instantly (Tom, 2026-11-07).
- * Uses the stored list at once and refreshes it when stale; never creates a session for it.
+ * Uses the stored list at once and refreshes it when stale. The list is the one Telegram /models shows for the
+ * agent (the relay asks the Telegram router), so it needs no session.
  */
 function prefetchModels(prime: PrimeRemoteAgent): void {
 	void warmModelCache(prime.agentId).then(() =>
-		refreshModels(prime.agentId, () => prime.availableModelsIfReady()).catch((err) =>
+		refreshModels(prime.agentId, () => prime.availableModels()).catch((err) =>
 			console.warn("[prime] model prefetch failed", err),
 		),
 	);
@@ -1137,8 +1138,8 @@ const createAgent = async (
 					},
 				});
 				if (!menu) return; // the click closed an open menu
-				// Nothing cached yet (first use of this agent): fetch now, creating the session if needed, as before.
-				refreshModels(prime.agentId, () => (cached ? prime.availableModelsIfReady() : prime.availableModels()))
+				// Refresh behind the open menu (skipped while the stored list is fresh). The list needs no session.
+				refreshModels(prime.agentId, () => prime.availableModels())
 					.then((models) => {
 						if (models && models.length > 0) menu.setModels(models);
 						else if (!cached) menu.setError("The R730 returned no models for this agent.");
