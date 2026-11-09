@@ -12,6 +12,7 @@ export const speakPlayer = new SpeakPlayer(speakSettings, () => agentId);
 
 onSpeakSettingsChanged(() => {
 	if (!speakSettings().enabled) speakPlayer.stop();
+	speakPlayer.setRate(speakSettings().rate);
 	speakPlayer.dispatchEvent(new Event("change"));
 });
 

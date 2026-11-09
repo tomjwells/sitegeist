@@ -7,6 +7,13 @@
  * stops; with speak returning 503 the button shows "speak is offline (M4 asleep?)" after one request (no retry);
  * Settings → Read aloud switches the buttons off. Player state comes from the panel's sitegeist_speak diagnostic over
  * the relay socket, the path main-pi uses in Tom's real browser. Screenshots of each button state in tests/.out/.
+ *
+ * Player bar (Tom, 2026-11-09): while an answer is read, a bar under the header has pause/resume, back/forward 10 s,
+ * a position slider over the whole answer, the time, a speed menu and close. Checked here with real clicks: default
+ * speed 1.75x; pause holds the position; the speed menu changes playbackRate and is stored; a click on the slider
+ * jumps to that position in another chunk; back/forward and the arrow keys move it; resume plays from there to the
+ * end and the bar closes; close stops. On a second long answer: a seek into a chunk that was never requested fetches
+ * just that chunk and plays it.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -18,7 +25,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
-import { chunkMarkdown } from "../src/speak/chunk.ts";
+import { chunkMarkdown, targetsForRate } from "../src/speak/chunk.ts";
 import { seededPrimeSession, startStandInRelay } from "./prime-relay.fixture.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -44,7 +51,17 @@ const LONG = [
 	"That is the whole feature. The tooltip credits Fish Audio, as the licence asks.",
 ].join("\n\n");
 const SHORT = "A second, short answer for the offline check.";
-const EXPECTED = chunkMarkdown(LONG);
+/** The first answer starts at the default speed (1.75x), so it is chunked with that speed's ramp. */
+const EXPECTED = chunkMarkdown(LONG, targetsForRate(1.75));
+/** A second long answer, never played before the seek check, so its later chunks are not in memory. */
+const LONG2 = Array.from(
+	{ length: 9 },
+	(_, i) =>
+		`Paragraph ${i + 1} of the second answer talks about seeking. The slider covers the whole answer, so a jump can land in a part that speak has not rendered yet, and the player then fetches that part first. This sentence only adds length to paragraph ${i + 1}.`,
+).join("\n\n");
+/** By then the speed is 1x (set in step 6b): the default ramp. */
+const EXPECTED2 = chunkMarkdown(LONG2, targetsForRate(1));
+const CLIP_SECONDS = 1.2;
 
 function tone(seconds: number): Buffer {
 	return execFileSync("ffmpeg", [
@@ -74,7 +91,7 @@ interface SpeechRequest {
 }
 
 async function startStandInSpeak() {
-	const mp3 = tone(1.2);
+	const mp3 = tone(CLIP_SECONDS);
 	const speech: SpeechRequest[] = [];
 	const state = { mode: "ok" as "ok" | "offline", firstDelayMs: 1500, inFlight: 0, maxInFlight: 0 };
 	const server = createServer((req, res) => {
@@ -111,7 +128,11 @@ async function startStandInSpeak() {
 			state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
 			setTimeout(() => {
 				state.inFlight--;
-				res.writeHead(200, { "content-type": "audio/mpeg", "x-speak-attribution": "Built with Fish Audio" });
+				res.writeHead(200, {
+					"content-type": "audio/mpeg",
+					"x-speak-attribution": "Built with Fish Audio",
+					"x-speak-audio-seconds": CLIP_SECONDS.toFixed(2),
+				});
 				res.end(mp3);
 			}, delay);
 		});
@@ -153,6 +174,10 @@ interface Status {
 	fetched: number[];
 	currentTime: number;
 	paused: boolean;
+	position: number;
+	total: number;
+	rate: number;
+	playbackRate: number;
 	lastNote: string | null;
 	buttons: number;
 }
@@ -177,6 +202,7 @@ test(
 	{ timeout: 240_000 },
 	async () => {
 		assert.ok(EXPECTED.length >= 4, `expected several chunks, got ${EXPECTED.length}`);
+		assert.ok(EXPECTED2.length >= 5, `expected at least 5 chunks in the second answer, got ${EXPECTED2.length}`);
 		const speak = await startStandInSpeak();
 		const seeded = seededPrimeSession(SID, "Speak test");
 		const [user, assistant] = seeded.messages;
@@ -186,6 +212,8 @@ test(
 			{ ...assistant, content: [{ type: "text", text: LONG }] },
 			{ ...user, content: "And another?", timestamp: user.timestamp + 5000 },
 			{ ...assistant, content: [{ type: "text", text: SHORT }], timestamp: assistant.timestamp + 6000 },
+			{ ...user, content: "And a third?", timestamp: user.timestamp + 7000 },
+			{ ...assistant, content: [{ type: "text", text: LONG2 }], timestamp: assistant.timestamp + 8000 },
 		];
 		const data = { ...seeded.data, messages };
 		const metadata = { ...seeded.metadata, messageCount: messages.length };
@@ -250,13 +278,14 @@ test(
 			// 1. a 🔊 on both answers, idle, tooltip credits Fish Audio
 			await until(
 				() => phases(page),
-				(p) => p.length === 2 && p.every((x) => x === "idle"),
+				(p) => p.length === 3 && p.every((x) => x === "idle"),
 				15_000,
-				"two idle speak buttons",
+				"three idle speak buttons",
 			);
 			const title = await page.getAttribute("sg-speak-button button.sg-speak", "title");
 			assert.equal(title, "Read aloud · Built with Fish Audio");
 			await footerShot(page, 0, "speak-idle.png");
+			assert.equal(await page.locator(".sg-speak-bar").count(), 0, "no player bar while idle");
 
 			// 2. click: spinner while chunk 1 renders (the stand-in holds it 1.5 s)
 			await page.locator("sg-speak-button button.sg-speak").first().click();
@@ -276,7 +305,10 @@ test(
 				"playing",
 			);
 			await footerShot(page, 0, "speak-playing.png");
+			await page.waitForSelector(".sg-speak-bar", { timeout: 2_000 });
 			const s1 = await status();
+			assert.equal(s1.rate, 1.75, "default speed");
+			assert.equal(s1.playbackRate, 1.75, "the audio element plays at the default speed");
 			await new Promise((r) => setTimeout(r, 400));
 			const s2 = await status();
 			assert.equal(s2.chunkCount, EXPECTED.length);
@@ -306,7 +338,7 @@ test(
 				EXPECTED,
 			);
 			assert.equal(speak.state.maxInFlight, 1, "one request to speak at a time");
-			assert.deepEqual(await phases(page), ["idle", "idle"]);
+			assert.deepEqual(await phases(page), ["idle", "idle", "idle"]);
 
 			// 5. replay: from memory (no request), starts at once
 			const before = speak.speech.length;
@@ -319,7 +351,162 @@ test(
 			);
 			assert.equal(speak.speech.length, before, "replay made no request");
 
-			// 6. click while playing: stops
+			// 6. player bar: every clip's real length is known now, so the timeline is exact
+			const n = EXPECTED.length;
+			const bar = page.locator(".sg-speak-bar");
+			const full = await status();
+			assert.ok(
+				Math.abs(full.total - n * CLIP_SECONDS) < 0.05,
+				`timeline = all clips (${full.total} s for ${n} clips)`,
+			);
+			assert.match((await page.textContent(".sg-speak-time")) ?? "", /^\d+:\d\d \/ \d+:\d\d$/);
+
+			// 6a. pause holds the position; the answer's own button still offers Stop
+			await page.click(".sg-speak-play");
+			const paused = await until(
+				() => status(),
+				(s) => s.phase === "paused" && s.paused,
+				3_000,
+				"paused",
+			);
+			await new Promise((r) => setTimeout(r, 500));
+			assert.equal((await status()).position, paused.position, "position does not move while paused");
+			assert.equal((await phases(page))[0], "paused");
+			assert.equal(await page.getAttribute(".sg-speak-play", "title"), "Play");
+			await page.screenshot({
+				path: join(out, "speak-bar-paused.png"),
+				clip: { x: 0, y: 0, width: 520, height: 140 },
+			});
+
+			// 6b. speed menu: 1x is applied to the audio at once and stored for next time
+			await page.click(".sg-speak-rate");
+			await page.waitForSelector(".sg-speak-rate-menu");
+			assert.equal(await page.getAttribute('.sg-speak-rate-option[data-rate="1.75"]', "aria-checked"), "true");
+			await page.screenshot({
+				path: join(out, "speak-bar-speed.png"),
+				clip: { x: 0, y: 0, width: 520, height: 300 },
+			});
+			await page.click('.sg-speak-rate-option[data-rate="1"]');
+			const slow = await until(
+				() => status(),
+				(s) => s.rate === 1,
+				2_000,
+				"speed 1x",
+			);
+			assert.equal(slow.playbackRate, 1, "audio element at 1x");
+			assert.equal(await page.locator(".sg-speak-rate-menu").count(), 0, "menu closed after a choice");
+			assert.match((await page.textContent(".sg-speak-rate")) ?? "", /1×/);
+			const storedRate = await until(
+				() =>
+					page.evaluate(
+						() =>
+							new Promise<unknown>((resolve, reject) => {
+								const req = indexedDB.open("sitegeist-storage");
+								req.onerror = () => reject(req.error);
+								req.onsuccess = () => {
+									const get = req.result.transaction("settings").objectStore("settings").get("speak.rate");
+									get.onsuccess = () => resolve(get.result);
+									get.onerror = () => reject(get.error);
+								};
+							}),
+					),
+				(v) => v === 1,
+				3_000,
+				"speed stored",
+			);
+			assert.equal(storedRate, 1);
+
+			// 6c. a real click on the slider at 3/4 of its width jumps into another chunk, still paused
+			const box = await page.locator(".sg-speak-seek").boundingBox();
+			assert.ok(box && box.width >= 40, `slider wide enough to drag (${box?.width}px)`);
+			await page.mouse.click(box.x + box.width * 0.75, box.y + box.height / 2);
+			const jumped = await until(
+				() => status(),
+				(s) =>
+					Math.abs(s.position - full.total * 0.75) < 0.6 && s.chunkIndex === Math.floor(s.position / CLIP_SECONDS),
+				3_000,
+				"position near 75% in the matching chunk",
+			);
+			assert.equal(jumped.phase, "paused", "a seek while paused stays paused");
+			assert.ok(jumped.chunkIndex >= 2, `landed in a later chunk (${jumped.chunkIndex})`);
+
+			// 6d. back 10 s (the answer is shorter: start), forward 10 s (just before the end), arrow key: 5 s back
+			await page.click(".sg-speak-back");
+			await until(
+				() => status(),
+				(s) => s.position === 0 && s.chunkIndex === 0,
+				3_000,
+				"back to the start",
+			);
+			await page.click(".sg-speak-forward");
+			const fwd = await until(
+				() => status(),
+				(s) => s.position >= Math.min(10, full.total - 0.3) - 0.05,
+				3_000,
+				"forward 10 s",
+			);
+			await page.locator(".sg-speak-seek").focus();
+			await page.keyboard.press("ArrowLeft");
+			const keyed = await until(
+				() => status(),
+				(s) => Math.abs(s.position - (fwd.position - 5)) < 0.1,
+				3_000,
+				"arrow left = 5 s back",
+			);
+			assert.equal(keyed.phase, "paused");
+
+			// 6e. resume: plays from there to the end at 1x, then the bar closes
+			const resumeFrom = keyed.chunkIndex;
+			await page.click(".sg-speak-play");
+			await until(
+				() => status(),
+				(s) => s.phase === "playing" && !s.paused,
+				3_000,
+				"resumed",
+			);
+			await page.screenshot({
+				path: join(out, "speak-bar-playing.png"),
+				clip: { x: 0, y: 0, width: 520, height: 140 },
+			});
+			const ended = await until(
+				() => status(),
+				(s) => s.phase === "idle",
+				20_000,
+				"played to the end",
+			);
+			assert.deepEqual(
+				ended.played.slice(-(n - resumeFrom)),
+				Array.from({ length: n - resumeFrom }, (_, i) => resumeFrom + i),
+				`chunks ${resumeFrom}..${n - 1} played in order after the resume`,
+			);
+			assert.equal(await bar.count(), 0, "bar closes at the end");
+			assert.equal(speak.speech.length, before, "none of this made a request");
+
+			// 6f. the bar's close button stops
+			await page.locator("sg-speak-button button.sg-speak").first().click();
+			await until(
+				() => phases(page),
+				(p) => p[0] === "playing",
+				1_500,
+				"playing again",
+			);
+			await page.click(".sg-speak-close");
+			await until(
+				() => status(),
+				(s) => s.phase === "idle" && s.paused,
+				3_000,
+				"closed",
+			);
+			assert.equal(await bar.count(), 0);
+
+			// 6g. click the answer's button while playing: stops
+			await page.locator("sg-speak-button button.sg-speak").first().click();
+			await until(
+				() => phases(page),
+				(p) => p[0] === "playing",
+				1_500,
+				"playing again",
+			);
 			await new Promise((r) => setTimeout(r, 300));
 			await page.locator("sg-speak-button button.sg-speak").first().click();
 			const stopped = await until(
@@ -332,7 +519,50 @@ test(
 			const playedAtStop = stopped.played.length;
 			await new Promise((r) => setTimeout(r, 1_500));
 			assert.equal((await status()).played.length, playedAtStop, "nothing more plays after stop");
-			assert.deepEqual(await phases(page), ["idle", "idle"]);
+			assert.deepEqual(await phases(page), ["idle", "idle", "idle"]);
+
+			// 6h. second long answer: pause on chunk 1, seek to the end -> only that last chunk is fetched, then it plays
+			const n2 = EXPECTED2.length;
+			const before2 = speak.speech.length;
+			await page.locator("sg-speak-button button.sg-speak").nth(2).click();
+			await until(
+				() => phases(page),
+				(p) => p[2] === "playing",
+				5_000,
+				"second answer playing",
+			);
+			await page.click(".sg-speak-play");
+			await until(
+				() => status(),
+				(s) => s.phase === "paused",
+				3_000,
+				"second answer paused",
+			);
+			const est = await status();
+			assert.ok(est.total > n2 * CLIP_SECONDS, `unrendered chunks are estimated from their text (${est.total} s)`);
+			await status("seek", { seconds: 99_999 });
+			const atEnd = await until(
+				() => status(),
+				(s) => s.chunkIndex === n2 - 1 && s.currentTime > 0,
+				5_000,
+				"last chunk loaded after the seek",
+			);
+			assert.equal(atEnd.phase, "paused");
+			await page.click(".sg-speak-play");
+			const end2 = await until(
+				() => status(),
+				(s) => s.phase === "idle",
+				5_000,
+				"second answer finished",
+			);
+			assert.deepEqual(end2.played, [0, n2 - 1], "chunk 1, then the last chunk");
+			const asked2 = speak.speech.slice(before2).map((r) => EXPECTED2.indexOf(r.input));
+			assert.ok(asked2.includes(n2 - 1), "the seek target was fetched");
+			assert.ok(
+				asked2.every((i) => i === n2 - 1 || (i >= 0 && i <= 2)),
+				`only chunk 1, its two look-ahead chunks and the seek target were requested (${asked2.join(",")})`,
+			);
+			assert.equal(await bar.count(), 0);
 
 			// 7. speak offline (503): a short note, one request, no retry
 			speak.state.mode = "offline";

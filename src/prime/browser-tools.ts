@@ -151,6 +151,9 @@ async function listTabs(args: Json = {}): Promise<BrowserToolResult> {
  * sitegeist_speak (2026-11-07): lets main-pi check read-aloud in Tom's real panel through the relay (not an agent
  * tool). status = the player's state, never the message text; click = press the 🔊 of the Nth assistant message in
  * the open chat (negative counts from the end), the same code path as Tom's click; stop = stop playback.
+ * pause = pause/resume; seek {seconds} = jump to a position on the answer's timeline; skip {seconds} = jump by that
+ * much (2026-11-09, the player bar's controls). mute / unmute = play without sound, so main-pi can check playback
+ * in Tom's browser without making a noise (always unmute afterwards).
  */
 function speakDiagnostic(args: Json): BrowserToolResult {
 	const action = typeof args.action === "string" ? args.action : "status";
@@ -163,6 +166,10 @@ function speakDiagnostic(args: Json): BrowserToolResult {
 		button.click();
 		clicked = index < 0 ? buttons.length + index : index;
 	} else if (action === "stop") speakPlayer.stop();
+	else if (action === "pause") speakPlayer.togglePause();
+	else if (action === "seek" && typeof args.seconds === "number") speakPlayer.seekTo(args.seconds);
+	else if (action === "skip" && typeof args.seconds === "number") speakPlayer.skip(args.seconds);
+	else if (action === "mute" || action === "unmute") speakPlayer.setMuted(action === "mute");
 	const status = { ...speakPlayer.status(), action, clicked, buttons: buttons.length, settings: speakSettings() };
 	return { content: [{ type: "text", text: JSON.stringify(status) }], details: status };
 }

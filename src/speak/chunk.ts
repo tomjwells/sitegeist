@@ -11,9 +11,38 @@
  * Only a paragraph is ever cut inside, at sentence ends: when it opens the message and is over 1.5x the first target
  * (the first piece is then at least half the target), or when it is longer than the hard cap. Tables, lists and code
  * are cut (at line ends) only above the hard cap, which keeps every request under speak's 5,000-character limit.
+ *
+ * Faster playback (2026-11-09, speed menu): at 1.75x a chunk is heard in 4/7 of the time, so a next chunk twice its
+ * size is not ready when it ends (predicted waits of 4-9 s after each of the first three chunks). targetsForRate
+ * gives a gentler ramp for speeds above 1x, from the same measurements.
  */
 
 export const CHUNK_TARGETS: readonly number[] = [120, 250, 500, 800];
+/** speak's voice at 1x (the measurements above). Also sizes the player bar's timeline before a chunk is rendered. */
+export const ESTIMATED_CHARS_PER_SECOND = 10;
+/** speak's render time is about 1.35 s + characters / 24.6 (a line through the two measurements above). */
+export const RENDER_OVERHEAD_SECONDS = 1.35;
+export const RENDER_CHARS_PER_SECOND = 24.6;
+
+/**
+ * Chunk targets for a playback speed. Each target is the largest chunk that renders in the time the one before it
+ * plays at that speed (growing by at least 15 characters, so the ramp always reaches 800). At 1x or slower: the
+ * measured default ramp. Above 2x playback outruns rendering whatever the chunk size, so the default ramp is used
+ * there too: a few longer waits are better than a short wait after every small chunk.
+ */
+export function targetsForRate(rate: number): readonly number[] {
+	if (!(rate > 1) || rate > 2) return CHUNK_TARGETS;
+	const first = CHUNK_TARGETS[0] ?? 120;
+	const last = CHUNK_TARGETS[CHUNK_TARGETS.length - 1] ?? 800;
+	const out = [first];
+	for (let c = first; c < last; ) {
+		const playSeconds = c / (ESTIMATED_CHARS_PER_SECOND * rate);
+		const fits = Math.floor(RENDER_CHARS_PER_SECOND * (playSeconds - RENDER_OVERHEAD_SECONDS));
+		c = Math.min(last, Math.max(c + 15, fits));
+		out.push(c);
+	}
+	return out;
+}
 /** speak's limit is 5,000 characters after prepare; prepare can lengthen text ("~2 GB" -> "about 2 gigabytes"). */
 export const HARD_CAP = 4000;
 
@@ -29,8 +58,8 @@ const INDENTED = /^(?:\s{2,}|\t)\S/;
 const TABLE_ROW = /^\s{0,3}\|/;
 const HEADING = /^\s{0,3}#{1,6}\s/;
 
-function targetFor(chunkIndex: number): number {
-	return CHUNK_TARGETS[Math.min(chunkIndex, CHUNK_TARGETS.length - 1)] ?? 800;
+function targetFor(targets: readonly number[], chunkIndex: number): number {
+	return targets[Math.min(chunkIndex, targets.length - 1)] ?? 800;
 }
 
 /** Markdown -> blocks. Never drops text: joining the blocks with blank lines gives the input back (modulo blank-line runs). */
@@ -180,7 +209,7 @@ function cutLines(text: string, max: number): string[] {
 }
 
 /** Message Markdown -> chunks to send to speak, in reading order. Empty input -> []. */
-export function chunkMarkdown(markdown: string): string[] {
+export function chunkMarkdown(markdown: string, targets: readonly number[] = CHUNK_TARGETS): string[] {
 	const pieces: Block[] = [];
 	for (const b of splitBlocks(markdown)) {
 		if (b.text.length <= HARD_CAP) pieces.push(b);
@@ -194,7 +223,7 @@ export function chunkMarkdown(markdown: string): string[] {
 	for (let n = 0; n < pieces.length; n++) {
 		const piece = pieces[n];
 		if (!piece) continue;
-		const target = targetFor(chunks.length);
+		const target = targetFor(targets, chunks.length);
 		// First chunk only: a long opening paragraph is cut after whole sentences, so speech starts within seconds.
 		if (chunks.length === 0 && piece.kind === "paragraph" && cur.length + 2 + piece.text.length > target * 1.5) {
 			const split = leadingSentences(piece.text, target - (cur ? cur.length + 2 : 0));

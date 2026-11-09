@@ -11,6 +11,7 @@ const ATTRIBUTION = "Built with Fish Audio"; // Fish Audio Community License: sh
 /**
  * 🔊 on each assistant message, next to the copy button (scripts/build.mjs puts it in pi-web-ui's message footer).
  * Click to play, click again to stop; a spinner while the audio renders; a short note when speak fails.
+ * Pause, position and speed are in the player bar under the header (SpeakBar.ts).
  * Light DOM, so the panel's Tailwind classes apply.
  */
 @customElement("sg-speak-button")
@@ -55,13 +56,13 @@ export class SpeakButton extends LitElement {
 		if (!speakSettings().enabled || !this.text.trim()) return nothing;
 		const { phase, note } = speakPlayer.view(this.key);
 		const title =
-			phase === "playing"
+			phase === "playing" || phase === "paused"
 				? `Stop reading · ${ATTRIBUTION}`
 				: phase === "loading"
 					? `Rendering audio… click to cancel · ${ATTRIBUTION}`
 					: `Read aloud · ${ATTRIBUTION}`;
 		const glyph =
-			phase === "playing"
+			phase === "playing" || phase === "paused"
 				? icon(Square, "xs")
 				: phase === "loading"
 					? icon(LoaderCircle, "sm", "animate-spin")

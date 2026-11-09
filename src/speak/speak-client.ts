@@ -103,8 +103,14 @@ export async function fetchHealth(url: string, signal?: AbortSignal): Promise<bo
 	return parsed.success && parsed.data.ok;
 }
 
+export interface Clip {
+	blob: Blob;
+	/** Length of the audio from speak's x-speak-audio-seconds header; null when the header is missing. */
+	seconds: number | null;
+}
+
 /** One chunk of Markdown -> mp3. prepare:true: the server turns Markdown into speakable text. */
-export async function synthesize(url: string, input: string, voice: string, signal?: AbortSignal): Promise<Blob> {
+export async function synthesize(url: string, input: string, voice: string, signal?: AbortSignal): Promise<Clip> {
 	const res = await boundedFetch(
 		`${base(url)}/v1/audio/speech`,
 		{
@@ -118,7 +124,11 @@ export async function synthesize(url: string, input: string, voice: string, sign
 	if (!res.ok) throw await failure(res);
 	const blob = await res.blob();
 	if (blob.size === 0) throw new SpeakError(res.status, "error", "empty audio");
-	return blob.type ? blob : new Blob([blob], { type: "audio/mpeg" });
+	const seconds = Number(res.headers.get("x-speak-audio-seconds"));
+	return {
+		blob: blob.type ? blob : new Blob([blob], { type: "audio/mpeg" }),
+		seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : null,
+	};
 }
 
 /**

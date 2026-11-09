@@ -916,3 +916,188 @@ test(
 		}
 	},
 );
+
+test(
+	"Zen: read-aloud player bar - plays, pauses, changes speed, seeks by a click on the slider and an arrow key, closes",
+	{ skip, timeout: 60_000 },
+	async () => {
+		// Tom, 2026-11-09: player controls for read aloud. Zen is where he uses the panel, so the bar is driven here with
+		// real clicks and keys against a stand-in speak (real mp3 from ffmpeg); the player's state is read through the
+		// relay diagnostic sitegeist_speak, as main-pi does in his browser.
+		const SID = "sg-5a5a5a5a5a5a";
+		// Each clip is as long as speak's voice would take (10 characters a second), so the bar's estimated timeline
+		// matches the real one, as it does with the real speak.
+		const clips = new Map<number, Buffer>();
+		const tone = (seconds: number): Buffer => {
+			const have = clips.get(seconds);
+			if (have) return have;
+			const mp3 = execFileSync("ffmpeg", [
+				"-hide_banner",
+				"-loglevel",
+				"error",
+				"-f",
+				"lavfi",
+				"-i",
+				`sine=frequency=440:duration=${seconds}`,
+				"-ac",
+				"1",
+				"-ar",
+				"24000",
+				"-b:a",
+				"32k",
+				"-f",
+				"mp3",
+				"pipe:1",
+			]);
+			clips.set(seconds, mp3);
+			return mp3;
+		};
+		let requests = 0;
+		const speak = createServer((req, res) => {
+			let body = "";
+			req.on("data", (c: Buffer) => {
+				body += c.toString();
+			});
+			req.on("end", () => {
+				if (req.url === "/v1/voices") {
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(JSON.stringify({ voices: [{ name: "main-pi", locked: true }] }));
+				} else if (req.url === "/v1/audio/speech") {
+					requests++;
+					const parsed: unknown = JSON.parse(body);
+					const seconds = isRecord(parsed) && typeof parsed.input === "string" ? parsed.input.length / 10 : 1;
+					res.writeHead(200, { "content-type": "audio/mpeg", "x-speak-audio-seconds": seconds.toFixed(2) });
+					res.end(tone(seconds));
+				} else {
+					res.writeHead(404, { "content-type": "application/json" });
+					res.end(JSON.stringify({ error: { message: "not found" } }));
+				}
+			});
+		});
+		await new Promise<void>((r) => speak.listen(0, "127.0.0.1", () => r()));
+		const speakUrl = `http://127.0.0.1:${(speak.address() as AddressInfo).port}`; // listen(0) on TCP: always an AddressInfo
+		const answer = Array.from(
+			{ length: 8 },
+			(_, i) =>
+				`Paragraph ${i + 1} of an answer that is read aloud in Zen. It is long enough that the answer is split into several clips, so the slider has to cross from one clip into another.`,
+		).join("\n\n");
+		const seeded = seededPrimeSession(SID, "Speak in Zen");
+		const [user, assistant] = seeded.messages;
+		assert.ok(user && assistant);
+		const messages = [user, { ...assistant, content: [{ type: "text", text: answer }] }];
+		const data = { ...seeded.data, messages };
+		const relay = await startStandInRelay(SID, messages);
+		const { d, stop } = await startZen();
+		try {
+			await d.openTab(`${BASE}/sidepanel.html?new=true`);
+			await untilOk(
+				() => d.run(`return document.body?.innerText ?? ""`),
+				(t) => typeof t === "string" && t.includes("Grant Permission"),
+				20_000,
+				"permission dialog",
+			);
+			await d.click("xpath", "//button[normalize-space(.)='Grant Permission']");
+			await d.runAsync(
+				`const [data, metadata, syncUrl, speakUrl] = arguments;
+			 const db = await new Promise((res, rej) => { const q = indexedDB.open("sitegeist-storage"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+			 await new Promise((res, rej) => { const tx = db.transaction(["sessions", "sessions-metadata", "settings"], "readwrite"); tx.objectStore("sessions").put(data); tx.objectStore("sessions-metadata").put(metadata); tx.objectStore("settings").put(syncUrl, "sync.url"); tx.objectStore("settings").put(speakUrl, "speak.url"); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+			 db.close(); location.href = "sidepanel.html?session=" + data.id;`,
+				[data, seeded.metadata, `${relay.base}/sitegeist`, speakUrl],
+			);
+			await untilOk(
+				() => d.run(`return document.querySelectorAll("sg-speak-button button.sg-speak").length`),
+				(n) => n === 1,
+				30_000,
+				"the answer's read-aloud button",
+			);
+			await until(
+				async () => relay.openSockets(),
+				(n) => n >= 1,
+				20_000,
+				"relay socket",
+			);
+			interface S {
+				phase: string;
+				position: number;
+				total: number;
+				rate: number;
+				playbackRate: number;
+				paused: boolean;
+				chunkIndex: number;
+				lastNote: string | null;
+			}
+			const status = async (): Promise<S> => {
+				const r = await relay.call("sitegeist_speak", { action: "status" });
+				assert.ok(isRecord(r) && isRecord(r.details));
+				return r.details as unknown as S; // the panel's sitegeist_speak answers { content, details: status }
+			};
+			const bar = () => d.run(`return document.querySelector(".sg-speak-bar")?.getAttribute("data-phase") ?? null`);
+
+			// The R730 has no sound device, and headless Zen stops unmuted audio at once without one (media error 3,
+			// OnMediaSinkAudioError). Muted audio plays, through the same media element code.
+			await relay.call("sitegeist_speak", { action: "mute" });
+			// play: the bar opens, the audio runs at the default 1.75x
+			assert.equal(await bar(), null, "no bar while idle");
+			await d.click("css selector", "sg-speak-button button.sg-speak");
+			const playing = await until(
+				status,
+				(s) => s.phase === "playing" && !s.paused && s.position > 0.2,
+				15_000,
+				"playing",
+			);
+			assert.equal(playing.lastNote, null);
+			assert.equal(playing.playbackRate, 1.75);
+			assert.equal(await bar(), "playing");
+
+			// pause: the position holds
+			await d.click("css selector", ".sg-speak-play");
+			const paused = await until(status, (s) => s.phase === "paused" && s.paused, 5_000, "paused");
+			await sleep(500);
+			assert.equal((await status()).position, paused.position, "position holds while paused");
+
+			// speed menu -> 1x
+			await d.click("css selector", ".sg-speak-rate");
+			await zenShot(d, "zen-speak-bar.png");
+			await d.click("css selector", '.sg-speak-rate-option[data-rate="1"]');
+			const slow = await until(status, (s) => s.rate === 1, 5_000, "speed 1x");
+			assert.equal(slow.playbackRate, 1);
+
+			// a click in the middle of the slider: half-way through the answer, in a later clip, still paused
+			await d.click("css selector", ".sg-speak-seek");
+			const mid = await until(
+				status,
+				(s) => Math.abs(s.position - s.total / 2) < s.total * 0.1 && s.chunkIndex >= 2,
+				10_000,
+				"position near the middle after a click on the slider",
+			);
+			assert.equal(mid.phase, "paused");
+			assert.ok(Math.abs(mid.total - answer.length / 10) < 3, `timeline = the whole answer (${mid.total} s)`);
+			// arrow left on the focused slider: 5 s back
+			await d.press("\uE012");
+			await until(
+				status,
+				(s) => Math.abs(s.position - (mid.position - 5)) < 0.6,
+				10_000,
+				"5 s back after ArrowLeft",
+			);
+
+			// resume: plays on from there at 1x
+			await d.click("css selector", ".sg-speak-play");
+			const resumed = await until(status, (s) => s.phase === "playing" && !s.paused, 10_000, "resumed");
+			await sleep(700);
+			const later = await status();
+			assert.ok(later.position > resumed.position, `position advances (${resumed.position} -> ${later.position})`);
+			assert.equal(later.playbackRate, 1);
+
+			// close
+			await d.click("css selector", ".sg-speak-close");
+			await until(status, (s) => s.phase === "idle" && s.paused, 5_000, "closed");
+			assert.equal(await bar(), null, "bar gone");
+			assert.ok(requests >= 2, `speak was asked for clips (${requests})`);
+		} finally {
+			await stop();
+			relay.close();
+			speak.close();
+		}
+	},
+);

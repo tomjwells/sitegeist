@@ -52,6 +52,7 @@ import { registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { cachedModels, MODELS_FRESH_MS, refreshModels, warmModelCache } from "./prime/model-cache.js";
+import "./components/SpeakBar.js";
 import "./components/SpeakButton.js";
 import { SpeakTab } from "./dialogs/SpeakTab.js";
 import {
@@ -1643,6 +1644,8 @@ const renderApp = () => {
 			</div>
 
 			${draftStorageWarning ? html`<div role="alert" class="px-3 py-2 text-xs text-destructive">Draft saving is unavailable on this device. Copy your unfinished prompt before closing the panel.</div>` : ""}
+			<!-- Read-aloud player: shown only while an answer is being read -->
+			<sg-speak-bar></sg-speak-bar>
 			<!-- Chat Panel + sessions sidebar overlay -->
 			<div class="relative flex-1 min-h-0 flex flex-col">
 				${chatPanel}
