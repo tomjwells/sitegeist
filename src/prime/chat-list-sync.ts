@@ -6,8 +6,9 @@
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import { CHATS_DELETED_SETTING } from "../storage/stores/sessions-store.js";
 import { type ChatListSyncState, chatsToSend, pendingDeletesOf, syncStateOf } from "./chat-list.js";
+import { textToPull, textToPush } from "./chat-text.js";
 import { agentIdFromSessionId, isPrimeSessionId } from "./constants.js";
-import { primeChatsSync } from "./prime-client.js";
+import { primeChatsSync, primeChatTextPull, primeChatTextPush } from "./prime-client.js";
 
 export const CHATS_SYNC_STATE_SETTING = "chats.sync.state";
 /** Entries per call; the rest go with the next call (the relay takes 3000). */
@@ -24,6 +25,9 @@ export interface ChatListSyncResult {
 	removed: string[];
 	/** Entries and deletes sent. */
 	sent: number;
+	/** Search texts sent to the R730 / fetched from it (chat-text.ts). */
+	textSent: number;
+	textFetched: number;
 	error?: string;
 }
 
@@ -69,9 +73,59 @@ export function requestChatListSync(minGapMs = 20_000): void {
 	}, at - Date.now());
 }
 
+/**
+ * Search text, both ways (chat-text.ts): send what this browser built and the R730 lacks, fetch what the R730
+ * has and this browser lacks. A piece per sync; a browser with many chats catches up over a few syncs.
+ */
+async function syncText(state: ChatListSyncState, result: ChatListSyncResult): Promise<void> {
+	const storage = getSitegeistStorage();
+	const records = await storage.sessionSearch.all();
+	const textAt = { ...state.textAt };
+	let changed = false;
+	const push = textToPush(records, textAt, isPrimeSessionId);
+	if (push.length > 0) {
+		const answer = await primeChatTextPush(
+			push.map((r) => ({ id: r.id, agentId: agentIdFromSessionId(r.id), textAt: r.lastModified, text: r.text })),
+		);
+		const byId = new Map(push.map((r) => [r.id, r]));
+		for (const id of answer.kept) {
+			const r = byId.get(id);
+			if (r) textAt[id] = r.lastModified;
+		}
+		for (const s of answer.stale) textAt[s.id] = s.textAt; // the R730 has a later form: fetched below or next time
+		result.textSent += answer.kept.length;
+		changed = true;
+	}
+	const entries = (await storage.sessions.getAllMetadata()).filter((m) => isPrimeSessionId(m.id));
+	const lastModifiedOf = Object.fromEntries(entries.map((m) => [m.id, m.lastModified]));
+	const listed = new Set(entries.map((m) => m.id));
+	// Only chats in this browser's list: a text the R730 keeps for a chat that is not listed here is not wanted.
+	const wanted = textToPull(records, textAt, lastModifiedOf).filter((id) => listed.has(id));
+	if (wanted.length > 0) {
+		const answer = await primeChatTextPull(wanted);
+		for (const t of answer.texts) {
+			await storage.sessionSearch.putRemote(t.id, t.text, t.textAt, lastModifiedOf[t.id] ?? t.textAt);
+			textAt[t.id] = t.textAt;
+			result.textFetched++;
+		}
+		// A chat the R730 said it had text for, and then had not: do not ask again until it says so again.
+		for (const id of wanted) if (!answer.texts.some((t) => t.id === id)) textAt[id] = "";
+		changed = true;
+	}
+	if (changed) await storage.settings.set(CHATS_SYNC_STATE_SETTING, { ...state, textAt });
+}
+
 async function run(): Promise<ChatListSyncResult> {
 	const storage = getSitegeistStorage();
-	const result: ChatListSyncResult = { ok: false, added: 0, updated: 0, removed: [], sent: 0 };
+	const result: ChatListSyncResult = {
+		ok: false,
+		added: 0,
+		updated: 0,
+		removed: [],
+		sent: 0,
+		textSent: 0,
+		textFetched: 0,
+	};
 	try {
 		let state: ChatListSyncState = syncStateOf(await storage.settings.get(CHATS_SYNC_STATE_SETTING));
 		// Two rounds at most: the second only when the R730's list turned out to be a new one.
@@ -94,13 +148,16 @@ async function run(): Promise<ChatListSyncResult> {
 			// browser "has sent" means nothing there. Keep only what this call sent, and send the rest in round two.
 			const newStore = state.storeId !== "" && answer.storeId !== state.storeId;
 			const sent: Record<string, string> = newStore ? {} : { ...state.sent };
+			const textAt: Record<string, string> = newStore ? {} : { ...state.textAt };
 			for (const m of outgoing) sent[m.id] = m.lastModified;
 			for (const d of deleted) delete sent[d.id];
 			for (const remote of answer.chats) {
+				textAt[remote.id] = remote.deletedAt ? "" : (remote.textAt ?? "");
 				const what = await storage.sessions.applyRemoteChat(remote);
 				if (what === "remove") {
 					result.removed.push(remote.id);
 					delete sent[remote.id];
+					delete textAt[remote.id];
 					await storage.sessionSearch.remove(remote.id).catch(() => undefined);
 					continue;
 				}
@@ -109,7 +166,7 @@ async function run(): Promise<ChatListSyncResult> {
 				// Taken from the R730, or beaten by it: the R730 has this time, nothing to send for it.
 				if (what !== "none") sent[remote.id] = remote.lastModified;
 			}
-			state = { storeId: answer.storeId, rev: answer.rev, sent };
+			state = { storeId: answer.storeId, rev: answer.rev, sent, textAt };
 			await storage.settings.set(CHATS_SYNC_STATE_SETTING, state);
 			if (deleted.length > 0) {
 				// A delete made while the call was on its way stays for the next sync.
@@ -123,6 +180,10 @@ async function run(): Promise<ChatListSyncResult> {
 			if (!newStore) break;
 		}
 		result.ok = true;
+		await syncText(state, result).catch((err) => {
+			// The list is synced; the text follows with a later sync.
+			console.warn("[chat list] text sync failed:", err instanceof Error ? err.message : String(err));
+		});
 	} catch (err) {
 		result.error = err instanceof Error ? err.message : String(err);
 		console.warn("[chat list] sync failed (the browser's own list is used):", result.error);

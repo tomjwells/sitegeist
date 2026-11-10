@@ -228,6 +228,40 @@ test(
 			await mkdir(join(root, "tests/.out"), { recursive: true });
 			await b.screenshot({ path: join(root, "tests/.out/chat-list-other-browser.png") });
 
+			// --- a word said only on the laptop finds the chat on the Mac, which has not opened it
+			const WORD = "zymurgically";
+			await a.fill("message-editor textarea", `Note this word: ${WORD}`);
+			await a.keyboard.press("Enter");
+			await until(
+				() => Promise.resolve(relay.chatText(SID) ?? ""),
+				(text) => text.includes(WORD),
+				60_000,
+				"the laptop's search text, with the word, on the R730",
+			);
+			assert.equal(
+				relay.chatText(SID)?.includes("Help me read this article"),
+				true,
+				"the whole transcript is in it",
+			);
+			const found = await until(
+				async () => {
+					await b.fill("sessions-sidebar input", WORD);
+					await new Promise((r) => setTimeout(r, 400));
+					return rows(b);
+				},
+				(r) => r.some((x) => x.id === SID),
+				60_000,
+				"the chat found on the Mac by a word from the laptop's transcript",
+			);
+			assert.equal(found.length, 1);
+			const macSearch = await b.evaluate(
+				() => (document.querySelector("sessions-sidebar mark") as HTMLElement | null)?.textContent ?? "",
+			);
+			assert.equal(macSearch, WORD, "the word is marked in the snippet");
+			assert.equal((await stored(b, SID)).hasMessages, false, "still not opened on the Mac");
+			await b.screenshot({ path: join(root, "tests/.out/chat-list-search-other-browser.png") });
+			await b.fill("sessions-sidebar input", "");
+
 			// --- a click opens it from the R730
 			await b.click(`sessions-sidebar [data-session-id="${SID}"]`);
 			await until(

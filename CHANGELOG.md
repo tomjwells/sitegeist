@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Search finds chats from other browsers by their content** (stage 4 of "chats stored remotely"). Each browser builds a search text for every chat it has opened (whole transcript, tool output, file names); until now a chat from another browser was found by title and preview only.
+  - The text is kept on the R730 too (relay `2026-11-10.5`, `POST`/`GET <sync url>/chats/text`, one file per chat next to the list entry). With every list sync a browser sends the texts it built that the R730 lacks (newest first, 50 or 2 MB per call) and fetches the texts of chats it has not opened (20 per call). The list entry's `textAt` says what the R730's text is built from; a later build replaces an earlier one, never the other way round. Only browsers build text; the relay keeps and serves it.
+  - A fetched text stands until this browser saves the chat itself (`textFrom` on the search record; `SessionsSidebar.ensureIndexed` leaves it alone).
+  - Syncs now also run every 15 s while the sessions list is open and once a minute while the panel is in front (before, only opening the list or coming back to the panel asked the R730). A save asks after 5 s, not 20.
+  - Rules in `src/prime/chat-text.ts` (no imports, unit-tested `test:chat-text` 4/4). `test:chat-list:extension` now also sends a made-up word in the laptop's chat and finds the chat in the Mac's list by that word, marked in the snippet, before the Mac has opened it. Relay: `tests/chats-sync.test.ts` 7/7 (text kept only when newer, cut to 256 KB, fetched by ids, gone with a delete, survives a restart).
+
 - **One chat list for every browser** (Tom, 2026-11-10: "This would also allow to unify sitegeist sessions across browsers right? (E.g. i view a session created on Omarchy on the m4)"). Stage 2 of "chats stored remotely". Before, each browser listed only the chats in its own storage; a chat started elsewhere could be opened only by its id.
   - The list of R730 chats is kept on the R730 (relay `2026-11-10.4`, `POST <sync url>/chats/sync`, one small file per chat under `sitegeist-sync/chats/`). A browser sends the entries it changed and gets back what changed elsewhere since its last call. The later change wins, on the entry's own `lastModified`.
   - A chat from another browser is one small list entry here, with no messages (`sgListOnly`). A click loads it from the R730, as opening a chat by id always did; from then on it is a normal entry.

@@ -6,6 +6,7 @@
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "../sync.js";
 import { type RemoteChat, remoteChatOf } from "./chat-list.js";
+import { type RemoteText, remoteTextOf } from "./chat-text.js";
 import { type ImageRef, imageUrl } from "./image-refs.js";
 
 export type Json = Record<string, unknown>;
@@ -150,6 +151,52 @@ export async function primeChatsSync(body: Json): Promise<{ storeId: string; rev
 			return chat ? [chat] : [];
 		}),
 	};
+}
+
+/** Send chats' search text to the R730 (chat-text.ts). Answer: which were kept, and which it has a later form of. */
+export async function primeChatTextPush(
+	texts: Array<{ id: string; agentId: string; textAt: string; text: string }>,
+): Promise<{ kept: string[]; stale: Array<{ id: string; textAt: string }> }> {
+	const sync = ((await getSitegeistStorage().settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL).trim();
+	const token = await proxyToken();
+	const res = await fetch(`${sync.replace(/\/$/, "")}/chats/text`, {
+		method: "POST",
+		headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+		body: JSON.stringify({ texts }),
+		signal: AbortSignal.timeout(60_000),
+	});
+	if (!res.ok) throw new Error(`prime relay POST /chats/text -> ${res.status}`);
+	const parsed: unknown = await res.json();
+	if (!isJson(parsed)) throw new Error("prime relay POST /chats/text: unexpected answer");
+	const kept = Array.isArray(parsed.kept) ? parsed.kept.filter((v): v is string => typeof v === "string") : [];
+	const stale = Array.isArray(parsed.stale)
+		? parsed.stale.flatMap((s: unknown) =>
+				isJson(s) && typeof s.id === "string" && typeof s.textAt === "string"
+					? [{ id: s.id, textAt: s.textAt }]
+					: [],
+			)
+		: [];
+	return { kept, stale };
+}
+
+/** The R730's search text of these chats (chat-text.ts). `more`: not all fitted in one answer. */
+export async function primeChatTextPull(ids: string[]): Promise<{ texts: RemoteText[]; more: boolean }> {
+	const sync = ((await getSitegeistStorage().settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL).trim();
+	const token = await proxyToken();
+	const res = await fetch(`${sync.replace(/\/$/, "")}/chats/text?ids=${encodeURIComponent(ids.join(","))}`, {
+		headers: token ? { authorization: `Bearer ${token}` } : {},
+		signal: AbortSignal.timeout(60_000),
+	});
+	if (!res.ok) throw new Error(`prime relay GET /chats/text -> ${res.status}`);
+	const parsed: unknown = await res.json();
+	if (!isJson(parsed)) throw new Error("prime relay GET /chats/text: unexpected answer");
+	const texts = Array.isArray(parsed.texts)
+		? parsed.texts.flatMap((t: unknown): RemoteText[] => {
+				const text = remoteTextOf(t);
+				return text ? [text] : [];
+			})
+		: [];
+	return { texts, more: parsed.more === true };
 }
 
 /** One picture of a chat's history, by its link. `edge`: a copy no larger than that; without it, the stored file. */

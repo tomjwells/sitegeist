@@ -32,6 +32,8 @@ export interface RemoteChat {
 	usage?: Record<string, unknown>;
 	/** Deleted in some browser at this time: every browser drops the chat, unless it was used here after that. */
 	deletedAt?: string;
+	/** The R730 keeps the chat's search text, built from the chat as it was at this time (chat-text.ts). */
+	textAt?: string;
 	rev: number;
 }
 
@@ -68,6 +70,7 @@ export function remoteChatOf(v: unknown): RemoteChat | undefined {
 		...(typeof v.thinkingLevel === "string" ? { thinkingLevel: v.thinkingLevel } : {}),
 		...(isFields(v.usage) ? { usage: v.usage } : {}),
 		...(typeof v.deletedAt === "string" ? { deletedAt: v.deletedAt } : {}),
+		...(typeof v.textAt === "string" ? { textAt: v.textAt } : {}),
 	};
 }
 
@@ -140,14 +143,18 @@ export interface ChatListSyncState {
 	/** The list's counter at the last answer: the next call asks for what changed after it. */
 	rev: number;
 	sent: Record<string, string>;
+	/** Chat id -> what the R730's search text for it is built from ("" = none), as last heard (chat-text.ts). */
+	textAt: Record<string, string>;
 }
 
 export function syncStateOf(v: unknown): ChatListSyncState {
 	if (!isFields(v) || typeof v.storeId !== "string" || typeof v.rev !== "number" || !isFields(v.sent))
-		return { storeId: "", rev: 0, sent: {} };
+		return { storeId: "", rev: 0, sent: {}, textAt: {} };
 	const sent: Record<string, string> = {};
 	for (const [id, at] of Object.entries(v.sent)) if (typeof at === "string") sent[id] = at;
-	return { storeId: v.storeId, rev: v.rev, sent };
+	const textAt: Record<string, string> = {};
+	if (isFields(v.textAt)) for (const [id, at] of Object.entries(v.textAt)) if (typeof at === "string") textAt[id] = at;
+	return { storeId: v.storeId, rev: v.rev, sent, textAt };
 }
 
 /** A chat deleted in this browser that the R730 has not been told about yet. */

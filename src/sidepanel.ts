@@ -1773,12 +1773,16 @@ onChatListSynced((result) => {
 		void clearDraftAttachments(draftScope(), id);
 		void anchors.removeSession(id);
 	}
-	if (result.added + result.updated + result.removed.length > 0) refreshSessionsSidebar();
+	if (result.added + result.updated + result.removed.length + result.textFetched > 0) refreshSessionsSidebar();
 });
-// Back in front of this panel after time elsewhere (perhaps in another browser): fetch what changed.
+// Back in front of this panel after time elsewhere (perhaps in another browser): fetch what changed. And once a
+// minute while the panel is in front, so a chat Tom is working in on another machine is up to date here.
 document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") requestChatListSync(60_000);
 });
+setInterval(() => {
+	if (document.visibilityState === "visible") requestChatListSync(60_000);
+}, 60_000);
 
 // ============================================================================
 // TAB NAVIGATION TRACKING

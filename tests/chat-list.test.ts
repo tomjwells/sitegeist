@@ -101,12 +101,20 @@ test("the relay's answer and the stored state are checked before use", () => {
 	const ok = remoteChatOf({ ...remote("2026-11-10T02:00:00.000Z"), deletedAt: "2026-11-10T04:00:00.000Z", junk: 1 });
 	assert.equal(ok?.deletedAt, "2026-11-10T04:00:00.000Z");
 	assert.equal(ok && "junk" in ok, false);
-	assert.deepEqual(syncStateOf(null), { storeId: "", rev: 0, sent: {} });
-	assert.deepEqual(syncStateOf({ storeId: "s", rev: 3, sent: { "sg-a": "t", "sg-b": 4 } }), {
-		storeId: "s",
-		rev: 3,
-		sent: { "sg-a": "t" },
-	});
+	assert.deepEqual(syncStateOf(null), { storeId: "", rev: 0, sent: {}, textAt: {} });
+	assert.deepEqual(
+		syncStateOf({ storeId: "s", rev: 3, sent: { "sg-a": "t", "sg-b": 4 }, textAt: { "sg-a": "u", "sg-c": 1 } }),
+		{
+			storeId: "s",
+			rev: 3,
+			sent: { "sg-a": "t" },
+			textAt: { "sg-a": "u" },
+		},
+	);
+	assert.equal(
+		remoteChatOf({ ...remote("2026-11-10T02:00:00.000Z"), textAt: "2026-11-10T02:00:00.000Z" })?.textAt,
+		"2026-11-10T02:00:00.000Z",
+	);
 	assert.deepEqual(pendingDeletesOf([{ id: "sg-a", deletedAt: "t" }, { id: 3 }, "x"]), [
 		{ id: "sg-a", deletedAt: "t" },
 	]);

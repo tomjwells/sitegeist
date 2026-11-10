@@ -42,6 +42,21 @@ export class SessionSearchStore {
 		return record;
 	}
 
+	/** A chat's text as another browser built it, fetched from the R730 (prime/chat-text.ts). Keeps the aliases. */
+	async putRemote(id: string, text: string, textAt: string, lastModified: string): Promise<SearchRecord> {
+		const prev = await this.get(id);
+		const record: SearchRecord = {
+			id,
+			lastModified,
+			messageCount: prev?.messageCount ?? 0,
+			text,
+			aliases: prev?.aliases ?? [],
+			textFrom: textAt,
+		};
+		await this.backend.set(this.storeName, id, record);
+		return record;
+	}
+
 	async get(id: string): Promise<SearchRecord | null> {
 		return this.backend.get<SearchRecord>(this.storeName, id);
 	}

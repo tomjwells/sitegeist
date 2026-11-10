@@ -19,6 +19,7 @@
 		"src/utils/image-size.ts",
 		"src/prime/stored-messages.ts",
 		"src/prime/image-refs.ts",
-		"src/prime/chat-list.ts"
+		"src/prime/chat-list.ts",
+		"src/prime/chat-text.ts"
 	]
 }

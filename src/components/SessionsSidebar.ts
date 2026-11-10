@@ -79,8 +79,24 @@ export class SessionsSidebar extends LitElement {
 	}
 
 	override updated(changed: Map<string, unknown>) {
+		if (changed.has("open")) this.pollWhileOpen();
 		if (changed.has("open") && this.open) void this.refresh();
 		else if (changed.has("activeKey") && this.open) void this.refreshAnchors();
+	}
+
+	private pollTimer: ReturnType<typeof setInterval> | undefined;
+	/** While the list is open, ask the R730 for other browsers' changes every 15 s (the panel re-renders the list when something came). */
+	private pollWhileOpen(): void {
+		if (this.pollTimer) clearInterval(this.pollTimer);
+		this.pollTimer = undefined;
+		if (!this.open) return;
+		this.pollTimer = setInterval(() => requestChatListSync(15_000), 15_000);
+	}
+
+	override disconnectedCallback(): void {
+		super.disconnectedCallback();
+		if (this.pollTimer) clearInterval(this.pollTimer);
+		this.pollTimer = undefined;
 	}
 
 	private async refreshAnchors(): Promise<void> {
@@ -130,6 +146,8 @@ export class SessionsSidebar extends LitElement {
 			// are searched meanwhile.
 			if (isListOnly(s) || isBehind(s)) return false;
 			const r = this.searchIndex.get(s.id);
+			// A text fetched from the R730 (built by another browser) stands until this browser saves the chat again.
+			if (r?.textFrom !== undefined) return r.lastModified < s.lastModified;
 			return !r || r.lastModified !== s.lastModified || r.messageCount !== s.messageCount;
 		});
 		if (stale.length === 0) return Promise.resolve();

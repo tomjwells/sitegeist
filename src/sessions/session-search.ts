@@ -20,6 +20,8 @@ export interface SearchRecord {
 	text: string;
 	/** Other ids this session is known by (a prime session's native UUID and jsonl path on the R730). */
 	aliases?: string[];
+	/** Set when the text was fetched from the R730 (its textAt, prime/chat-text.ts); such a text is not sent back. */
+	textFrom?: string;
 }
 
 export interface SearchEntry {

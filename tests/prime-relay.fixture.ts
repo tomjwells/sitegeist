@@ -68,7 +68,9 @@ export interface StandInRelay {
 	/** Send these bridge events to the panel (and count them in the offset), as a running turn would. */
 	pushEvents(events: unknown[]): void;
 	/** The chat list every browser shares (POST /sitegeist/chats/sync), as the relay keeps it: deleted ones included. */
-	chatList(): Array<{ id: string; title: string; lastModified: string; deletedAt?: string }>;
+	chatList(): Array<{ id: string; title: string; lastModified: string; deletedAt?: string; textAt?: string }>;
+	/** The search text a browser sent for a chat (POST /sitegeist/chats/text), as the relay keeps it. */
+	chatText(id: string): string | undefined;
 	/** Close every panel socket (the connection died). */
 	dropSockets(): void;
 	/** Send the bridge's echo of accepted prompts that were held back (swallowPrompt) over the open sockets. */
@@ -135,6 +137,48 @@ export async function startStandInRelay(
 		const chats = [...chatEntries.values()].filter((e) => (e.rev > since && !wrote.has(e.id)) || beaten.has(e.id));
 		return { ok: true, storeId: chatStoreId, rev: chatRev, chats };
 	};
+	// The chats' search text (real relay: chatTextPut / chatTextGet): a later build replaces an earlier one.
+	const chatTexts = new Map<string, string>();
+	const chatTextPut = (body: Record<string, unknown>): Record<string, unknown> => {
+		const kept: string[] = [];
+		const stale: Array<{ id: string; textAt: string }> = [];
+		for (const t of Array.isArray(body.texts) ? body.texts : []) {
+			if (!isRecord(t) || typeof t.id !== "string" || typeof t.textAt !== "string" || typeof t.text !== "string")
+				continue;
+			const have = chatEntries.get(t.id);
+			if (have?.deletedAt) continue;
+			const at = typeof have?.textAt === "string" ? have.textAt : "";
+			if (at >= t.textAt) {
+				stale.push({ id: t.id, textAt: at });
+				continue;
+			}
+			chatTexts.set(t.id, t.text);
+			const base: ChatEntry = have ?? {
+				id: t.id,
+				agentId: t.agentId,
+				title: "",
+				createdAt: t.textAt,
+				lastModified: t.textAt,
+				messageCount: 0,
+				preview: "",
+				rev: 0,
+			};
+			chatEntries.set(t.id, { ...base, textAt: t.textAt, rev: ++chatRev });
+			kept.push(t.id);
+		}
+		return { ok: true, kept, stale, rev: chatRev };
+	};
+	const chatTextGet = (ids: string[]): Record<string, unknown> => ({
+		ok: true,
+		texts: ids.flatMap((id) => {
+			const e = chatEntries.get(id);
+			const text = chatTexts.get(id);
+			return e && !e.deletedAt && typeof e.textAt === "string" && text !== undefined
+				? [{ id, agentId: e.agentId, textAt: e.textAt, text }]
+				: [];
+		}),
+		more: false,
+	});
 	let modelListRequests = 0;
 	const sockets: MiniSocket[] = [];
 	const pending = new Map<string, (reply: { ok: boolean; result: unknown; error: string }) => void>();
@@ -213,7 +257,15 @@ export async function startStandInRelay(
 		}
 		res.setHeader("content-type", "application/json");
 		res.setHeader("access-control-allow-origin", "*");
-		if (url === "/sitegeist/chats/sync" && req.method === "POST") {
+		if (url.split("?")[0] === "/sitegeist/chats/text" && req.method === "GET") {
+			const ids = (new URL(url, "http://x").searchParams.get("ids") ?? "").split(",").filter(Boolean);
+			res.end(JSON.stringify(chatTextGet(ids)));
+		} else if (url === "/sitegeist/chats/text" && req.method === "POST") {
+			const chunks: Buffer[] = [];
+			for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+			const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+			res.end(JSON.stringify(chatTextPut(isRecord(parsed) ? parsed : {})));
+		} else if (url === "/sitegeist/chats/sync" && req.method === "POST") {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
 			const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -436,7 +488,9 @@ export async function startStandInRelay(
 				title: typeof e.title === "string" ? e.title : "",
 				lastModified: e.lastModified,
 				...(e.deletedAt ? { deletedAt: e.deletedAt } : {}),
+				...(typeof e.textAt === "string" ? { textAt: e.textAt } : {}),
 			})),
+		chatText: (id) => chatTexts.get(id),
 		pushEvents: (events) => {
 			for (const e of events)
 				if (isRecord(e) && e.type === "message_end" && isRecord(e.message)) history.push(e.message);
