@@ -27,7 +27,8 @@ import { seededPrimeSession, startStandInRelay } from "./prime-relay.fixture.ts"
 import { launchWithSidePanel, sleep } from "./side-panel-cdp.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const dist = join(root, "dist-chrome");
+/** SIDE_PANEL_DIST: test another build, e.g. an unzipped published package. */
+const dist = process.env.SIDE_PANEL_DIST ?? join(root, "dist-chrome");
 const EXTENSION_ID = "oinkecmkedjjomenbjealdcgbaipaadb"; // fixed by the manifest key
 const SID = "sg-4e4e4e4e4e4e";
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
