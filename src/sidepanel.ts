@@ -109,6 +109,7 @@ import {
 } from "./tools/repl/runtime-providers.js";
 import { hasSidePanelApi, isFirefoxExtension, sidebarActionApi } from "./utils/browser-compat.js";
 import { draftHandoffKey } from "./utils/open-beside.js";
+import { PANEL_PLACE_KEY, type PanelPlace, parsePanelPlace, queryToRestore, samePlace } from "./utils/panel-place.js";
 import type { AcquireLockMessage } from "./utils/port.js";
 import * as port from "./utils/port.js";
 import {
@@ -118,6 +119,7 @@ import {
 	isPanelTab,
 	isWebUrl,
 	pagesOnScreen,
+	panelHostIsTab,
 	panelTab,
 	panelWindow,
 	rememberedPage,
@@ -386,6 +388,46 @@ let currentAnchors: AnchorBinding[] = [];
 let pendingAnchor: { url: string; title: string } | undefined;
 /** Page keys Tom overrode by hand in this panel (picked another session / New / Undo): no auto-resume there. */
 const AUTO_RESUME_SUPPRESSED_KEY = "sg.autoResumeSuppressed";
+
+/** Chrome / Edge side panel (not a panel tab, not the Firefox sidebar): see utils/panel-place.ts. */
+const isRealSidePanel = (): boolean => hasSidePanelApi() && !panelHostIsTab();
+// Read once, as the document starts: every later await would make a reload look like a panel opened long after.
+const placeAtStart = { place: readPanelPlace(), at: Date.now() };
+let savedPlace: PanelPlace | undefined;
+
+function readPanelPlace(): PanelPlace | undefined {
+	try {
+		return parsePanelPlace(sessionStorage.getItem(PANEL_PLACE_KEY));
+	} catch {
+		return undefined;
+	}
+}
+
+function writePanelPlace(place: PanelPlace): void {
+	if (samePlace(savedPlace, place)) return;
+	savedPlace = place;
+	try {
+		sessionStorage.setItem(PANEL_PLACE_KEY, JSON.stringify(place));
+	} catch {
+		/* private mode / quota: a browser reload then starts the usual way */
+	}
+}
+
+/**
+ * A real side panel keeps its address bare and its place in sessionStorage (Edge 156 reloads a side panel whose
+ * address is not the start address on every tab switch). Called on every render once the panel has loaded.
+ */
+function keepPanelPlaceStored(): void {
+	if (!appReady || !isRealSidePanel()) return;
+	writePanelPlace(currentSessionId ? { session: currentSessionId } : agentChosen ? { agent: agentKind } : {});
+	if (window.location.search !== "" || window.location.hash !== "") {
+		window.history.replaceState({}, "", window.location.pathname);
+	}
+}
+// The document is going away (closed, or reloaded by the browser): the next start tells the two apart by this time.
+window.addEventListener("pagehide", () => {
+	if (savedPlace) writePanelPlace({ ...savedPlace, leftAt: Date.now() });
+});
 
 // Track which skills we've shown in full (skillName -> lastUpdated timestamp)
 // Reset when a new session/agent is created
@@ -782,6 +824,7 @@ async function onActiveTabChanged(): Promise<void> {
 }
 
 const updateUrl = (sessionId: string) => {
+	if (appReady && isRealSidePanel()) return; // the address stays bare; the place is stored on the next render
 	const url = new URL(window.location.href);
 	url.searchParams.set("session", sessionId);
 	window.history.replaceState({}, "", url);
@@ -1497,6 +1540,7 @@ const switchAgentKind = async (kind: AgentKind) => {
 // RENDER
 // ============================================================================
 const renderApp = () => {
+	keepPanelPlaceStored();
 	// bottom-left footer: the id Tom can paste into session search / quote in a bug report
 	setFooterSession(currentSessionId ?? (isPrimeAgent(agent) ? agent.primeSessionId : undefined));
 	chatPanel?.agentInterface?.requestUpdate();
@@ -2112,6 +2156,19 @@ async function initApp() {
 	// Handle test steps
 	if (await testSteps()) {
 		return;
+	}
+
+	// The browser reloaded a living side panel at its start address (Edge 156, on a tab switch): back to the chat, or
+	// the new chat and its agent, the panel was on. A panel opened some time after the last one closed starts below.
+	if (isRealSidePanel()) {
+		const back = queryToRestore(window.location.search, window.location.hash, placeAtStart.place, placeAtStart.at);
+		if (back) {
+			console.log("[panel] reloaded by the browser at its start address; back to", back);
+			window.history.replaceState({}, "", `${window.location.pathname}${back}`);
+			// Stored again without the time the last document left: this document is the living panel now.
+			const { session, agent } = placeAtStart.place ?? {};
+			writePanelPlace({ ...(session ? { session } : {}), ...(agent ? { agent } : {}) });
+		}
 	}
 
 	// Check for session in URL

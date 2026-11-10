@@ -44,6 +44,8 @@
 		"test:speak": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/speak.test.ts",
 		"test:speak:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/speak-extension.test.ts",
 		"test:sessions-sidebar:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/sessions-sidebar-extension.test.ts",
+		"test:panel-place": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=30000 --test-force-exit tests/panel-place.test.ts",
+		"test:side-panel:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/side-panel-extension.test.ts",
 		"test:header-agent:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/header-agent-extension.test.ts"
 	},
 	"dependencies": {
