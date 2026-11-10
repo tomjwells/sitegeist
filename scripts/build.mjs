@@ -365,12 +365,14 @@ const getStaticFiles = () => {
 };
 
 /**
- * Firefox updates an installed add-on only when the version in updates.json is higher than the installed one, so
- * every Firefox build gets "<major>.<minor>.<number of commits>" (1.0.256): it grows with each commit, and two
- * builds of the same commit have the same version (a republish is not offered as an update). Chrome's manifest is
- * copied unchanged ("Load unpacked" does not care).
+ * One version per build, the same in every browser (Tom, 2026-11-10: "establish the convention that the extension
+ * version is consistent"): "<major>.<minor>.<number of commits>" (1.0.289). Firefox needs a number that grows: it
+ * updates an installed add-on only when updates.json carries a higher version, and two builds of the same commit
+ * share the number (a republish is not offered as an update). Chrome gets the same number, so both browsers show
+ * one version; version_name is dropped because Chrome would show it instead. publish-extension refuses to publish a
+ * build whose Chrome and Firefox versions differ.
  */
-function firefoxVersion(staticVersion) {
+function extensionVersion(staticVersion) {
 	const [major = "1", minor = "0"] = String(staticVersion).split(".");
 	const commits = git(["rev-list", "--count", "HEAD"]);
 	return `${major}.${minor}.${/^[0-9]+$/.test(commits) ? commits : "0"}`;
@@ -379,12 +381,9 @@ function firefoxVersion(staticVersion) {
 const writeManifest = () => {
 	const manifestSource = join(packageRoot, `static/manifest.${targetBrowser}.json`);
 	const manifestDest = join(outDir, "manifest.json");
-	if (targetBrowser !== "firefox") {
-		copyFileSync(manifestSource, manifestDest);
-		return;
-	}
 	const manifest = JSON.parse(readFileSync(manifestSource, "utf8"));
-	manifest.version = firefoxVersion(manifest.version);
+	manifest.version = extensionVersion(manifest.version);
+	delete manifest.version_name;
 	writeFileSync(manifestDest, `${JSON.stringify(manifest, null, "\t")}\n`);
 };
 
