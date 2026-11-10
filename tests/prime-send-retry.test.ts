@@ -269,9 +269,11 @@ test(
 				"fifth failed",
 			);
 			await page.goto(`${panelUrl}?session=${SID}`);
-			await dismissPermissionDialog(page);
 			await until(
-				() => view(page),
+				async () => {
+					await dismissPermissionDialog(page); // in the loop: see the first open above
+					return view(page);
+				},
 				(v) => states(v) === "sent,sent,sent,sent,failed",
 				30_000,
 				"fifth still there after reload",

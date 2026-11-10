@@ -5,6 +5,7 @@
  */
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "../sync.js";
+import { type RemoteChat, remoteChatOf } from "./chat-list.js";
 import { type ImageRef, imageUrl } from "./image-refs.js";
 
 export type Json = Record<string, unknown>;
@@ -121,6 +122,34 @@ export interface PrimeHydration {
 	messages: Json[];
 	/** Messages waiting in the relay's queue, in order. */
 	queue: PrimeQueuedItem[];
+}
+
+/**
+ * The chat list every browser shares (chat-list.ts): send what changed here, get what changed elsewhere.
+ * Not per agent: one list for all R730 chats.
+ */
+export async function primeChatsSync(body: Json): Promise<{ storeId: string; rev: number; chats: RemoteChat[] }> {
+	const sync = ((await getSitegeistStorage().settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL).trim();
+	const token = await proxyToken();
+	const res = await fetch(`${sync.replace(/\/$/, "")}/chats/sync`, {
+		method: "POST",
+		headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+		body: JSON.stringify(body),
+		signal: AbortSignal.timeout(20_000),
+	});
+	if (!res.ok) throw new Error(`prime relay POST /chats/sync -> ${res.status}`);
+	const parsed: unknown = await res.json();
+	if (!isJson(parsed) || typeof parsed.storeId !== "string" || typeof parsed.rev !== "number")
+		throw new Error("prime relay POST /chats/sync: unexpected answer");
+	const chats = Array.isArray(parsed.chats) ? parsed.chats : [];
+	return {
+		storeId: parsed.storeId,
+		rev: parsed.rev,
+		chats: chats.flatMap((c: unknown): RemoteChat[] => {
+			const chat = remoteChatOf(c);
+			return chat ? [chat] : [];
+		}),
+	};
 }
 
 /** One picture of a chat's history, by its link. `edge`: a copy no larger than that; without it, the stored file. */

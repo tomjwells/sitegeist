@@ -8,6 +8,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { FolderCog, Link2Off, Pin, PinOff, Plus, Trash2, X } from "lucide";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend } from "../anchors/anchors.js";
 import { SitegeistSessionListDialog } from "../dialogs/SessionListDialog.js";
+import { isBehind, isListOnly } from "../prime/chat-list.js";
+import { requestChatListSync } from "../prime/chat-list-sync.js";
 import { agentIdFromSessionId, isPrimeSessionId, MAIN_AGENT_ID } from "../prime/constants.js";
 import { primeNativeIds } from "../prime/prime-client.js";
 import { isStoredSlim } from "../prime/stored-messages.js";
@@ -87,6 +89,9 @@ export class SessionsSidebar extends LitElement {
 
 	async refresh(): Promise<void> {
 		const storage = getSitegeistStorage();
+		// The list is shared with the other browsers: look for their changes (at most one call per 15 s). The panel
+		// calls refresh() again when the answer changed anything.
+		requestChatListSync(15_000);
 		try {
 			const [sessions, pinned, lockResponse, anchors, index] = await Promise.all([
 				storage.sessions.getAllMetadata(),
@@ -120,6 +125,10 @@ export class SessionsSidebar extends LitElement {
 			// An R730 chat's record from before 1.0.284 may be very large (see src/prime/stored-messages.ts): it is not
 			// read here. Opening the chat saves it again in the slim form and indexes it.
 			if (isPrimeSessionId(s.id) && !isStoredSlim(s)) return false;
+			// A chat from another browser has no messages here (list only), and one used later elsewhere has an
+			// older copy (behind): there is nothing new to index until the chat is opened here. Title and preview
+			// are searched meanwhile.
+			if (isListOnly(s) || isBehind(s)) return false;
 			const r = this.searchIndex.get(s.id);
 			return !r || r.lastModified !== s.lastModified || r.messageCount !== s.messageCount;
 		});
@@ -186,7 +195,11 @@ export class SessionsSidebar extends LitElement {
 
 	private async deleteSession(id: string, e: Event) {
 		e.stopPropagation();
-		if (!confirm(i18n("Delete this session?"))) return;
+		// An R730 chat is in every browser's list, and a delete here removes it from all of them.
+		const question = isPrimeSessionId(id)
+			? "Delete this chat? It is removed from the list in every browser."
+			: i18n("Delete this session?");
+		if (!confirm(question)) return;
 		const storage = getSitegeistStorage();
 		await storage.sessions.deleteSession(id);
 		await storage.sessionSearch.remove(id).catch(() => undefined);
@@ -365,13 +378,16 @@ export class SessionsSidebar extends LitElement {
 		const isPinned = pinnedIndex !== undefined;
 		const pages = this.pageCount(session.id);
 		const dropHere = isPinned && this.dropIndex === pinnedIndex && this.dragIndex !== pinnedIndex;
+		const listOnly = isListOnly(session);
 		return html`
 			<div
 				class="group flex items-start gap-2 px-2 py-1.5 rounded-md border ${dropHere ? "border-primary" : "border-transparent"} ${
 					current ? "bg-secondary/60" : locked ? "opacity-70 hover:bg-secondary/40" : "hover:bg-secondary/40"
 				} cursor-pointer"
-				title=${locked ? `Open in ${this.lockedWhere(session.id)}. Click to open it here.` : ""}
+				title=${locked ? `Open in ${this.lockedWhere(session.id)}. Click to open it here.` : listOnly ? "Not opened in this browser yet. It loads from the R730." : ""}
 				data-locked=${locked ? "true" : "false"}
+				data-list-only=${listOnly ? "true" : "false"}
+				data-session-id=${session.id}
 				draggable=${isPinned ? "true" : "false"}
 				@click=${() => (locked ? this.onSelectLocked(session.id, this.heldByTab(session.id)) : this.onSelect(session.id))}
 				@dragstart=${(e: DragEvent) => {

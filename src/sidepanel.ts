@@ -51,6 +51,7 @@ import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
 import { registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
+import { onChatListSynced, requestChatListSync, syncChatList } from "./prime/chat-list-sync.js";
 import { cachedModels, MODELS_FRESH_MS, refreshModels, warmModelCache } from "./prime/model-cache.js";
 import "./components/SpeakBar.js";
 import "./components/SpeakButton.js";
@@ -199,6 +200,9 @@ const refreshModelCatalog = async (): Promise<void> => {
 	}
 };
 setAppStorage(storage);
+// The list of R730 chats is shared by every browser (src/prime/chat-list.ts): a chat saved, renamed or deleted
+// here is sent to the R730's list soon after.
+storage.sessions.onListChange = (what) => requestChatListSync(what === "save" ? 20_000 : 2_000);
 
 // ============================================================================
 // APP STATE
@@ -1759,6 +1763,23 @@ const refreshSessionsSidebar = () => {
 	if (isSessionsSidebar(el) && sessionsSidebarOpen) void el.refresh();
 };
 
+// The shared chat list brought changes from another browser: show them, and drop what this browser kept for a
+// chat that was deleted there (its unsent draft and page bindings). The chat open in this panel keeps its draft:
+// if Tom goes on in it, its next save puts the chat back in every browser's list.
+onChatListSynced((result) => {
+	for (const id of result.removed) {
+		if (id === currentSessionId) continue;
+		clearPromptDraft(draftScope(), id);
+		void clearDraftAttachments(draftScope(), id);
+		void anchors.removeSession(id);
+	}
+	if (result.added + result.updated + result.removed.length > 0) refreshSessionsSidebar();
+});
+// Back in front of this panel after time elsewhere (perhaps in another browser): fetch what changed.
+document.addEventListener("visibilitychange", () => {
+	if (document.visibilityState === "visible") requestChatListSync(60_000);
+});
+
 // ============================================================================
 // TAB NAVIGATION TRACKING
 // ============================================================================
@@ -2070,6 +2091,9 @@ async function initApp() {
 
 	// Reconcile skills + custom instructions with the sync server (re-hydrates after a reinstall)
 	await syncWithServer();
+	// The chat list every browser shares. Not awaited: the panel opens with this browser's own list, and chats
+	// from other browsers appear in the list when the answer is in.
+	void syncChatList();
 
 	sessionsSidebarOpen = (await storage.settings.get<boolean>(SESSIONS_SIDEBAR_OPEN_SETTING)) === true;
 	toolCallsCollapsed = (await storage.settings.get<boolean>(TOOL_CALLS_COLLAPSED_SETTING)) === true;

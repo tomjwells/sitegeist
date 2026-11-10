@@ -67,6 +67,8 @@ export interface StandInRelay {
 	socketQueries: string[];
 	/** Send these bridge events to the panel (and count them in the offset), as a running turn would. */
 	pushEvents(events: unknown[]): void;
+	/** The chat list every browser shares (POST /sitegeist/chats/sync), as the relay keeps it: deleted ones included. */
+	chatList(): Array<{ id: string; title: string; lastModified: string; deletedAt?: string }>;
 	/** Close every panel socket (the connection died). */
 	dropSockets(): void;
 	/** Send the bridge's echo of accepted prompts that were held back (swallowPrompt) over the open sockets. */
@@ -89,6 +91,50 @@ export async function startStandInRelay(
 	const hydrateQueries: string[] = [];
 	const imageRequests: Array<{ hash: string; query: string; authorization: string }> = [];
 	const socketQueries: string[] = [];
+	// The shared chat list, with the real relay's rules (cors-proxy server.ts chatsSync): the later change wins, a
+	// delete is kept as deletedAt, a chat used after its delete is back, and a caller gets what changed after `since`.
+	type ChatEntry = Record<string, unknown> & { id: string; lastModified: string; rev: number; deletedAt?: string };
+	const chatEntries = new Map<string, ChatEntry>();
+	const chatStoreId = "stand-in-chat-list";
+	let chatRev = 0;
+	const chatsSync = (body: Record<string, unknown>): Record<string, unknown> => {
+		const wrote = new Set<string>();
+		const beaten = new Set<string>();
+		for (const c of Array.isArray(body.chats) ? body.chats : []) {
+			if (!isRecord(c) || typeof c.id !== "string" || typeof c.lastModified !== "string") continue;
+			const have = chatEntries.get(c.id);
+			const beats = !have || (have.deletedAt ? c.lastModified > have.deletedAt : c.lastModified > have.lastModified);
+			if (!beats) {
+				if (have && (have.deletedAt || have.lastModified > c.lastModified)) beaten.add(c.id);
+				continue;
+			}
+			chatEntries.set(c.id, { ...c, id: c.id, lastModified: c.lastModified, rev: ++chatRev });
+			wrote.add(c.id);
+		}
+		for (const d of Array.isArray(body.deleted) ? body.deleted : []) {
+			if (!isRecord(d) || typeof d.id !== "string" || typeof d.deletedAt !== "string") continue;
+			const have = chatEntries.get(d.id);
+			if (have?.deletedAt) continue;
+			if (have && have.lastModified > d.deletedAt) {
+				beaten.add(d.id);
+				continue;
+			}
+			const base: ChatEntry = have ?? {
+				id: d.id,
+				agentId: d.agentId,
+				title: "",
+				createdAt: d.deletedAt,
+				lastModified: d.deletedAt,
+				messageCount: 0,
+				rev: 0,
+			};
+			chatEntries.set(d.id, { ...base, preview: "", deletedAt: d.deletedAt, rev: ++chatRev });
+			wrote.add(d.id);
+		}
+		const since = body.storeId === chatStoreId && typeof body.since === "number" ? body.since : 0;
+		const chats = [...chatEntries.values()].filter((e) => (e.rev > since && !wrote.has(e.id)) || beaten.has(e.id));
+		return { ok: true, storeId: chatStoreId, rev: chatRev, chats };
+	};
 	let modelListRequests = 0;
 	const sockets: MiniSocket[] = [];
 	const pending = new Map<string, (reply: { ok: boolean; result: unknown; error: string }) => void>();
@@ -167,7 +213,12 @@ export async function startStandInRelay(
 		}
 		res.setHeader("content-type", "application/json");
 		res.setHeader("access-control-allow-origin", "*");
-		if (url === "/sitegeist/agents") {
+		if (url === "/sitegeist/chats/sync" && req.method === "POST") {
+			const chunks: Buffer[] = [];
+			for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+			const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+			res.end(JSON.stringify(chatsSync(isRecord(parsed) ? parsed : {})));
+		} else if (url === "/sitegeist/agents") {
 			res.end(JSON.stringify({ agents: [{ id: "prime", label: "main-pi (prime-agent)", ok: true }] }));
 		} else if (url === `${prime}/models` && req.method === "GET") {
 			// The agent's model menu (the relay serves the Telegram router's /models list); needs no session.
@@ -379,6 +430,13 @@ export async function startStandInRelay(
 		hydrateQueries,
 		imageRequests,
 		socketQueries,
+		chatList: () =>
+			[...chatEntries.values()].map((e) => ({
+				id: e.id,
+				title: typeof e.title === "string" ? e.title : "",
+				lastModified: e.lastModified,
+				...(e.deletedAt ? { deletedAt: e.deletedAt } : {}),
+			})),
 		pushEvents: (events) => {
 			for (const e of events)
 				if (isRecord(e) && e.type === "message_end" && isRecord(e.message)) history.push(e.message);

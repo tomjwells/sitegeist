@@ -26,6 +26,8 @@ export class SitegeistAppStorage extends BaseAppStorage {
 	readonly draftAttachments: DraftAttachmentsStore;
 	/** Narrowed type of the base `providerKeys` so callers can pass `{ sync: false }`. */
 	declare readonly providerKeys: SitegeistProviderKeysStore;
+	/** Narrowed type of the base `sessions`: the shared chat list uses the store's own methods (applyRemoteChat, onListChange). */
+	declare readonly sessions: SitegeistSessionsStore;
 
 	constructor() {
 		// 1. Create all stores (no backend yet)

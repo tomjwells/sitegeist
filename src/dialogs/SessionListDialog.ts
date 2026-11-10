@@ -6,8 +6,19 @@ import { formatUsage, type SessionData, type SessionMetadata } from "@mariozechn
 import Fuse from "fuse.js";
 import { html } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { isPrimeSessionId } from "../prime/constants.js";
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import * as port from "../utils/port.js";
+
+/**
+ * R730 chats are in every browser's list (src/prime/chat-list.ts), and a delete here removes them from all of
+ * them: the question says so, with the number, before a bulk delete can do it by surprise.
+ */
+function everyBrowserNote(ids: string[]): string {
+	const n = ids.filter((id) => isPrimeSessionId(id)).length;
+	if (n === 0) return "";
+	return `\n\n${n === 1 ? "1 of them is an R730 chat: it is" : `${n} of them are R730 chats: they are`} removed from the list in every browser.`;
+}
 
 type ExportedSession = {
 	session: SessionData;
@@ -83,7 +94,10 @@ export class SitegeistSessionListDialog extends DialogBase {
 	private async handleDelete(sessionId: string, event: Event) {
 		event.stopPropagation();
 
-		if (!confirm(i18n("Delete this session?"))) {
+		const question = isPrimeSessionId(sessionId)
+			? "Delete this chat? It is removed from the list in every browser."
+			: i18n("Delete this session?");
+		if (!confirm(question)) {
 			return;
 		}
 
@@ -228,7 +242,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 			i18n(`Delete ALL {count} sessions? This cannot be undone!`).replace(
 				"{count}",
 				this.sessions.length.toString(),
-			),
+			) + everyBrowserNote(this.sessions.map((s) => s.id)),
 		);
 
 		if (!confirmed) return;
@@ -265,7 +279,7 @@ export class SitegeistSessionListDialog extends DialogBase {
 		const confirmed = confirm(
 			i18n(`Delete {count} sessions older than {days} days?`)
 				.replace("{count}", oldSessions.length.toString())
-				.replace("{days}", days.toString()),
+				.replace("{days}", days.toString()) + everyBrowserNote(oldSessions.map((s) => s.id)),
 		);
 
 		if (!confirmed) return;
