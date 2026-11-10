@@ -11,6 +11,24 @@ const PAGES: Record<string, string> = { "/article": "#cc0000", "/other": "#0000c
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
+/**
+ * The model the stand-in session runs. The real bridge's session state names the running model, and since 1.0.284
+ * the panel takes it from there: a stored record without the slim mark is not read while the R730 has the chat.
+ * (The stand-in sent no model, so the model-menu test saw the placeholder model and failed from 1.0.284 on.)
+ */
+export const STAND_IN_MODEL = {
+	id: "claude-haiku-4-5",
+	name: "Claude Haiku 4.5",
+	provider: "anthropic",
+	api: "anthropic-messages",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+};
+
 export interface StandInRelay {
 	/** http://127.0.0.1:<port>; the relay lives at <base>/sitegeist (the panel's sync.url). */
 	base: string;
@@ -41,6 +59,14 @@ export interface StandInRelay {
 	rpcCalls: Array<Record<string, unknown>>;
 	/** How many times the panel asked for the agent's model list (GET …/models). */
 	readonly modelListRequests: number;
+	/** The query string of each hydrate (GET …/sessions/<id>), in order: "images=refs" from a panel that draws pictures by link. */
+	hydrateQueries: string[];
+	/** Picture fetches (GET …/images/<hash>), in order. */
+	imageRequests: Array<{ hash: string; query: string; authorization: string }>;
+	/** The query string of each panel socket (…/ws?offset=N&images=refs&token=…), in order. */
+	socketQueries: string[];
+	/** Send these bridge events to the panel (and count them in the offset), as a running turn would. */
+	pushEvents(events: unknown[]): void;
 	/** Close every panel socket (the connection died). */
 	dropSockets(): void;
 	/** Send the bridge's echo of accepted prompts that were held back (swallowPrompt) over the open sockets. */
@@ -53,9 +79,16 @@ export interface StandInRelay {
 export async function startStandInRelay(
 	sessionId: string,
 	messages: unknown[],
-	opts: { models?: unknown[] } = {},
+	opts: {
+		models?: unknown[];
+		/** The chat's picture store, by hash: what GET …/images/<hash> serves (the real relay fills it from the history). */
+		images?: Record<string, { bytes: Buffer; mimeType: string }>;
+	} = {},
 ): Promise<StandInRelay> {
 	const rpcCalls: Array<Record<string, unknown>> = [];
+	const hydrateQueries: string[] = [];
+	const imageRequests: Array<{ hash: string; query: string; authorization: string }> = [];
+	const socketQueries: string[] = [];
 	let modelListRequests = 0;
 	const sockets: MiniSocket[] = [];
 	const pending = new Map<string, (reply: { ok: boolean; result: unknown; error: string }) => void>();
@@ -142,13 +175,28 @@ export async function startStandInRelay(
 			res.end(JSON.stringify({ ok: true, agent: "prime", models: opts.models ?? [], notice: null }));
 		} else if (url.startsWith(`${prime}/native-ids`)) {
 			res.end(JSON.stringify({ ok: true, agent: "prime", ids: {} }));
-		} else if (url === session && req.method === "GET") {
+		} else if (url.startsWith(`${session}/images/`) && req.method === "GET") {
+			const [path = "", query = ""] = url.split("?");
+			const hash = path.slice(`${session}/images/`.length);
+			imageRequests.push({ hash, query, authorization: req.headers.authorization ?? "" });
+			const image = opts.images?.[hash];
+			if (!image) {
+				res.statusCode = 404;
+				res.end(JSON.stringify({ error: "not found" }));
+				return;
+			}
+			res.setHeader("content-type", image.mimeType);
+			res.setHeader("cache-control", "private, max-age=31536000, immutable");
+			res.end(image.bytes);
+		} else if (url.split("?")[0] === session && req.method === "GET") {
+			hydrateQueries.push(url.split("?")[1] ?? "");
 			res.end(
 				JSON.stringify({
 					ok: true,
 					sessionId,
 					offset,
 					state: {
+						model: STAND_IN_MODEL,
 						thinkingLevel: "high",
 						isStreaming: busy,
 						sessionActions: { queuedCount: 0, steering: [], followUps: [] },
@@ -253,7 +301,7 @@ export async function startStandInRelay(
 			if (isRecord(parsed)) rpcCalls.push(parsed);
 			const data =
 				isRecord(parsed) && parsed.type === "get_state"
-					? { thinkingLevel: "high", isStreaming: false }
+					? { model: STAND_IN_MODEL, thinkingLevel: "high", isStreaming: false }
 					: isRecord(parsed) && parsed.type === "get_available_models"
 						? { models: opts.models ?? [] }
 						: {};
@@ -268,6 +316,7 @@ export async function startStandInRelay(
 			raw.destroy();
 			return;
 		}
+		socketQueries.push((req.url ?? "").split("?")[1] ?? "");
 		const ws = acceptWebSocket(req, raw);
 		sockets.push(ws);
 		ws.onClose(() => {
@@ -327,6 +376,14 @@ export async function startStandInRelay(
 		},
 		openSockets: () => sockets.length,
 		rpcCalls,
+		hydrateQueries,
+		imageRequests,
+		socketQueries,
+		pushEvents: (events) => {
+			for (const e of events)
+				if (isRecord(e) && e.type === "message_end" && isRecord(e.message)) history.push(e.message);
+			emit(events);
+		},
 		get modelListRequests() {
 			return modelListRequests;
 		},
@@ -376,18 +433,7 @@ export function imageOf(result: unknown): string | undefined {
 
 /** A prime session as the panel stores it (IndexedDB sessions + sessions-metadata). */
 export function seededPrimeSession(id: string, title: string) {
-	const model = {
-		id: "claude-haiku-4-5",
-		name: "Claude Haiku 4.5",
-		provider: "anthropic",
-		api: "anthropic-messages",
-		baseUrl: "https://api.anthropic.com",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200000,
-		maxTokens: 8192,
-	};
+	const model = STAND_IN_MODEL;
 	const usage = {
 		input: 1,
 		output: 1,

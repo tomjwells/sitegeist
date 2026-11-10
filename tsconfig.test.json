@@ -17,6 +17,7 @@
 		"src/prime/bridge-notice.ts",
 		"scripts/build.mjs",
 		"src/utils/image-size.ts",
-		"src/prime/stored-messages.ts"
+		"src/prime/stored-messages.ts",
+		"src/prime/image-refs.ts"
 	]
 }

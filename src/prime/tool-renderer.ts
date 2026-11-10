@@ -33,6 +33,8 @@ import {
 	Terminal,
 	Wrench,
 } from "lucide";
+import { drawnImages } from "./image-refs.js";
+import "./remote-image.js"; // <sg-remote-image>
 import { isRecord, primeToolSubtitleText, primeToolTitle, str } from "./tool-summary.js";
 
 type Icon = typeof Globe;
@@ -75,12 +77,11 @@ function textOf(result: ToolResultMessage<unknown>): string {
 }
 
 function imagesOf(result: ToolResultMessage<unknown>): TemplateResult[] {
-	return result.content
-		.filter((c): c is { type: "image"; data: string; mimeType: string } => c.type === "image")
-		.map(
-			(c) =>
-				html`<img class="max-h-64 rounded border border-border mt-2" src="data:${c.mimeType};base64,${c.data}" alt="tool image" />`,
-		);
+	return drawnImages(result.content).map((d) =>
+		d.kind === "link"
+			? html`<div class="mt-2"><sg-remote-image .imageRef=${d.ref} .maxHeight=${256}></sg-remote-image></div>`
+			: html`<img class="max-h-64 rounded border border-border mt-2" src=${d.src} alt="tool image" />`,
+	);
 }
 
 /** The one line shown under the title when a result exists: the first line of the output (errors in red). */

@@ -5,6 +5,7 @@
  */
 import { getSitegeistStorage } from "../storage/app-storage.js";
 import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "../sync.js";
+import { type ImageRef, imageUrl } from "./image-refs.js";
 
 export type Json = Record<string, unknown>;
 export const isJson = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -122,8 +123,22 @@ export interface PrimeHydration {
 	queue: PrimeQueuedItem[];
 }
 
+/** One picture of a chat's history, by its link. `edge`: a copy no larger than that; without it, the stored file. */
+export async function primeImage(ref: ImageRef, edge?: number): Promise<Blob> {
+	const sync = ((await getSitegeistStorage().settings.get<string>(SYNC_URL_SETTING)) ?? DEFAULT_SYNC_URL).trim();
+	const token = await proxyToken();
+	const res = await fetch(imageUrl(sync, ref, edge), {
+		headers: token ? { authorization: `Bearer ${token}` } : {},
+		signal: AbortSignal.timeout(60_000),
+	});
+	if (!res.ok) throw new Error(`prime relay: picture ${ref.hash.slice(0, 8)} -> ${res.status}`);
+	return res.blob();
+}
+
 export async function primeHydrate(agentId: string, sessionId: string): Promise<PrimeHydration> {
-	const r = await request(agentId, "GET", `/sessions/${encodeURIComponent(sessionId)}`);
+	// images=refs: pictures come as links (image-refs.ts), so the history is text. A relay that does not know the
+	// option sends them inline, and they are drawn from there.
+	const r = await request(agentId, "GET", `/sessions/${encodeURIComponent(sessionId)}?images=refs`);
 	if (r.ok !== true) throw new Error("prime relay: session is not available (bridge could not start it)");
 	return {
 		offset: typeof r.offset === "number" ? r.offset : 0,
@@ -394,7 +409,9 @@ export class PrimeSocket {
 		const base = await primeBaseUrl(this.agentId);
 		// Browsers cannot set headers on a WebSocket handshake, so the token travels as a query parameter.
 		const token = await proxyToken();
-		const url = `${base.replace(/^http/, "ws")}/sessions/${encodeURIComponent(this.sessionId)}/ws?offset=${this.offset}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+		// images=refs: pictures in the events come as links, like the history (image-refs.ts). The bridge's events carry
+		// a tool result's picture five times per turn; inline, one screenshot was about 1 MB down the tunnel.
+		const url = `${base.replace(/^http/, "ws")}/sessions/${encodeURIComponent(this.sessionId)}/ws?offset=${this.offset}&images=refs${token ? `&token=${encodeURIComponent(token)}` : ""}`;
 		this.handlers.onStatus("connecting", this.attempt > 0 ? `attempt ${this.attempt + 1}` : undefined);
 		const ws = new WebSocket(url);
 		this.ws = ws;

@@ -2,6 +2,8 @@ import type { Attachment, MessageRenderer } from "@mariozechner/pi-web-ui";
 import { registerMessageRenderer, type UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { drawnImages } from "../prime/image-refs.js";
+import "../prime/remote-image.js"; // <sg-remote-image>
 import { SEND_ACTION_EVENT, type SendActionDetail, sendStateOf } from "../prime/send-state.js";
 
 /**
@@ -57,6 +59,11 @@ export class SitegeistUserMessage extends LitElement {
 				: (this.message.content.find((c) => c.type === "text") as { type: "text"; text: string } | undefined)
 						?.text || "";
 		const send = sendStateOf(this.message);
+		// Pictures Tom sent. The browser that sent the message has them as attachment tiles (below). Any other browser,
+		// and this one after a reload, has the R730's copy of the message: its image blocks, drawn here (2026-11-10;
+		// before, only the line "Attached: …" was left).
+		const hasTiles = (this.message.attachments?.length ?? 0) > 0;
+		const pictures = hasTiles ? [] : drawnImages(this.message.content);
 
 		return html`
 			<div class="flex justify-start ml-4">
@@ -72,6 +79,17 @@ export class SitegeistUserMessage extends LitElement {
 									)}
 								</div>
 							`
+							: ""
+					}
+					${
+						pictures.length > 0
+							? html`<div class="sg-user-pictures mt-3 flex flex-wrap gap-2">
+								${pictures.map((d) =>
+									d.kind === "link"
+										? html`<sg-remote-image .imageRef=${d.ref} .maxHeight=${160}></sg-remote-image>`
+										: html`<img class="rounded border border-border" style="max-height:160px;max-width:100%" src=${d.src} alt="picture" />`,
+								)}
+							</div>`
 							: ""
 					}
 				</div>

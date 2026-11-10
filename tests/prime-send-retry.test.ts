@@ -119,9 +119,13 @@ test(
 			await page.waitForSelector("sessions-sidebar", { timeout: 30_000, state: "attached" });
 			await seedPanelStorage(page, `${relay.base}/sitegeist`);
 			await page.goto(`${panelUrl}?session=${SID}`);
-			await dismissPermissionDialog(page);
 			await until(
-				() => page.evaluate(() => document.body.innerText),
+				async () => {
+					// Inside the loop: the dialog is added after the page has loaded, so one early dismiss can miss it and
+					// the panel then stays on "Loading..." (seen 2026-11-10, one run in two).
+					await dismissPermissionDialog(page);
+					return page.evaluate(() => document.body.innerText);
+				},
 				(t) => t.includes("ask away"),
 				30_000,
 				"chat",

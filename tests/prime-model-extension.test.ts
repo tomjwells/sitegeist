@@ -268,7 +268,7 @@ test(
 				res.end(JSON.stringify({ error: "not found" }));
 				return;
 			}
-			const p = url.replace(/^\/sitegeist\/agents\/prime/, "");
+			const p = (url.split("?")[0] ?? "").replace(/^\/sitegeist\/agents\/prime/, ""); // the hydrate carries ?images=refs
 			calls.push({ path: p, body });
 			if (p === "/sessions" && req.method === "POST") {
 				res.end(JSON.stringify({ ok: true, sessionId: sid, name: "x", state }));

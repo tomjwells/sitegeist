@@ -18,6 +18,7 @@ import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } 
 import { bridgeNoticeToast, isBridgeNotice } from "./bridge-notice.js";
 import { cancelBrowserCall, handleBrowserCallBounded } from "./browser-tools.js";
 import { MAIN_AGENT_ID, PRIME_PROVIDER } from "./constants.js";
+import { contentKey } from "./image-refs.js";
 import {
 	isJson,
 	type Json,
@@ -123,7 +124,7 @@ function sameMessage(a: AgentMessage, b: AgentMessage): boolean {
 	if (ta !== undefined && tb !== undefined && ta !== tb) return false;
 	const ca = (a as { content?: unknown }).content;
 	const cb = (b as { content?: unknown }).content;
-	return JSON.stringify(ca) === JSON.stringify(cb);
+	return contentKey(ca) === contentKey(cb);
 }
 
 /** The typed text of a user message (string content, or its text blocks joined). */

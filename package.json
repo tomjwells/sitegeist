@@ -26,6 +26,8 @@
 		"test:split:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/split-view-extension.test.ts",
 		"test:fullscreen:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/artifacts-fullscreen.test.ts",
 		"test:stored-messages": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/stored-messages.test.ts",
+		"test:image-refs": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/image-refs.test.ts",
+		"test:remote-images:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=180000 --test-force-exit tests/remote-images-extension.test.ts",
 		"test:image-size": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/image-size.test.ts",
 		"test:model-image": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/model-image.test.ts",
 		"test:send-retry:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/prime-send-retry.test.ts",
