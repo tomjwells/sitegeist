@@ -16,6 +16,7 @@
 		"src/sessions/session-search.ts",
 		"src/prime/bridge-notice.ts",
 		"scripts/build.mjs",
-		"src/utils/image-size.ts"
+		"src/utils/image-size.ts",
+		"src/prime/stored-messages.ts"
 	]
 }

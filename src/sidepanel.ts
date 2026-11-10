@@ -71,7 +71,8 @@ import {
 	primeListArtifacts,
 	primeSessionExists,
 } from "./prime/prime-client.js";
-import { SEND_ACTION_EVENT, sendActionOf } from "./prime/send-state.js";
+import { isQueued, isUnsent, SEND_ACTION_EVENT, sendActionOf } from "./prime/send-state.js";
+import { isStoredSlim, STORED_FORMAT, slimForStorage } from "./prime/stored-messages.js";
 import { SYSTEM_PROMPT } from "./prompts/prompts.js";
 import { initSpeak, setSpeakAgent } from "./speak/speak.js";
 import { SitegeistAppStorage } from "./storage/app-storage.js";
@@ -513,11 +514,37 @@ const shouldSaveSession = (messages: AgentMessage[]): boolean => {
 	return messages.some((m: AgentMessage) => m.role === "assistant");
 };
 
+/**
+ * A save writes the whole chat and indexes it again for search. While an answer streams, an agent event arrives for
+ * every piece of text, and each one saved the chat again: a CPU core stayed busy for the whole answer (2026-11-09:
+ * with a 90 MB chat it took Tom's laptop to 100 C). Now a streamed piece of text is saved at most once every
+ * SAVE_MIN_GAP_MS, and always once after the last one. Every other event (a message sent or failed, a message or
+ * turn finished) is saved at once, as before, so nothing that exists only in the browser waits.
+ */
+const SAVE_MIN_GAP_MS = 1500;
+let lastSaveStarted = 0;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+function requestSave(streaming: boolean): void {
+	const wait = lastSaveStarted + SAVE_MIN_GAP_MS - Date.now();
+	if (!streaming || wait <= 0) {
+		if (saveTimer !== undefined) clearTimeout(saveTimer);
+		saveTimer = undefined;
+		void saveSession();
+		return;
+	}
+	if (saveTimer !== undefined) return; // one is due already; it will save the newest state
+	saveTimer = setTimeout(() => {
+		saveTimer = undefined;
+		void saveSession();
+	}, wait);
+}
+
 const saveSession = async () => {
 	if (!storage.sessions || !currentSessionId || !agent || !currentTitle) return;
 
 	const state = agent.state;
 	if (!shouldSaveSession(state.messages)) return;
+	lastSaveStarted = Date.now();
 
 	try {
 		// Calculate cumulative usage from all assistant messages
@@ -574,6 +601,9 @@ const saveSession = async () => {
 		const existingMetadata = await storage.sessions.getMetadata(currentSessionId);
 		const createdAt = existingMetadata?.createdAt || new Date().toISOString();
 
+		// An R730 chat is kept without oversized image data and marked as such (src/prime/stored-messages.ts): the R730
+		// has the chat; one stored record had grown to 90 MB. A chat without an R730 copy is kept as it is.
+		const onR730 = isPrimeAgent(agent);
 		const metadata = {
 			id: currentSessionId,
 			title: currentTitle,
@@ -584,9 +614,13 @@ const saveSession = async () => {
 			modelId: state.model.id,
 			thinkingLevel: state.thinkingLevel,
 			preview,
+			...(onR730 ? { sgStored: STORED_FORMAT } : {}),
 		};
+		const kept = onR730
+			? { ...state, messages: slimForStorage(state.messages, (m) => isUnsent(m) || isQueued(m)) }
+			: state;
 
-		await storage.sessions.saveSession(currentSessionId, state, metadata, currentTitle);
+		await storage.sessions.saveSession(currentSessionId, kept, metadata, currentTitle);
 		// Full-text index for the sidebar search (whole transcript; prime sessions also by their R730 UUID/jsonl path)
 		const aliases = isPrimeAgent(agent)
 			? [agent.nativeSessionId, agent.nativeSessionFile].filter((v): v is string => typeof v === "string")
@@ -753,7 +787,7 @@ const updateUrl = (sessionId: string) => {
  * Put a new chat into the list and keep saving it: once it has a reply, or (R730 chats) once the R730 has its first
  * message - see shouldSaveSession. Runs on every agent event and when the R730 session for a new chat is created.
  */
-function keepSession(messages: AgentMessage[]): void {
+function keepSession(messages: AgentMessage[], streaming = false): void {
 	if (!currentTitle && shouldSaveSession(messages)) {
 		currentTitle = generateTitle(messages);
 	}
@@ -784,7 +818,7 @@ function keepSession(messages: AgentMessage[]): void {
 	}
 
 	if (currentSessionId) {
-		saveSession();
+		requestSave(streaming);
 		if (pendingAnchor) void flushPendingAnchor();
 	}
 
@@ -1102,7 +1136,7 @@ const createAgent = async (
 				}
 			}
 
-			keepSession(messages);
+			keepSession(messages, event.type === "message_update");
 		});
 	}
 
@@ -2122,10 +2156,17 @@ async function initApp() {
 	}
 
 	if (sessionIdFromUrl && storage.sessions) {
-		const stored = await storage.sessions.loadSession(sessionIdFromUrl);
+		// An R730 chat saved by a panel before 1.0.284 has no "slim" mark, and its record may hold full-size pasted
+		// images several times over (one chat: 90 MB; opening it crashed Zen's extension process on Tom's laptop,
+		// 2026-11-09). Such a record is never read while the R730 has the chat: the chat opens from the R730 and the
+		// next save replaces the record. If the R730 cannot be asked, the record is read as before.
+		const listed = isPrimeSessionId(sessionIdFromUrl) ? await storage.sessions.getMetadata(sessionIdFromUrl) : null;
+		const oldRecord = listed ? !isStoredSlim(listed) : false;
+		const asked = oldRecord ? await findOnR730(sessionIdFromUrl) : undefined;
+		const stored = asked?.found ? null : await storage.sessions.loadSession(sessionIdFromUrl);
 		// An R730 chat this browser has no record of (started in another browser, or left before its first reply reached
 		// the panel - Tom, 2026-10-25): open it from the R730 if the R730 has it. Asking never creates a session.
-		const remote = stored ? undefined : await findOnR730(sessionIdFromUrl);
+		const remote = stored ? undefined : (asked ?? (await findOnR730(sessionIdFromUrl)));
 		if (remote && !remote.found) {
 			const wanted = sessionIdFromUrl;
 			await createAgent(undefined, true, requestedKind);
@@ -2188,7 +2229,7 @@ async function initApp() {
 			await refreshCurrentAnchors();
 			appReady = true;
 			renderApp();
-			if (remote?.found) Toast.success("Opened from the R730 and added to this browser's list", 5000);
+			if (remote?.found && !listed) Toast.success("Opened from the R730 and added to this browser's list", 5000);
 			if (resumedKey !== undefined) {
 				const previous = resumedFrom;
 				Toast.show(`Resumed "${currentTitle || "session"}" for this page`, "success", 6000, {

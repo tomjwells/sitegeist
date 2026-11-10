@@ -10,6 +10,7 @@ import { type AnchorBinding, AnchorsStore, chromeLocalBackend } from "../anchors
 import { SitegeistSessionListDialog } from "../dialogs/SessionListDialog.js";
 import { agentIdFromSessionId, isPrimeSessionId, MAIN_AGENT_ID } from "../prime/constants.js";
 import { primeNativeIds } from "../prime/prime-client.js";
+import { isStoredSlim } from "../prime/stored-messages.js";
 import {
 	pastedSessionId,
 	type SearchEntry,
@@ -116,6 +117,9 @@ export class SessionsSidebar extends LitElement {
 		if (this.indexingRun) return this.indexingRun;
 		const storage = getSitegeistStorage();
 		const stale = this.sessions.filter((s) => {
+			// An R730 chat's record from before 1.0.284 may be very large (see src/prime/stored-messages.ts): it is not
+			// read here. Opening the chat saves it again in the slim form and indexes it.
+			if (isPrimeSessionId(s.id) && !isStoredSlim(s)) return false;
 			const r = this.searchIndex.get(s.id);
 			return !r || r.lastModified !== s.lastModified || r.messageCount !== s.messageCount;
 		});
