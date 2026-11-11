@@ -78,20 +78,6 @@ declare module "@mariozechner/mini-lit" {
 		"Open tabs": string;
 		"Waiting for selection": string;
 		"Preparing element selector...": string;
-		About: string;
-		"AI-powered browser extension for web navigation and interaction": string;
-		"Version:": string;
-		Website: string;
-		Imprint: string;
-		Privacy: string;
-		"Checking for updates...": string;
-		"Update Available": string;
-		"A new version ({version}) is available": string;
-		Update: string;
-		"You're up to date": string;
-		"Update Required": string;
-		"A new version ({version}) is available. Please update to continue.": string;
-		"Update Now": string;
 		Instructions: string;
 		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.": string;
 		"e.g. I live in London, UK. Prefer UK sites (ebay.co.uk, amazon.co.uk), prices in GBP, UK spelling.": string;
@@ -198,22 +184,10 @@ const sitegeistTranslations = {
 		"Open tabs": "Open tabs",
 		"Waiting for selection": "Waiting for selection",
 		"Preparing element selector...": "Preparing element selector...",
-		About: "About",
 		"AI-powered browser extension for web navigation and interaction":
 			"AI-powered browser extension for web navigation and interaction",
-		"Version:": "Version:",
-		Website: "Website",
-		Imprint: "Imprint",
-		Privacy: "Privacy",
-		"Checking for updates...": "Checking for updates...",
-		"Update Available": "Update Available",
-		"A new version ({version}) is available": "A new version ({version}) is available",
-		Update: "Update",
-		"You're up to date": "You're up to date",
-		"Update Required": "Update Required",
 		"A new version ({version}) is available. Please update to continue.":
 			"A new version ({version}) is available. Please update to continue.",
-		"Update Now": "Update Now",
 		Instructions: "Instructions",
 		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.":
 			"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.",
@@ -326,22 +300,10 @@ const sitegeistTranslations = {
 		"Open tabs": "Offene Tabs",
 		"Waiting for selection": "Warte auf Auswahl",
 		"Preparing element selector...": "Bereite Element-Auswahl vor...",
-		About: "Über",
 		"AI-powered browser extension for web navigation and interaction":
 			"KI-gestützte Browser-Erweiterung für Webnavigation und -interaktion",
-		"Version:": "Version:",
-		Website: "Webseite",
-		Imprint: "Impressum",
-		Privacy: "Datenschutz",
-		"Checking for updates...": "Suche nach Updates...",
-		"Update Available": "Update verfügbar",
-		"A new version ({version}) is available": "Eine neue Version ({version}) ist verfügbar",
-		Update: "Aktualisieren",
-		"You're up to date": "Sie sind auf dem neuesten Stand",
-		"Update Required": "Update erforderlich",
 		"A new version ({version}) is available. Please update to continue.":
 			"Eine neue Version ({version}) ist verfügbar. Bitte aktualisieren Sie, um fortzufahren.",
-		"Update Now": "Jetzt aktualisieren",
 		Instructions: "Anweisungen",
 		"Standing instructions for the assistant, added to every conversation. Saved automatically; takes effect on the next new or reopened session.":
 			"Dauerhafte Anweisungen für den Assistenten, die jeder Unterhaltung hinzugefügt werden. Wird automatisch gespeichert; gilt ab der nächsten neuen oder wieder geöffneten Sitzung.",

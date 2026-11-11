@@ -382,7 +382,8 @@ test(
 			const footer0 = await page.evaluate(
 				() => document.querySelector(".sg-footer-info")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
 			);
-			assert.match(footer0, /^v1\.0\.0 · [0-9a-f]{7}(-dirty)? · new session$/, footer0);
+			// One version per build since 905dd38: 1.0.<commit count>, as in Firefox.
+			assert.match(footer0, /^v1\.0\.\d+ · [0-9a-f]{7}(-dirty)? · new session$/, footer0);
 
 			// Choose XHigh in the composer's thinking dropdown.
 			await page.evaluate(() => {

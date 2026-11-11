@@ -96,6 +96,12 @@ const history = [
 ];
 
 async function dismissPermissionDialog(page: Page): Promise<void> {
+	// The panel bundle starts after the page's load event (boot.js imports it), so wait for the dialog or the app.
+	await page.waitForFunction(
+		() => document.querySelector("userscripts-permission-dialog, sessions-sidebar, [data-boot-error]") !== null,
+		undefined,
+		{ timeout: 30_000 },
+	);
 	await page.evaluate(() =>
 		document.querySelector("userscripts-permission-dialog")?.dispatchEvent(new Event("close")),
 	);

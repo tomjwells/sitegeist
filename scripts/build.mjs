@@ -22,6 +22,8 @@ const outDir = join(packageRoot, `dist-${targetBrowser}`);
 
 const entryPoints = {
 	sidepanel: join(packageRoot, "src/sidepanel.ts"),
+	// sidepanel.html loads boot.js (a classic script), which loads sidepanel.js: see src/boot.ts
+	boot: join(packageRoot, "src/boot.ts"),
 	debug: join(packageRoot, "src/debug.ts"),
 	icons: join(packageRoot, "src/icons.ts"),
 	background: join(packageRoot, "src/background.ts"),

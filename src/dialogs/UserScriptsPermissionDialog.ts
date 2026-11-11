@@ -11,7 +11,16 @@ export class UserScriptsPermissionDialog extends PermissionDialog {
 	 */
 	static async request(): Promise<boolean> {
 		const dialog = new UserScriptsPermissionDialog();
-		return dialog.requestPermission(() => requestUserScriptsPermission());
+		// Firefox grants the permission to the whole add-on: a grant in another window's panel releases this one too.
+		const onAdded = (added: chrome.permissions.Permissions) => {
+			if (added.permissions?.includes("userScripts")) dialog.grantedElsewhere();
+		};
+		chrome.permissions?.onAdded?.addListener(onAdded);
+		try {
+			return await dialog.requestPermission(() => requestUserScriptsPermission());
+		} finally {
+			chrome.permissions?.onAdded?.removeListener(onAdded);
+		}
 	}
 
 	protected header() {

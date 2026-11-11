@@ -1,3 +1,5 @@
+// First: marks the bundle as running, so the boot loader never runs it twice (src/boot.ts).
+import "./boot/app-started.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
@@ -27,13 +29,13 @@ import { html, render, type TemplateResult } from "lit";
 import { Columns2, Globe, History, Link2, Link2Off, Minus, Plus, Server, Settings } from "lucide";
 import { BrowserActivityReporter } from "./activity-report.js";
 import { type AnchorBinding, AnchorsStore, chromeLocalBackend, pageKey } from "./anchors/anchors.js";
+import { removeBootScreen, showBootError } from "./boot/boot-error.js";
 import { isArtifactsViewer } from "./components/artifacts-fullscreen.js";
 import { artifactsMaximizeActive, escapeRestoresChat, setArtifactsMaximized } from "./components/artifacts-maximize.js";
 import { artifactsViewerToken, startArtifactsViewer } from "./components/artifacts-viewer.js";
 import { setFooterSession } from "./components/footer-info.js";
 import { SESSIONS_SIDEBAR_OPEN_SETTING, type SessionsSidebar } from "./components/SessionsSidebar.js";
 import { Toast } from "./components/Toast.js";
-import { AboutTab } from "./dialogs/AboutTab.js";
 import { ApiKeyOrOAuthDialog } from "./dialogs/ApiKeyOrOAuthDialog.js";
 import { ApiKeysOAuthTab } from "./dialogs/ApiKeysOAuthTab.js";
 import { CostsTab } from "./dialogs/CostsTab.js";
@@ -43,7 +45,6 @@ import { catalogProviders, isCatalogProvider } from "./models-registry.js";
 import "./components/SessionsSidebar.js";
 import { ModelMenu } from "./components/ModelMenu.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
-import { UpdateNotificationDialog } from "./dialogs/UpdateNotificationDialog.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
 import { browserMessageTransformer } from "./messages/message-transformer.js";
 import { createNavigationMessage, registerNavigationRenderer } from "./messages/NavigationMessage.js";
@@ -392,7 +393,8 @@ const AUTO_RESUME_SUPPRESSED_KEY = "sg.autoResumeSuppressed";
 /** Chrome / Edge side panel (not a panel tab, not the Firefox sidebar): see utils/panel-place.ts. */
 const isRealSidePanel = (): boolean => hasSidePanelApi() && !panelHostIsTab();
 // Read once, as the document starts: every later await would make a reload look like a panel opened long after.
-const placeAtStart = { place: readPanelPlace(), at: Date.now() };
+// performance.timeOrigin = when this document started; the boot loader may run this bundle a few seconds later.
+const placeAtStart = { place: readPanelPlace(), at: performance.timeOrigin };
 let savedPlace: PanelPlace | undefined;
 
 function readPanelPlace(): PanelPlace | undefined {
@@ -491,7 +493,6 @@ function openApiKeysDialog(): Promise<void> {
 				new SkillsTab(),
 				new ProxyTab(),
 				new SpeakTab(),
-				new AboutTab(),
 			],
 			resolve,
 		);
@@ -1718,7 +1719,6 @@ const renderApp = () => {
 								new SkillsTab(),
 								new ProxyTab(),
 								new SpeakTab(),
-								new AboutTab(),
 							]),
 						title: "Settings",
 					})}
@@ -2015,44 +2015,6 @@ async function testSteps(): Promise<boolean> {
 }
 
 // ============================================================================
-// UPDATE CHECK
-// ============================================================================
-function isNewerVersion(latest: string, current: string): boolean {
-	const latestParts = latest.split(".").map(Number);
-	const currentParts = current.split(".").map(Number);
-
-	for (let i = 0; i < Math.max(latestParts.length, currentParts.length); i++) {
-		const l = latestParts[i] || 0;
-		const c = currentParts[i] || 0;
-		if (l > c) return true;
-		if (l < c) return false;
-	}
-	return false;
-}
-
-async function checkForUpdates() {
-	try {
-		const currentVersion = chrome.runtime.getManifest().version;
-
-		// Fetch latest version
-		const response = await fetch("https://sitegeist.ai/uploads/version.json", {
-			cache: "no-cache",
-		});
-		const data = await response.json();
-		const latestVersion = data.version;
-
-		// Show dialog only if server version is newer than current version
-		if (isNewerVersion(latestVersion, currentVersion)) {
-			// Show update dialog - blocks until extension is updated and restarted
-			await UpdateNotificationDialog.show(latestVersion);
-		}
-	} catch (err) {
-		console.warn("[Sidepanel] Failed to check for updates:", err);
-		// Silently fail - don't block startup
-	}
-}
-
-// ============================================================================
 // INIT
 // ============================================================================
 /**
@@ -2123,9 +2085,6 @@ async function initApp() {
 	if (!chrome.userScripts) {
 		await UserScriptsPermissionDialog.request();
 	}
-
-	// TODO: re-enable update check when publishing to users
-	// await checkForUpdates();
 
 	// Initialize default skills
 	const { initializeDefaultSkills } = await import("./tools/skill.js");
@@ -2342,5 +2301,10 @@ registerUserMessageRenderer();
 
 // sidepanel.html?view=artifacts&token=… is the fullscreen artifacts window (src/components/artifacts-viewer.ts), not a panel.
 const viewerToken = artifactsViewerToken();
+removeBootScreen();
 if (viewerToken !== undefined) void startArtifactsViewer(viewerToken);
-else initApp();
+else
+	initApp().catch((err: unknown) => {
+		console.error("[sidepanel] start failed", err);
+		showBootError("sitegeist failed to start", err);
+	});

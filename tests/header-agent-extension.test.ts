@@ -34,8 +34,17 @@ async function until<T>(fn: () => Promise<T>, ok: (v: T) => boolean, timeoutMs: 
 	throw new Error(`timed out waiting for ${what}; last = ${JSON.stringify(last)}`);
 }
 
-const dismiss = (page: Page) =>
-	page.evaluate(() => document.querySelector("userscripts-permission-dialog")?.dispatchEvent(new Event("close")));
+// The panel bundle starts after the page's load event (boot.js imports it), so wait for the dialog or the app.
+const dismiss = async (page: Page) => {
+	await page.waitForFunction(
+		() => document.querySelector("userscripts-permission-dialog, sessions-sidebar, [data-boot-error]") !== null,
+		undefined,
+		{ timeout: 30_000 },
+	);
+	await page.evaluate(() =>
+		document.querySelector("userscripts-permission-dialog")?.dispatchEvent(new Event("close")),
+	);
+};
 
 /** Header left group, in order: what each child shows. */
 const headerLeft = (page: Page) =>

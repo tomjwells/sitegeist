@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A panel never stays black; a permission grant in one window releases every panel** (Tom, 2026-11-11: "I just uninstalled and reinstalled sitegiest in zen. First time I open it…. Black", then "I think I needed to accept the JS permissions for a new app - but that dialog was showing in a sitegeist in a completely different zen window").
+  - After an install every panel asks for the userScripts permission and waits. Firefox grants it to the whole add-on, but a panel only went on after a click in its own dialog. Now each waiting dialog listens for `permissions.onAdded` and closes as granted (`UserScriptsPermissionDialog.request`, `PermissionDialog.grantedElsewhere`).
+  - `sidepanel.html` loads a small classic script, `boot.js` (`src/boot.ts`), which shows "Loading sitegeist…" at once and then imports `sidepanel.js` (~13 MB). Only one panel at a time loads it (Web Lock `sitegeist-boot`; after 20 s a panel loads anyway). A load that fails before the bundle starts running is retried twice with a fresh URL; after that the panel shows the error, the version and a Reload button. A start failure inside the app (`initApp`) shows the same screen. Before, a script that failed to load drew nothing.
+  - Why the bundle failed to load: on Tom's 2019 MacBook (Omarchy) Zen intermittently failed to parse it (random SyntaxErrors) or the add-on process crashed. That machine faults under bursts of load (CPU at 100 °C; same crash addresses as its 2026-11-09 heat crashes). The R730 with the same Zen 1.24.1b and build loads 8 panels at once with no error. The boot loader makes such a failure visible and recoverable; it does not fix the laptop.
+  - Real side panel: the place-restore check (Edge 156 reloads) now uses the document's start time (`performance.timeOrigin`), since the bundle may run a moment after the document starts.
+  - New `test:boot:extension` (real Zen; 2/2 on Zen 1.23.2b and 1.24.1b, ~25 s): two panels on the permission dialog, Grant in one releases the other (fails without the listener: panel B stays on the dialog); four panels opened at once all reach the app; a build with a `sidepanel.js` that does not parse shows the error and Reload. The WebDriver client moved to `tests/zen-driver.fixture.ts` (`ZEN_BIN` picks the Zen build).
+  - Tests adjusted to the boot loader: the Chrome suites' permission-dialog helpers wait for the dialog or the app before closing it (the bundle now starts just after the page's load event, so it was not there yet); the Zen split-view test closes the sidebar Firefox opens on install (a grant in its stand-in tab now releases that sidebar, which then counted as a second relay socket); the prime-model footer check takes `v1.0.<n>` (stale since `905dd38`). The Playwright suites need `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=~/.cache/sitegeist-split-test/chrome-linux64/chrome` (Chrome for Testing 155): Playwright's bundled Chromium 151 never starts the extension's service worker (fails the same way on the previous commit).
+
+### Removed
+
+- **Settings → About** (Tom, 2026-11-11: "Agree this about page is pointless and deletable now?"). It asked the original sitegeist project's server for its version and offered that project's 0.6.11 as an "update", with links to its website, imprint and privacy pages. The unused upstream update check (`checkForUpdates`, `UpdateNotificationDialog`) went with it; nothing in sitegeist asks sitegeist.ai any more.
+
 ### Added
 
 - **Reopening an unchanged chat no longer waits for the agent** (stage 3 of "chats stored remotely", in its safe form; relay `2026-11-10.6`, no panel change). The relay keeps each chat's slimmed history with the event-log offset it was built at, next to the chat's pictures. A hydrate with the same offset is served from that copy; a changed offset asks the agent again and replaces it. Quant Coach chat: 3.0 s → 0.02 s at the relay on reopen. Loading a chat in parts was not built: with pictures as links the longest chat is 631 KB on the wire, and a partial history would make the footer totals, the search text and the export wrong unless the relay sent totals (see the build log for the design notes).

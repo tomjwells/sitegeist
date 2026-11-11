@@ -12,6 +12,7 @@ export abstract class PermissionDialog extends DialogBase {
 	protected modalHeight = "auto";
 
 	private grantCallback?: () => Promise<{ granted: boolean; message?: string }>;
+	private resolvePromise?: (granted: boolean) => void;
 
 	/**
 	 * Header information for the dialog
@@ -40,17 +41,27 @@ export abstract class PermissionDialog extends DialogBase {
 		this.open();
 
 		return new Promise<boolean>((resolve) => {
-			this.addEventListener(
-				"close",
-				() => {
-					resolve(false);
-				},
-				{ once: true },
-			);
-
-			// Store resolve for success case
-			(this as any)._resolvePromise = resolve;
+			this.resolvePromise = resolve;
+			this.addEventListener("close", () => this.settle(false), { once: true });
 		});
+	}
+
+	/** Answers the waiting request once (the first answer wins; closing the dialog afterwards changes nothing). */
+	private settle(granted: boolean): void {
+		const resolve = this.resolvePromise;
+		this.resolvePromise = undefined;
+		resolve?.(granted);
+	}
+
+	/**
+	 * The permission was granted somewhere else (another window's panel, the add-ons page): close this dialog as
+	 * granted, so a panel waiting here goes on loading (Tom 2026-11-11: the dialog he had to answer was in another
+	 * Zen window, and this one stayed waiting).
+	 */
+	grantedElsewhere(): void {
+		if (!this.resolvePromise) return;
+		this.settle(true);
+		this.close();
 	}
 
 	private async handleGrant() {
@@ -65,12 +76,7 @@ export abstract class PermissionDialog extends DialogBase {
 			const result = await this.grantCallback();
 
 			if (result.granted) {
-				// Resolve with success
-				const resolve = (this as any)._resolvePromise;
-				if (resolve) {
-					resolve(true);
-					delete (this as any)._resolvePromise;
-				}
+				this.settle(true);
 				this.close();
 			} else {
 				this.errorMessage = result.message || i18n("Permission request failed");
@@ -85,11 +91,7 @@ export abstract class PermissionDialog extends DialogBase {
 	}
 
 	private handleDeny() {
-		const resolve = (this as any)._resolvePromise;
-		if (resolve) {
-			resolve(false);
-			delete (this as any)._resolvePromise;
-		}
+		this.settle(false);
 		this.close();
 	}
 
