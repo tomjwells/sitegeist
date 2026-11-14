@@ -10,9 +10,12 @@ import {
 	CHUNK_TARGETS,
 	chunkMarkdown,
 	ESTIMATED_CHARS_PER_SECOND,
+	FAST_CHUNK,
 	HARD_CAP,
+	MAX_CHUNK,
 	RENDER_CHARS_PER_SECOND,
 	RENDER_OVERHEAD_SECONDS,
+	renderSeconds,
 	splitBlocks,
 	targetsForRate,
 } from "../src/speak/chunk.ts";
@@ -56,31 +59,37 @@ test("blocks: code, tables and lists stay whole across blank lines", () => {
 	assert.equal(blocks[4]?.text, "- item one\n  continued\n\n- item two\n  - nested");
 });
 
-test("chunks: targets ramp 120 -> 250 -> 500 -> 800, packed at block boundaries, nothing lost", () => {
+test("chunks: packed at block boundaries up to each target, never above MAX_CHUNK, nothing lost", () => {
 	const blocks = Array.from({ length: 16 }, (_, i) => para(24, `p${i}w`)); // ~130 characters each
 	const md = blocks.join("\n\n");
 	const chunks = chunkMarkdown(md);
 	assert.ok(chunks.length >= 4);
 	chunks.forEach((c, i) => {
-		const target = CHUNK_TARGETS[Math.min(i, CHUNK_TARGETS.length - 1)] ?? 800;
-		// a chunk may exceed its target only when it is a single block (blocks are never split here)
-		assert.ok(c.length <= target || !c.includes("\n\n"), `chunk ${i} is ${c.length} > ${target}`);
-		for (const b of c.split("\n\n")) assert.ok(blocks.includes(b), "every chunk is whole blocks");
+		const target = CHUNK_TARGETS[Math.min(i, CHUNK_TARGETS.length - 1)] ?? MAX_CHUNK;
+		assert.ok(c.length <= Math.max(target * 1.25, 140), `chunk ${i} is ${c.length} > ${target}`);
+		for (const b of c.split("\n\n")) assert.ok(blocks.includes(b), "short blocks are packed whole");
 	});
 	assert.equal(chunks[0], blocks[0], "first chunk = the first block (one sentence, not cut)");
-	assert.ok((chunks[1]?.length ?? 0) <= 250 && (chunks[3]?.length ?? 0) > 500, "ramp");
 	assert.equal(norm(chunks.join(" ")), norm(blocks.join(" ")));
 });
 
-test("chunks: a long first paragraph is cut after whole sentences; tables and lists are never cut", () => {
+test("chunks: long paragraphs, lists and tables are split (sentences, top-level items, rows with the header)", () => {
 	const sentences = Array.from({ length: 12 }, (_, i) => `Sentence number ${i} says something useful here.`);
 	const table = [
 		"| Name | Value |",
 		"| --- | --- |",
 		...Array.from({ length: 40 }, (_, i) => `| row ${i} | ${i * 7} |`),
 	].join("\n");
-	const list = Array.from({ length: 30 }, (_, i) => `- point ${i} with a few words`).join("\n");
-	const chunks = chunkMarkdown(`${sentences.join(" ")}\n\n${table}\n\n${list}`);
+	const items = Array.from(
+		{ length: 30 },
+		(_, i) =>
+			`- point ${i} with a few words and a clause to make it longer.${i % 5 === 0 ? "\n  - nested detail" : ""}`,
+	);
+	const list = items.join("\n");
+	const middle = Array.from({ length: 30 }, (_, i) => `Middle sentence ${i} goes on a while.`).join(" ");
+	const md = `${sentences.join(" ")}\n\n${list}\n\n${middle}\n\n${table}`;
+	assert.ok(list.length > 1800, `the list is long (${list.length})`);
+	const chunks = chunkMarkdown(md, targetsForRate(1.75));
 	assert.ok(
 		chunks[0] && chunks[0].length >= 60 && chunks[0].length <= 120 && chunks[0].endsWith("."),
 		`first chunk: ${chunks[0]?.length}`,
@@ -89,20 +98,26 @@ test("chunks: a long first paragraph is cut after whole sentences; tables and li
 		sentences.some((s) => chunks[0]?.endsWith(s)),
 		"cut at a sentence end",
 	);
-	assert.equal(chunks.filter((c) => c.includes("| Name | Value |")).length, 1);
-	assert.ok(
-		chunks.some((c) => c.includes(table)),
-		"the table is in one chunk",
-	);
-	assert.ok(
-		chunks.some((c) => c.includes(list)),
-		"the list is in one chunk",
-	);
-	assert.equal(norm(chunks.join(" ")), norm(`${sentences.join(" ")} ${table} ${list}`));
+	for (const c of chunks) assert.ok(c.length <= MAX_CHUNK * 1.25, `chunk of ${c.length} characters`);
+	for (const item of items)
+		assert.ok(
+			chunks.some((c) => c.includes(item)),
+			"a list item is never cut inside",
+		);
+	const tableChunks = chunks.filter((c) => c.includes("| row "));
+	assert.ok(tableChunks.length >= 2, "the table is split");
+	for (const c of tableChunks)
+		assert.ok(c.startsWith("| Name | Value |\n| --- | --- |"), "every piece keeps the header");
+	const unique = (s: string) => norm(s.replaceAll("| Name | Value |\n| --- | --- |", ""));
+	assert.equal(unique(chunks.join(" ")), unique(md), "nothing lost or repeated except the header rows");
 });
 
-test("chunks: a block above the hard cap is cut under it; empty input -> none", () => {
-	const huge = Array.from({ length: 400 }, (_, i) => `| r${i} | some cell text here |`).join("\n");
+test("chunks: a code block stays whole; a block above the hard cap is cut under it; empty input -> none", () => {
+	const code = ["```ts", ...Array.from({ length: 40 }, (_, i) => `const value${i} = compute(${i});`), "```"].join(
+		"\n",
+	);
+	assert.ok(chunkMarkdown(`Intro.\n\n${code}\n\nEnd.`).some((c) => c.includes(code)));
+	const huge = ["```", ...Array.from({ length: 400 }, (_, i) => `line ${i} with some code text`), "```"].join("\n");
 	const chunks = chunkMarkdown(huge);
 	assert.ok(chunks.length >= 3 && chunks.every((c) => c.length <= HARD_CAP));
 	assert.deepEqual(chunkMarkdown("  \n\n "), []);
@@ -221,33 +236,62 @@ test("timeline: a position maps to a clip and an offset; empty clips are passed 
 	assert.equal(validRate(undefined), DEFAULT_SPEAK_RATE);
 });
 
-test("chunk ramp per speed: 1x keeps the measured ramp; up to 2x each chunk renders while the one before plays", () => {
+/**
+ * Simulated playback at the rates measured on 2026-11-14 (speak-engine.log): speak renders one chunk at a time at
+ * 0.3 s + characters / 26, the panel keeps it busy from the first click (pump), and the audio is heard at
+ * ESTIMATED_CHARS_PER_SECOND x the playback rate. Returns when the first sound starts and the longest silence after it.
+ */
+function simulate(chunks: string[], rate: number): { first: number; longestWait: number; waits: number[] } {
+	let rendered = 0;
+	let playEnd = -1;
+	let first = 0;
+	const waits: number[] = [];
+	for (const [i, c] of chunks.entries()) {
+		rendered += RENDER_OVERHEAD_SECONDS + c.length / RENDER_CHARS_PER_SECOND;
+		const start = i === 0 ? rendered : Math.max(rendered, playEnd);
+		if (i === 0) first = start;
+		else waits.push(start - playEnd);
+		playEnd = start + c.length / (ESTIMATED_CHARS_PER_SECOND * rate);
+	}
+	return { first, longestWait: Math.max(0, ...waits), waits };
+}
+
+test("chunk ramp per speed: starts at 120, grows only as fast as rendering keeps ahead", () => {
 	assert.deepEqual(targetsForRate(1), CHUNK_TARGETS);
-	assert.deepEqual(targetsForRate(0.5), CHUNK_TARGETS);
-	assert.deepEqual(targetsForRate(2.5), CHUNK_TARGETS, "above 2x nothing keeps up: fewer, longer waits");
 	assert.deepEqual(targetsForRate(Number.NaN), CHUNK_TARGETS);
-	const render = (chars: number) => RENDER_OVERHEAD_SECONDS + chars / RENDER_CHARS_PER_SECOND;
 	for (const rate of SPEAK_RATES) {
 		const t = targetsForRate(rate);
 		assert.equal(t[0], 120, `${rate}x starts as quickly as 1x`);
-		assert.equal(t.at(-1), 800, `${rate}x reaches the full chunk size`);
-		assert.ok(t.length <= 25, `${rate}x ramp is finite and short (${t.length})`);
-		for (let i = 1; i < t.length; i++) {
-			const prev = t[i - 1] ?? 0;
-			const cur = t[i] ?? 0;
-			assert.ok(cur > prev, `${rate}x ramp grows (${t.join(",")})`);
-			const wait = render(cur) - prev / (ESTIMATED_CHARS_PER_SECOND * rate);
-			// 1.25x-1.75x: no wait at all (rounding aside). 2x: under a second, on the first small chunks only.
-			if (rate > 1 && rate <= 1.75)
-				assert.ok(wait <= 0.05, `${rate}x: chunk ${i} ready in time (${wait.toFixed(2)} s late)`);
-			if (rate === 2) assert.ok(wait < 1, `2x: chunk ${i} at most 1 s late (${wait.toFixed(2)} s)`);
-		}
+		assert.ok(t.length <= 41 && t.every((c) => c <= MAX_CHUNK), `${rate}x ramp is short and capped (${t.join(",")})`);
 	}
-	assert.deepEqual(targetsForRate(1.75), [120, 135, 156, 186, 228, 287, 370, 486, 649, 800]);
-	const text = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} of a long answer is here.`).join("\n\n");
-	assert.ok(
-		chunkMarkdown(text, targetsForRate(1.75)).length > chunkMarkdown(text).length,
-		"gentler ramp = more chunks",
+	assert.equal(targetsForRate(1).at(-1), MAX_CHUNK);
+	assert.equal(targetsForRate(1.75).at(-1), MAX_CHUNK);
+	assert.deepEqual(targetsForRate(2.5), [120, FAST_CHUNK], "playback outruns rendering: even, short waits");
+	assert.ok(renderSeconds(400) > 400 / RENDER_CHARS_PER_SECOND, "planning includes overhead and safety");
+});
+
+test("simulated playback of a long answer with an 1,800-character list: quick start, no long silences", () => {
+	const intro = Array.from({ length: 6 }, (_, i) => `Opening sentence ${i} explains the finding in plain words.`);
+	const list = Array.from(
+		{ length: 24 },
+		(_, i) => `- **Step ${i}**: do the thing for part ${i}, then check it worked before moving on.`,
+	).join("\n");
+	const paras = Array.from({ length: 6 }, (_, p) =>
+		Array.from({ length: 8 }, (_, i) => `Paragraph ${p} sentence ${i} adds a bit more detail.`).join(" "),
 	);
-	assert.equal(chunkMarkdown(text, targetsForRate(1.75)).join("\n\n"), text, "no text lost with another ramp");
+	const table = [
+		"| Thing | Before | After |",
+		"| --- | --- | --- |",
+		...Array.from({ length: 20 }, (_, i) => `| item ${i} | ${i * 3} s | ${i} s |`),
+	].join("\n");
+	const md = [intro.join(" "), list, ...paras.slice(0, 3), table, ...paras.slice(3)].join("\n\n");
+	assert.ok(list.length > 1800);
+	for (const rate of SPEAK_RATES) {
+		const sim = simulate(chunkMarkdown(md, targetsForRate(rate)), rate);
+		assert.ok(sim.first <= 6, `${rate}x: first sound at ${sim.first.toFixed(1)} s`);
+		const limit = rate <= 1.75 ? 1 : rate <= 2 ? 5 : 15;
+		assert.ok(sim.longestWait <= limit, `${rate}x: longest silence ${sim.longestWait.toFixed(1)} s > ${limit} s`);
+	}
+	// The old chunking (whole list in one 1,800+ character chunk, next two chunks fetched when one starts) left
+	// ~50 s of silence before the list at 1.75x; the comparison is in the commit message.
 });

@@ -5,8 +5,8 @@ import { DEFAULT_SPEAK_RATE, locateInParts, validRate } from "./timeline.js";
 
 /**
  * The read-aloud player (Tom, 2026-11-07). One audio element for the whole panel, so only one message plays at a
- * time. A message is split into chunks (chunk.ts); chunk 1 plays as soon as it arrives and the next two chunks are
- * fetched, one after another, while the current one plays. Every fetched chunk stays in memory per voice + message, so a replay is instant (the
+ * time. A message is split into chunks (chunk.ts); chunk 1 plays as soon as it arrives, and from the first click
+ * speak is kept busy with the next chunk not yet rendered, one request at a time, to the end of the message (pump). Every fetched chunk stays in memory per voice + message, so a replay is instant (the
  * newest 40 messages are kept). A failed request is not retried: the button shows a short note and the next click
  * tries again. Requests still running when Tom stops are left to finish, so they land in the cache. Never logs the
  * message text.
@@ -43,6 +43,8 @@ interface Run {
 	/** Set once the voice is known. */
 	src: Source | undefined;
 	playedAny: boolean;
+	/** True while the pump has a request out (see pump). */
+	pumping: boolean;
 }
 
 export interface SpeakStatus {
@@ -58,6 +60,8 @@ export interface SpeakStatus {
 	muted: boolean;
 	/** Position and length on the whole-message timeline, in seconds of audio at 1x. */
 	position: number;
+	/** See SpeakProgress.buffered. */
+	buffered: number;
 	total: number;
 	rate: number;
 	playbackRate: number;
@@ -75,11 +79,11 @@ export interface SpeakProgress {
 	position: number;
 	total: number;
 	rate: number;
+	/** End of the audio rendered without a gap from the current chunk on (seconds at 1x): the bar's "ready" mark. */
+	buffered: number;
 }
 
 const MAX_ENTRIES = 40;
-/** Chunks requested ahead of the one playing (see fetchAhead). */
-const LOOKAHEAD = 2;
 const VOICES_FRESH_MS = 10 * 60_000;
 const NOTE_MS = 10_000;
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -205,7 +209,13 @@ export class SpeakPlayer extends EventTarget {
 	/** Null when nothing is open (idle). */
 	progress(): SpeakProgress | null {
 		if (!this.run) return null;
-		return { phase: this.phase, position: this.position(), total: this.total(), rate: this.rate };
+		return {
+			phase: this.phase,
+			position: this.position(),
+			total: this.total(),
+			rate: this.rate,
+			buffered: this.buffered(),
+		};
 	}
 
 	/** A button for this message mounted / unmounted. When the last one goes (chat switched), playback stops. */
@@ -247,6 +257,7 @@ export class SpeakPlayer extends EventTarget {
 			paused: a ? a.paused : true,
 			muted: a ? a.muted : false,
 			position: round2(this.position()),
+			buffered: round2(this.buffered()),
 			total: round2(this.total()),
 			rate: this.rate,
 			playbackRate: a ? a.playbackRate : this.rate,
@@ -272,6 +283,15 @@ export class SpeakPlayer extends EventTarget {
 	private total(): number {
 		const entry = this.run?.src?.entry;
 		return entry ? this.durations(entry).reduce((sum, d) => sum + d, 0) : 0;
+	}
+
+	private buffered(): number {
+		const entry = this.run?.src?.entry;
+		if (!entry) return 0;
+		const d = this.durations(entry);
+		let end = d.slice(0, this.part).reduce((sum, x) => sum + x, 0);
+		for (let i = this.part; i < d.length && entry.audio[i]; i++) end += d[i] ?? 0;
+		return end;
 	}
 
 	private position(): number {
@@ -384,20 +404,35 @@ export class SpeakPlayer extends EventTarget {
 	}
 
 	/**
-	 * Keep speak busy while chunk `playing` plays: request the next LOOKAHEAD chunks one after another (speak renders one
-	 * at a time). Measured 2026-11-07 in Tom's Zen: with only the next chunk requested when the current one started, a
-	 * long chunk 3 (65 s of audio, ~25 s to render) followed a short chunk 2 (15 s) with 10 s of silence; chunk 2 had
-	 * been ready 12 s before it played. A failure stops the chain (no further requests) and shows when the play loop
-	 * reaches that chunk; a stopped run starts no new request. Cached and in-flight chunks are not requested again.
+	 * Keep speak busy until the whole message is rendered: one request at a time (speak renders one at a time), always
+	 * for the first chunk not yet rendered at or after the one the player is on, so a seek moves where it carries on.
+	 * Before 2026-11-14 only the next two chunks were requested, when a chunk started playing; Tom heard "forty seconds
+	 * and then stops to load for like a minute". A failed chunk stops the pump (the play loop shows the failure when it
+	 * gets there); a stopped run starts no new request. Cached and in-flight chunks are not requested again.
 	 */
-	private fetchAhead(entry: Entry, cacheKey: string, run: Run, url: string, voice: string, playing: number): void {
-		let chain: Promise<unknown> = Promise.resolve();
-		for (let j = playing + 1; j <= playing + LOOKAHEAD && j < entry.chunks.length; j++) {
-			chain = chain.then(() =>
-				this.run === run ? this.chunkAudio(entry, cacheKey, run, url, voice, j) : undefined,
-			);
+	private pump(run: Run): void {
+		if (run.pumping) return;
+		const src = run.src;
+		if (!src || this.run !== run) return;
+		const { entry, cacheKey, url, voice } = src;
+		let next = -1;
+		for (let i = Math.max(0, this.part); i < entry.chunks.length; i++) {
+			if (!entry.audio[i]) {
+				next = i;
+				break;
+			}
 		}
-		chain.catch(() => undefined);
+		if (next < 0 || run.failed.has(next)) return;
+		run.pumping = true;
+		this.chunkAudio(entry, cacheKey, run, url, voice, next).then(
+			() => {
+				run.pumping = false;
+				this.pump(run);
+			},
+			() => {
+				run.pumping = false;
+			},
+		);
 	}
 
 	/** The one audio element, with its listeners. They act on whatever run is current. */
@@ -510,6 +545,7 @@ export class SpeakPlayer extends EventTarget {
 			}
 			this.part = i;
 			this.pendingSeek = at;
+			this.pump(run);
 			if (!src.entry.audio[i]) this.setPhase(this.wantPlay ? "loading" : "paused");
 			this.dispatchEvent(new Event("time"));
 			try {
@@ -521,7 +557,7 @@ export class SpeakPlayer extends EventTarget {
 			if (this.run !== run || seq !== this.switchSeq) return; // stopped, or a later seek took over
 			if (got !== "skip") break;
 		}
-		this.fetchAhead(src.entry, src.cacheKey, run, src.url, src.voice, i);
+		this.pump(run);
 		const url = src.entry.urls[i] ?? URL.createObjectURL(got);
 		src.entry.urls[i] = url;
 		const audio = this.element();
@@ -548,7 +584,14 @@ export class SpeakPlayer extends EventTarget {
 
 	private async start(text: string, key: string): Promise<void> {
 		this.stop();
-		const run: Run = { id: ++this.runSeq, key, failed: new Map(), src: undefined, playedAny: false };
+		const run: Run = {
+			id: ++this.runSeq,
+			key,
+			failed: new Map(),
+			src: undefined,
+			playedAny: false,
+			pumping: false,
+		};
 		this.run = run;
 		this.clearNote(key);
 		this.trace = { chunkIndex: -1, chunkCount: 0, played: [], fetched: [], lastNote: null, lastError: null };

@@ -2,7 +2,7 @@
  * Read aloud in the real extension (Tom, 2026-11-07): an R730 chat against the stand-in relay, plus a stand-in speak
  * server that answers like the real one (no CORS headers, OpenAI-style errors, real mp3 audio made with ffmpeg).
  * Checks: 🔊 on each answer (tooltip names Fish Audio); click -> spinner while chunk 1 renders -> playing, the audio's
- * currentTime advances; the next two chunks are requested while the current one plays, one request at a time; all chunks play in order and the
+ * currentTime advances; the later chunks are requested while the first one plays, one request at a time; all chunks play in order and the
  * requests are exactly chunkMarkdown(message) in order; replay comes from memory (no request); click while playing
  * stops; with speak returning 503 the button shows "speak is offline (M4 asleep?)" after one request (no retry);
  * Settings → Read aloud switches the buttons off. Player state comes from the panel's sitegeist_speak diagnostic over
@@ -12,8 +12,8 @@
  * a position slider over the whole answer, the time, a speed menu and close. Checked here with real clicks: default
  * speed 1.75x; pause holds the position; the speed menu changes playbackRate and is stored; a click on the slider
  * jumps to that position in another chunk; back/forward and the arrow keys move it; resume plays from there to the
- * end and the bar closes; close stops. On a second long answer: a seek into a chunk that was never requested fetches
- * just that chunk and plays it.
+ * end and the bar closes; close stops. On a second long answer: a seek to the end while paused plays the last chunk;
+ * every chunk is requested once at most.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -327,7 +327,7 @@ test(
 			);
 			assert.ok(
 				speak.speech.length >= 3,
-				`the next two chunks are fetched while the first one plays (${speak.speech.length})`,
+				`later chunks are fetched while the first one plays (${speak.speech.length})`,
 			);
 			assert.equal(speak.speech[0]?.voice, "main-pi");
 
@@ -530,7 +530,7 @@ test(
 			assert.equal((await status()).played.length, playedAtStop, "nothing more plays after stop");
 			assert.deepEqual(await phases(page), ["idle", "idle", "idle"]);
 
-			// 6h. second long answer: pause on chunk 1, seek to the end -> only that last chunk is fetched, then it plays
+			// 6h. second long answer: pause on chunk 1, seek to the end -> the last chunk plays; no chunk is requested twice
 			const n2 = EXPECTED2.length;
 			const before2 = speak.speech.length;
 			await page.locator("sg-speak-button button.sg-speak").nth(2).click();
@@ -568,8 +568,8 @@ test(
 			const asked2 = speak.speech.slice(before2).map((r) => EXPECTED2.indexOf(r.input));
 			assert.ok(asked2.includes(n2 - 1), "the seek target was fetched");
 			assert.ok(
-				asked2.every((i) => i === n2 - 1 || (i >= 0 && i <= 2)),
-				`only chunk 1, its two look-ahead chunks and the seek target were requested (${asked2.join(",")})`,
+				asked2.every((i) => i >= 0) && new Set(asked2).size === asked2.length,
+				`every request is a chunk of the answer, none twice (${asked2.join(",")})`,
 			);
 			assert.equal(await bar.count(), 0);
 

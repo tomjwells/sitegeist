@@ -85,6 +85,8 @@ export class SpeakBar extends LitElement {
 		}
 		const total = Math.max(p.total, 0.5);
 		const position = Math.min(this.drag ?? p.position, total);
+		const buffered = Math.min(p.buffered, total);
+		const bufferedPct = Math.round((buffered / total) * 1000) / 10;
 		const playLabel =
 			p.phase === "paused" ? "Play" : p.phase === "loading" ? "Rendering audio… click to pause" : "Pause";
 		const playGlyph =
@@ -126,9 +128,14 @@ export class SpeakBar extends LitElement {
 			>
 				${icon(RotateCw, "sm")}
 			</button>
+			<div class="relative flex-1 min-w-10 flex items-center" title="Audio ready up to ${clock(buffered)}">
+			<div
+				class="sg-speak-buffered pointer-events-none absolute left-0 bottom-0 h-0.5 rounded bg-muted-foreground/50"
+				style="width: ${bufferedPct}%"
+			></div>
 			<input
 				type="range"
-				class="sg-speak-seek flex-1 min-w-10 m-0 cursor-pointer accent-primary"
+				class="sg-speak-seek w-full m-0 cursor-pointer accent-primary"
 				min="0"
 				max=${total}
 				step="0.5"
@@ -139,6 +146,7 @@ export class SpeakBar extends LitElement {
 				@change=${(e: Event) => this.onSeekChange(e)}
 				@keydown=${(e: KeyboardEvent) => this.onSeekKey(e)}
 			/>
+			</div>
 			<span class="sg-speak-time shrink-0 whitespace-nowrap tabular-nums text-muted-foreground max-[359px]:hidden"
 				>${clock(position)} / ${clock(total)}</span
 			>
