@@ -23,6 +23,7 @@ import {
 } from "../utils/target-tab.js";
 import type { Json } from "./prime-client.js";
 import { isJson } from "./prime-client.js";
+import { fetchPdfText } from "../utils/pdf-text.js";
 
 type TextBlock = { type: "text"; text: string };
 type ImageBlock = { type: "image"; data: string; mimeType: string };
@@ -347,15 +348,25 @@ async function readPage(args: Json, windowId: number): Promise<BrowserToolResult
 			: mode === "links"
 				? "Array.from(document.querySelectorAll('a[href]')).map(a => (a.textContent || '').trim().replace(/\\s+/g,' ').slice(0,120) + ' -> ' + a.href).join('\\n')"
 				: "(document.body && document.body.innerText) || document.documentElement.innerText || ''";
-	const raw = await runUserScript(id, code);
-	const full = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+	let full: string;
+	let pdfNote = "";
+	try {
+		const raw = await runUserScript(id, code);
+		full = typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+	} catch (error) {
+		// A PDF in the browser's own viewer cannot be scripted by any extension: read the file itself instead.
+		const pdf = tab.url ? await fetchPdfText(tab.url).catch(() => undefined) : undefined;
+		if (!pdf) throw error;
+		full = pdf.text;
+		pdfNote = `PDF read from its URL (the browser's PDF viewer cannot be scripted): ${pdf.pages} pages, ${pdf.bytes} bytes${mode === "text" ? "" : `; mode ${mode} is not available for a PDF, text shown`}\n\n`;
+	}
 	const truncated = full.length > maxChars;
 	const body = truncated
 		? `${full.slice(0, maxChars)}\n\n[truncated: ${full.length} chars total, showing ${maxChars}]`
 		: full;
 	return {
-		content: [{ type: "text", text: `${tab.title ?? ""} — ${tab.url ?? ""}\n\n${body}` }],
-		details: { tabId: id, url: tab.url, title: tab.title, mode, chars: full.length, truncated },
+		content: [{ type: "text", text: `${tab.title ?? ""} — ${tab.url ?? ""}\n\n${pdfNote}${body}` }],
+		details: { tabId: id, url: tab.url, title: tab.title, mode, chars: full.length, truncated, ...(pdfNote ? { pdf: true } : {}) },
 	};
 }
 
