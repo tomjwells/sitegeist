@@ -4,6 +4,7 @@
  * same state machine the local agent uses, so pi-web-ui renders it unchanged. Browser tool calls
  * from prime arrive over the same socket and are executed here with the extension's powers.
  */
+
 import {
 	Agent,
 	type AgentEvent,
@@ -34,6 +35,7 @@ import {
 	primeRpc,
 	primeUploadFile,
 } from "./prime-client.js";
+import { runningTools } from "./running-tools.js";
 import {
 	describeSendError,
 	isQueued,
@@ -328,6 +330,9 @@ export class PrimeRemoteAgent extends Agent {
 			const history = toAgentMessages(h.messages);
 			this.remote.messages = [...history, ...artifacts, ...unsent, ...this.reconcileQueued(h.queue, history)];
 			ensurePrimeToolRenderers(history);
+			runningTools.seed(this.runKey(), h.runs);
+			// A command still running after a reload counts as pending, so it is drawn as running, not as finished.
+			this.remote.pendingToolCalls = new Set(runningTools.list().map((r) => r.toolCallId));
 			this.openSocket(h.offset);
 			this.emitRemote({ type: "agent_end", messages: [] });
 			void this.onArtifactsReconcile?.().catch((err) => console.warn("[prime] artifact reconcile failed", err));
@@ -460,11 +465,18 @@ export class PrimeRemoteAgent extends Agent {
 		if (typeof state.sessionFile === "string" && state.sessionFile) this.nativeSessionFile = state.sessionFile;
 	}
 
+	/** The running-tools store's key for this chat: agent + session. */
+	runKey(): string {
+		return `${this.agentId}/${this.primeSessionId ?? ""}`;
+	}
+
 	private openSocket(offset: number): void {
 		if (!this.primeSessionId) return;
 		this.socket?.close();
+		if (runningTools.sessionKey !== this.runKey()) runningTools.seed(this.runKey(), undefined);
 		this.socket = new PrimeSocket(this.agentId, this.primeSessionId, offset, {
 			onEvents: (events) => this.applyEvents(events),
+			onRunning: (payload) => runningTools.push(this.runKey(), payload),
 			onBrowserCall: (id, tool, args) => void this.runBrowserCall(id, tool, args),
 			onBrowserCancel: (id) => void cancelBrowserCall(id),
 			onAttachments: (items) => void this.receiveAttachments(items),
@@ -555,12 +567,14 @@ export class PrimeRemoteAgent extends Agent {
 					const pending = new Set(this.remote.pendingToolCalls);
 					pending.add(event.toolCallId);
 					this.remote.pendingToolCalls = pending;
+					runningTools.started(this.runKey(), event.toolCallId, event.toolName);
 					break;
 				}
 				case "tool_execution_end": {
 					const pending = new Set(this.remote.pendingToolCalls);
 					pending.delete(event.toolCallId);
 					this.remote.pendingToolCalls = pending;
+					runningTools.ended(this.runKey(), event.toolCallId);
 					break;
 				}
 				case "turn_end":
@@ -576,6 +590,7 @@ export class PrimeRemoteAgent extends Agent {
 					this.remote.isStreaming = false;
 					this.remote.streamMessage = null;
 					this.remote.pendingToolCalls = new Set();
+					runningTools.clear(this.runKey());
 					break;
 				default:
 					break;

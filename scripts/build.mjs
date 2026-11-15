@@ -120,8 +120,16 @@ const piWebUiPatches = [
 		// text = the message's text parts joined, i.e. the Markdown the model wrote) + the 🔊 read-aloud button
 		// (sg-speak-button, src/components/SpeakButton.ts; same Markdown).
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]Messages\.js$/,
-		imports: [],
+		imports: [
+			// a running tool call: live card (src/components/RunningTool.ts, Tom 2026-11-15)
+			`import { toolFrame as __sgToolFrame } from ${JSON.stringify(join(packageRoot, "src/components/RunningTool.ts").replace(/\\/g, "/"))};`,
+		],
 		replacements: [
+			{
+				// the assistant message's time, for "running since about HH:MM" when the relay did not see the start
+				find: "							.toolCall=${chunk}\n",
+				replace: "							.toolCall=${chunk}\n							.sgMessageTime=${this.message.timestamp}\n",
+			},
 			{
 				find: "        // Render content in the order it appears\n        const orderedParts = [];\n",
 				replace:
@@ -166,11 +174,28 @@ const piWebUiPatches = [
 					'        return html `<button class="sg-tool-collapsed w-full text-left px-2.5 py-1.5 border border-border rounded-md bg-card text-xs text-muted-foreground flex items-center gap-2 hover:text-foreground" title=${expanded ? \'Collapse this tool call\' : \'Expand this tool call\'} @click=${() => { this.sgForceExpanded = !expanded; this.requestUpdate(); }}><span class="inline-block w-2 h-2 rounded-full shrink-0 ${dot}"></span><span class="font-medium shrink-0">${toolName}</span><span class="truncate min-w-0 flex-1 font-mono opacity-80">${this.sgSummary()}</span><span class="shrink-0 w-3 text-center">${expanded ? \'\u2212\' : \'+\'}</span></button>`;\n' +
 					"    }\n" +
 					"    render() {\n" +
+					"        return __sgToolFrame(this, () => this.sgRenderNormal());\n" +
+					"    }\n" +
+					"    sgRenderNormal() {\n" +
 					"        if (globalThis.__sgToolCallsCollapsed !== true) return this.sgRenderFull();\n" +
 					"        if (!this.sgForceExpanded) return this.sgRow(false);\n" +
 					'        return html `<div class="space-y-1">${this.sgRow(true)}${this.sgRenderFull()}</div>`;\n' +
 					"    }\n" +
 					"    sgRenderFull() {\n        const toolName = this.tool?.name || this.toolCall.name;\n",
+			},
+		],
+	},
+	{
+		// A running tool call stays visible (Tom 2026-11-15: "why can't I see the cell?"). pi-web-ui hid a pending call
+		// in the list while the turn streams, expecting its live box to show it, but the live box drops the message at
+		// message_end, before the tool even starts. The list now always draws it (as <sg-running-tool>); the live box
+		// only ever holds the message still being written, which is not in the list yet, so nothing is drawn twice.
+		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageList\.js$/,
+		imports: [],
+		replacements: [
+			{
+				find: ".hidePendingToolCalls=${this.isStreaming}",
+				replace: ".hidePendingToolCalls=${false}",
 			},
 		],
 	},
@@ -181,12 +206,14 @@ const piWebUiPatches = [
 			`import { rememberDraftAttachments } from ${JSON.stringify(join(packageRoot, "src/storage/draft-attachments.ts").replace(/\\/g, "/"))};`,
 			`import { footerInfo as __sgFooterInfo } from ${JSON.stringify(join(packageRoot, "src/components/footer-info.ts").replace(/\\/g, "/"))};`,
 			`import ${JSON.stringify(join(packageRoot, "src/components/QueueShelf.ts").replace(/\\/g, "/"))};`,
+			`import ${JSON.stringify(join(packageRoot, "src/components/RunStatus.ts").replace(/\\/g, "/"))};`,
 		],
 		replacements: [
 			{
-				// queued messages shelved on top of the prompt box (src/components/QueueShelf.ts, Tom 2026-11-15)
+				// queued messages shelved on top of the prompt box (src/components/QueueShelf.ts, Tom 2026-11-15), and above
+				// them the running-command line (src/components/RunStatus.ts, Tom 2026-11-15)
 				find: "						<message-editor\n",
-				replace: "						<sg-queue-shelf .messages=${state.messages}></sg-queue-shelf>\n						<message-editor\n",
+				replace: "						<sg-run-status></sg-run-status>\n						<sg-queue-shelf .messages=${state.messages}></sg-queue-shelf>\n						<message-editor\n",
 			},
 			{
 				// bottom-left of the prompt box: build + session id (src/components/footer-info.ts)

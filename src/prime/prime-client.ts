@@ -123,6 +123,8 @@ export interface PrimeHydration {
 	messages: Json[];
 	/** Messages waiting in the relay's queue, in order. */
 	queue: PrimeQueuedItem[];
+	/** The relay's running commands and finished durations (`now`, `running`, `toolDurations`; running-tools.ts). */
+	runs: Json;
 }
 
 /**
@@ -221,7 +223,22 @@ export async function primeHydrate(agentId: string, sessionId: string): Promise<
 		state: isJson(r.state) ? r.state : {},
 		messages: Array.isArray(r.messages) ? r.messages.filter(isJson) : [],
 		queue: queuedItems(r.queue),
+		runs: { now: r.now, running: r.running, toolDurations: r.toolDurations },
 	};
+}
+
+/** The whole kept output of one running command ("Show all output"), or undefined when it is no longer running. */
+export async function primeRunningOutput(
+	agentId: string,
+	sessionId: string,
+	toolCallId: string,
+): Promise<string | undefined> {
+	const r = await request(
+		agentId,
+		"GET",
+		`/sessions/${encodeURIComponent(sessionId)}/running?toolCallId=${encodeURIComponent(toolCallId)}`,
+	);
+	return r.found === true && typeof r.tail === "string" ? r.tail : undefined;
 }
 
 /**
@@ -436,6 +453,8 @@ export interface PrimeSocketHandlers {
 	onBrowserCall: (id: string, tool: string, args: Json) => void;
 	onBrowserCancel: (id: string, reason: string) => void;
 	onAttachments: (items: PrimeAttachment[]) => void;
+	/** The relay's running commands for this chat (running-tools.ts). */
+	onRunning?: (payload: Json) => void;
 	/** detail: plain words for the status light's tooltip (why it closed, when it retries). */
 	onStatus: (status: "connecting" | "open" | "closed", detail?: string) => void;
 }
@@ -564,6 +583,8 @@ export class PrimeSocket {
 		} else if (msg.type === "attachments" && Array.isArray(msg.items)) {
 			const items = msg.items.filter(isAttachment);
 			if (items.length > 0) this.handlers.onAttachments(items);
+		} else if (msg.type === "running_tools") {
+			this.handlers.onRunning?.(msg);
 		} else if (msg.type === "relay_error") {
 			console.warn("[prime] relay error:", msg.message);
 		}

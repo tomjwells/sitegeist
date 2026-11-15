@@ -67,6 +67,12 @@ export interface StandInRelay {
 	socketQueries: string[];
 	/** Send these bridge events to the panel (and count them in the offset), as a running turn would. */
 	pushEvents(events: unknown[]): void;
+	/** What the relay's hydrate says about running commands (now / running / toolDurations); undefined = an old relay. */
+	runs: Record<string, unknown> | undefined;
+	/** A live running_tools push to every panel socket (the real relay sends one at most every 250 ms). */
+	pushRunning(payload: Record<string, unknown>): void;
+	/** GET …/running?toolCallId=: the whole kept output per call. */
+	runningOutput: Map<string, string>;
 	/** The chat list every browser shares (POST /sitegeist/chats/sync), as the relay keeps it: deleted ones included. */
 	chatList(): Array<{ id: string; title: string; lastModified: string; deletedAt?: string; textAt?: string }>;
 	/** The search text a browser sent for a chat (POST /sitegeist/chats/text), as the relay keeps it. */
@@ -230,6 +236,8 @@ export async function startStandInRelay(
 	const prime = "/sitegeist/agents/prime";
 	const session = `${prime}/sessions/${sessionId}`;
 	const relayState = { offline: false, swallowPrompt: false, repeats: 0 };
+	const runState: { runs: Record<string, unknown> | undefined } = { runs: undefined };
+	const runningOutput = new Map<string, string>();
 	/** What the bridge logs for an accepted prompt: the user message echoed, then an idle turn. */
 	const echo = (text: string): void => {
 		const events = [
@@ -306,8 +314,13 @@ export async function startStandInRelay(
 					},
 					messages: history,
 					queue: queue.map((i) => ({ id: i.id, text: i.text, at: i.at })),
+					...(runState.runs ?? {}),
 				}),
 			);
+		} else if (url.split("?")[0] === `${session}/running` && req.method === "GET") {
+			const id = new URL(url, "http://x").searchParams.get("toolCallId") ?? "";
+			const out = runningOutput.get(id);
+			res.end(JSON.stringify(out === undefined ? { ok: true, found: false } : { ok: true, found: true, tail: out }));
 		} else if (url === `${session}/exists` && req.method === "GET") {
 			// The real relay asks the bridge for the log size only; a chat with history exists, named after its first message.
 			const first = history.find((m) => isRecord(m) && m.role === "user");
@@ -491,6 +504,16 @@ export async function startStandInRelay(
 				...(typeof e.textAt === "string" ? { textAt: e.textAt } : {}),
 			})),
 		chatText: (id) => chatTexts.get(id),
+		get runs() {
+			return runState.runs;
+		},
+		set runs(v: Record<string, unknown> | undefined) {
+			runState.runs = v;
+		},
+		runningOutput,
+		pushRunning: (payload) => {
+			for (const ws of sockets) ws.send(JSON.stringify({ type: "running_tools", ...payload }));
+		},
 		pushEvents: (events) => {
 			for (const e of events)
 				if (isRecord(e) && e.type === "message_end" && isRecord(e.message)) history.push(e.message);
