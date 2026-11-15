@@ -45,7 +45,8 @@ const BLOCK = new Set([
 ]);
 const SKIP = new Set(["button", "svg", "script", "style", "select", "textarea", "template", "copy-button"]);
 
-const MATH_RE = /\$\$([^$]+?)\$\$|\\\[(.+?)\\\]|\$([^$\n]+?)\$|\\\((.+?)\\\)/gs;
+// Single-$ branch follows the renderer's Pandoc rule (inline-math.ts): amounts like "$43,766" are not math.
+const MATH_RE = /\$\$([^$]+?)\$\$|\\\[(.+?)\\\]|(?<![\\$])\$(?![\s$])([^$\n]*?[^\s$\\])\$(?!\d)|\\\((.+?)\\\)/gs;
 const CODE_RE = /```[\s\S]*?```|`[^`\n]+`/g;
 
 /**

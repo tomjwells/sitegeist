@@ -55,6 +55,18 @@ const srcImport = (names, file) =>
 	`import { ${names} } from ${JSON.stringify(join(packageRoot, file).replace(/\\/g, "/"))};`;
 const piWebUiPatches = [
 	{
+		// mini-lit MarkdownBlock: "$...$" is inline math only under Pandoc's rule (src/utils/inline-math.ts), so dollar
+		// amounts ("for $43,766. ... "$43,000"") stay text instead of one italic KaTeX run (Cassian, 2026-11-15).
+		file: /@mariozechner[\\/]mini-lit[\\/]dist[\\/]MarkdownBlock\.js$/,
+		imports: [srcImport("INLINE_MATH_DOLLAR as __sgInlineMathDollar", "src/utils/inline-math.ts")],
+		replacements: [
+			{
+				find: String.raw`const match = /^\$([^$\n]+?)\$/s.exec(src);`,
+				replace: "const match = __sgInlineMathDollar.exec(src);",
+			},
+		],
+	},
+	{
 		file: /@mariozechner[\\/]pi-web-ui[\\/]dist[\\/]components[\\/]MessageEditor\.js$/,
 		imports: [
 			`import { thinkingOptionsFor as __thinkingOptionsFor } from ${JSON.stringify(join(packageRoot, "src/thinking-options.ts").replace(/\\/g, "/"))};`,
