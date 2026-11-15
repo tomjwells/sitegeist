@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **A running command is visible while it runs** (1.0.295/1.0.296, 2026-11-15; Tom: "why can't I see the cell?" … "say it is a 30minute thing…. How long has it already been running - has it returned anything yet? Any logs? What are those logs?").
+  - Cause of the blank: pi-web-ui's message list hid a pending tool call while the turn streamed, expecting its live box to show it; the live box drops the message at `message_end`, before the tool starts. A 30-minute Cassian ipython cell showed only "Thinking…". The list now always draws the call (`scripts/build.mjs`, MessageList patch); the live box only holds the message still being written, so nothing is drawn twice (checked at every stage by the test).
+  - Card at the call's place (`<sg-running-tool>`, `src/components/RunningTool.ts`): title + "running 7m 12s"; "started 14:13 · 1,659 lines · last output 4s ago" (or "no output yet", or the tool's status such as a kernel starting); amber "quiet for 3m" after 2 minutes without output; the last 6 lines, live; Show all output (everything the relay kept, pinned to the bottom), Show command, Copy output. When the relay did not see the start (it restarted mid-command): "running since about HH:MM" from the message time and "output before HH:MM not shown". Finished: the usual tool block plus "took 2m 05s" (10 s and longer).
+  - One line above the prompt box (`<sg-run-status>`, above the queue shelf): "Python · <summary> · running 7m 12s · last output 4s ago · 1,659 lines", amber when quiet, "+1 more" for parallel calls; a click scrolls to the card.
+  - Data: `src/prime/running-tools.ts` (one store, fed by the relay's hydrate fields `now` / `running` / `toolDurations`, its `running_tools` pushes, and the agent's own `tool_execution_start` / `_end`; the relay's clock moved onto the browser's). Needs relay `2026-11-15.2`; with an older relay a running call shows the timer and "no output yet".
+  - Tests: `test:running` (store, 4), `test:running:extension` (card, timer, lines, quiet, show all / command, status line above the shelf and its jump, reload note, finished + took; drawn once throughout; screenshots `tests/.out/running-*.png`, light and dark). Live check against the real relay with a main-pi chat (Sonnet 5.5) running a 60 s cell: card 4 s after the prompt, 11 lines at 20 s, 23 at 45 s, "took 59s"; a reload mid-run brought the card back in 1.3 s with the exact start and count.
+
 ### Fixed
 
 - **A panel never stays black; a permission grant in one window releases every panel** (Tom, 2026-11-11: "I just uninstalled and reinstalled sitegiest in zen. First time I open it…. Black", then "I think I needed to accept the JS permissions for a new app - but that dialog was showing in a sitegeist in a completely different zen window").
