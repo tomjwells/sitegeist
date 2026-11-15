@@ -2,8 +2,8 @@
  * Two ways to send while the agent works (Tom, 2026-10-25: "I want two send buttons. One to steer and one to
  * follow-up/send a queued prompt"): Enter or the steer button goes in mid-turn, as before; Alt+Enter or the queue
  * button puts the message in the RELAY's queue (in front of prime, like the Telegram router's own queue), which sends
- * it as a plain prompt when the session is idle. While it waits it shows "Queued" at the bottom of the chat with Edit
- * and Cancel, survives a panel reload (the relay's list is the truth), runs in order, and is never sent twice. A
+ * it as a plain prompt when the session is idle. While it waits it sits on the shelf above the prompt box (not in
+ * the chat, Tom 2026-11-15) with Edit and Cancel, survives a panel reload (the relay's list is the truth), runs in order, and is never sent twice. A
  * queued message the relay no longer lists is shown as not sent and waits for a click. Real extension in Chromium
  * against the stand-in relay (tests/prime-relay.fixture.ts), which keeps the queue the way the relay does.
  */
@@ -61,11 +61,19 @@ interface View {
 
 function view(page: Page): Promise<View> {
 	return page.evaluate(() => ({
-		bubbles: Array.from(document.querySelectorAll("sitegeist-user-message")).map((el) => {
-			const text = el.querySelector(".user-message-container")?.textContent?.trim().slice(0, 40) ?? "";
-			const state = el.querySelector("[data-send-state]")?.getAttribute("data-send-state") ?? "sent";
-			return `${text} [${state}]`;
-		}),
+		// chat bubbles, then the queue shelf's rows (shown as "[queued]"): the shelf sits below the chat, on the prompt box
+		bubbles: [
+			...Array.from(document.querySelectorAll("sitegeist-user-message"))
+				.filter((el) => el.querySelector(".user-message-container") !== null)
+				.map((el) => {
+					const text = el.querySelector(".user-message-container")?.textContent?.trim().slice(0, 40) ?? "";
+					const state = el.querySelector("[data-send-state]")?.getAttribute("data-send-state") ?? "sent";
+					return `${text} [${state}]`;
+				}),
+			...Array.from(document.querySelectorAll("sg-queue-shelf .sg-queued-item")).map(
+				(el) => `${el.querySelector(".sg-queued-text")?.textContent?.trim().slice(0, 40) ?? ""} [queued]`,
+			),
+		],
 		answers: Array.from(document.querySelectorAll("assistant-message")).map(
 			(el) => el.textContent?.trim().slice(0, 40) ?? "",
 		),
@@ -130,7 +138,9 @@ test(
 				);
 			};
 			const bubbleAction = (state: string, label: string) =>
-				page.click(`[data-send-state="${state}"] button:has-text("${label}")`);
+				state === "queued"
+					? page.click(`sg-queue-shelf .sg-queued-item button:has-text("${label}")`)
+					: page.click(`[data-send-state="${state}"] button:has-text("${label}")`);
 			const composer = () =>
 				page.evaluate(
 					() => (document.querySelector("message-editor textarea") as HTMLTextAreaElement | null)?.value ?? "",
@@ -149,7 +159,7 @@ test(
 			);
 			assert.equal(v.placeholder, "Enter steers now · Alt+Enter queues it for after this turn");
 
-			// 2. The queue button: the relay queues it; the bubble says "Queued", offers Edit and Cancel, sits at the bottom.
+			// 2. The queue button: the relay queues it; it waits on the shelf above the prompt box with Edit and Cancel.
 			await page.click("message-editor .sg-queue-send");
 			await until(
 				() => Promise.resolve(relay.queued()),
@@ -166,14 +176,17 @@ test(
 			);
 			assert.ok(
 				await page.evaluate(() => {
-					const bar = document.querySelector('[data-send-state="queued"]');
-					const labels = Array.from(bar?.querySelectorAll("button") ?? []).map((b) => b.textContent?.trim());
+					const row = document.querySelector("sg-queue-shelf .sg-queued-item");
+					const labels = Array.from(row?.querySelectorAll("button") ?? []).map((b) => b.textContent?.trim());
+					const shelf = document.querySelector("sg-queue-shelf");
+					const editor = document.querySelector("message-editor");
 					return (
-						bar?.textContent?.includes("Queued: runs when the agent is free.") &&
-						labels.join("|") === "Edit|Cancel"
+						labels.join("|") === "Edit|Cancel" &&
+						shelf?.nextElementSibling === editor &&
+						document.querySelector('sitegeist-user-message [data-send-state="queued"]') === null
 					);
 				}),
-				"the bubble says it is queued and offers Edit / Cancel",
+				"the shelf row sits right above the prompt box with Edit / Cancel; nothing queued in the chat",
 			);
 			assert.equal(v.unsentPill, "", "a queued message is not unsent");
 
@@ -206,8 +219,9 @@ test(
 				"two queued, in order",
 			);
 
-			// 5. Cancel the second: gone from the relay and from the chat.
-			await page.click('sitegeist-user-message:last-of-type [data-send-state="queued"] button:has-text("Cancel")');
+			await page.screenshot({ path: join(root, "tests/.out/queue-shelf.png") });
+			// 5. Cancel the second: gone from the relay and from the shelf.
+			await page.click('sg-queue-shelf .sg-queued-item:last-child button:has-text("Cancel")');
 			await until(
 				() => Promise.resolve(relay.queued()),
 				(q) => q.join("|") === "Also check the Sources page.",

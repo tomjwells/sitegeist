@@ -4,6 +4,7 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { drawnImages } from "../prime/image-refs.js";
 import "../prime/remote-image.js"; // <sg-remote-image>
+import { isShelved } from "../components/QueueShelf.js";
 import { SEND_ACTION_EVENT, type SendActionDetail, sendStateOf } from "../prime/send-state.js";
 
 /**
@@ -53,6 +54,8 @@ export class SitegeistUserMessage extends LitElement {
 	}
 
 	override render() {
+		// A queued message waits on the shelf above the prompt box (components/QueueShelf.ts), not in the chat.
+		if (isShelved(this.message)) return nothing;
 		const content =
 			typeof this.message.content === "string"
 				? this.message.content

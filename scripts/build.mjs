@@ -180,8 +180,14 @@ const piWebUiPatches = [
 			`import { beginPromptSubmission, restoreRejectedPrompt } from ${JSON.stringify(join(packageRoot, "src/storage/prompt-drafts.ts").replace(/\\/g, "/"))};`,
 			`import { rememberDraftAttachments } from ${JSON.stringify(join(packageRoot, "src/storage/draft-attachments.ts").replace(/\\/g, "/"))};`,
 			`import { footerInfo as __sgFooterInfo } from ${JSON.stringify(join(packageRoot, "src/components/footer-info.ts").replace(/\\/g, "/"))};`,
+			`import ${JSON.stringify(join(packageRoot, "src/components/QueueShelf.ts").replace(/\\/g, "/"))};`,
 		],
 		replacements: [
+			{
+				// queued messages shelved on top of the prompt box (src/components/QueueShelf.ts, Tom 2026-11-15)
+				find: "						<message-editor\n",
+				replace: "						<sg-queue-shelf .messages=${state.messages}></sg-queue-shelf>\n						<message-editor\n",
+			},
 			{
 				// bottom-left of the prompt box: build + session id (src/components/footer-info.ts)
 				find: "					${this.showThemeToggle ? html `<theme-toggle></theme-toggle>` : html ``}\n				</div>",
