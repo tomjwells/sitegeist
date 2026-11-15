@@ -465,6 +465,27 @@ export class PrimeRemoteAgent extends Agent {
 		if (typeof state.sessionFile === "string" && state.sessionFile) this.nativeSessionFile = state.sessionFile;
 	}
 
+	/** One tool call is over: no longer pending, no longer running. */
+	private endTool(id: string): void {
+		if (this.remote.pendingToolCalls.has(id)) {
+			const pending = new Set(this.remote.pendingToolCalls);
+			pending.delete(id);
+			this.remote.pendingToolCalls = pending;
+		}
+		runningTools.ended(this.runKey(), id);
+	}
+
+	/**
+	 * Every tool call of the turn is over (turn_end, or a new run starts). The prime harness does not always log a
+	 * call's tool_execution_end: on 2026-11-15 one of four calls in a message never got one, and the panel said
+	 * "Python running 3m 03s" for a call that had finished.
+	 */
+	private endAllTools(): void {
+		for (const id of Array.from(this.remote.pendingToolCalls)) runningTools.ended(this.runKey(), id);
+		for (const run of runningTools.list()) runningTools.ended(this.runKey(), run.toolCallId);
+		if (this.remote.pendingToolCalls.size > 0) this.remote.pendingToolCalls = new Set();
+	}
+
 	/** The running-tools store's key for this chat: agent + session. */
 	runKey(): string {
 		return `${this.agentId}/${this.primeSessionId ?? ""}`;
@@ -549,6 +570,7 @@ export class PrimeRemoteAgent extends Agent {
 				case "agent_start":
 					this.remote.isStreaming = true;
 					this.remote.error = undefined;
+					this.endAllTools();
 					break;
 				case "message_start":
 				case "message_update":
@@ -560,6 +582,8 @@ export class PrimeRemoteAgent extends Agent {
 					if (!isAgentMessage(event.message)) continue;
 					this.remote.streamMessage = null;
 					if (event.message.role === "assistant") ensurePrimeToolRenderers([event.message]);
+					// a tool's result ends it, even when the harness logged no tool_execution_end (see endAllTools)
+					if (event.message.role === "toolResult") this.endTool(event.message.toolCallId);
 					this.appendRemoteMessage(event.message);
 					break;
 				}
@@ -567,17 +591,14 @@ export class PrimeRemoteAgent extends Agent {
 					const pending = new Set(this.remote.pendingToolCalls);
 					pending.add(event.toolCallId);
 					this.remote.pendingToolCalls = pending;
-					runningTools.started(this.runKey(), event.toolCallId, event.toolName);
+					runningTools.started(this.runKey(), event.toolCallId, event.toolName, event.args);
 					break;
 				}
-				case "tool_execution_end": {
-					const pending = new Set(this.remote.pendingToolCalls);
-					pending.delete(event.toolCallId);
-					this.remote.pendingToolCalls = pending;
-					runningTools.ended(this.runKey(), event.toolCallId);
+				case "tool_execution_end":
+					this.endTool(event.toolCallId);
 					break;
-				}
 				case "turn_end":
+					this.endAllTools();
 					if (
 						isAgentMessage(event.message) &&
 						event.message.role === "assistant" &&

@@ -91,7 +91,13 @@ function look(page: Page, id: string) {
 			quiet: card?.dataset.quiet === "true",
 			status: status?.textContent?.replace(/\s+/g, " ").trim() ?? "",
 			statusQuiet: status?.dataset.quiet === "true",
-			statusAboveShelf: status !== null && shelf !== null && status.parentElement?.nextElementSibling === shelf,
+			statusAboveShelf:
+				status !== null && shelf !== null && status.closest("sg-run-status")?.nextElementSibling === shelf,
+			more: document.querySelector(".sg-run-more")?.textContent?.trim() ?? "",
+			listed: Array.from(document.querySelectorAll(".sg-run-list-item")).map(
+				(b) => b.textContent?.replace(/\s+/g, " ").trim() ?? "",
+			),
+			runningCards: document.querySelectorAll(".sg-running-tool").length,
 			took: document.querySelector(".sg-took")?.textContent?.trim() ?? "",
 		};
 	}, id);
@@ -314,6 +320,7 @@ test(
 						tail: lines.join("\n"),
 						truncated: false,
 						missedOutput: true,
+						args: { code: CODE },
 					},
 				],
 				toolDurations: {},
@@ -326,6 +333,7 @@ test(
 				"card after reload",
 			);
 			assert.match(v.facts, /running since about \d/);
+			assert.match(v.status, /^Python · for page in range\(40\)/, "named after a reload (args from the relay)");
 			assert.match(v.note, /^output before \d\d:\d\d not shown$/);
 			assert.equal(v.cards, 1);
 			assert.equal(v.toolMessages, 1);
@@ -364,6 +372,55 @@ test(
 			assert.equal(v.status, "", "status line gone");
 			assert.equal(v.toolMessages, 1, "still drawn once");
 			await page.screenshot({ path: join(out, "running-finished.png") });
+
+			// 8. Two calls in one message; "+1 more" lists the other. Then the harness skips both ends (seen 2026-11-15
+			//    in a Cassian chat: a start, a result in turn_end, no tool_execution_end): turn_end finishes them.
+			const X = "toolu_running_x";
+			const Y = "toolu_running_y";
+			const two = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: X, name: "ipython", arguments: { code: "scan_all_wallets()" } },
+					{ type: "toolCall", id: Y, name: "bash", arguments: { command: "sleep 600 && echo done" } },
+				],
+				...meta,
+				timestamp: Date.now(),
+			};
+			relay.pushEvents([
+				{ type: "turn_start" },
+				{ type: "message_end", message: two },
+				{ type: "tool_execution_start", toolCallId: X, toolName: "ipython", args: { code: "scan_all_wallets()" } },
+				{
+					type: "tool_execution_start",
+					toolCallId: Y,
+					toolName: "bash",
+					args: { command: "sleep 600 && echo done" },
+				},
+			]);
+			v = await until(
+				() => look(page, X),
+				(x) => x.runningCards === 2 && x.more === "+1 more",
+				5_000,
+				"two running",
+			);
+			assert.match(v.status, /^Python · scan_all_wallets\(\)/);
+			await page.click(".sg-run-more");
+			v = await until(
+				() => look(page, X),
+				(x) => x.listed.length === 1,
+				3_000,
+				"the other one listed",
+			);
+			assert.match(v.listed[0] ?? "", /sleep 600/);
+			await page.screenshot({ path: join(out, "running-two.png") });
+			await page.click(".sg-run-list-item");
+			relay.pushEvents([{ type: "turn_end", message: two, toolResults: [] }]);
+			v = await until(
+				() => look(page, X),
+				(x) => x.runningCards === 0 && x.status === "",
+				5_000,
+				"turn_end finished both",
+			);
 			relay.endTurn();
 		} finally {
 			await context.close();

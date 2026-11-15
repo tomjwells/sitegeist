@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Python running 3m 03s" for a call that had finished; "+2 more" that could not be opened** (1.0.297, 2026-11-15; Tom: "What is running? Just python? I don't get it", then "Now it says +2 more etc").
+  - The prime harness does not always log a call's `tool_execution_end`: in Tom's Cassian chat 2 of 500 ipython calls had a start, their result only inside `turn_end.toolResults`, and no end. The panel and the relay ended a call only on its own end, so it stayed "running" until the turn ended.
+  - Now a call ends at the first of: its `tool_execution_end`, its toolResult `message_end`, `turn_end` (all of a turn's tools are done by then), `agent_start` / `agent_end`. Same rule in the relay (2026-11-15.3) and the panel (`prime-agent.ts` `endTool` / `endAllTools`: running store and pending calls).
+  - The status line names a call from its input (the relay keeps small args from `tool_execution_start` and sends them in the hydrate and the first push), so it no longer says just "Python" when no card is drawn.
+  - "+N more" is a button: it lists the other running commands above the line, each one jumps to its card.
+  - Tests: relay `tests/running-tools.test.ts` replays the exact four-call sequence from the log; `test:running:extension` step 8 (two calls, the list, ends skipped, `turn_end` clears both). `test:running` now runs under tsx (the store imports a sibling module).
+
 ### Added
 
 - **A running command is visible while it runs** (1.0.295/1.0.296, 2026-11-15; Tom: "why can't I see the cell?" … "say it is a 30minute thing…. How long has it already been running - has it returned anything yet? Any logs? What are those logs?").

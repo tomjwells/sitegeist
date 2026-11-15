@@ -42,7 +42,18 @@ test("pushes: the list is the relay's; finished calls get a duration; another ch
 		changes++;
 	};
 	runningTools.addEventListener(RUNNING_CHANGED, count);
+	runningTools.push("prime/sg-c", {
+		now: Date.now(),
+		running: [view("c1", { args: { code: "import time" } }), view("c2")],
+		finished: {},
+	});
+	assert.match(runningTools.get("c1")?.title ?? "", /^Python · import time/);
 	runningTools.push("prime/sg-c", { now: Date.now(), running: [view("c1"), view("c2")], finished: {} });
+	assert.match(
+		runningTools.get("c1")?.title ?? "",
+		/^Python · import time/,
+		"a later push without args keeps the title",
+	);
 	assert.deepEqual(
 		runningTools.list().map((r) => r.toolCallId),
 		["c1", "c2"],
@@ -66,7 +77,8 @@ test("pushes: the list is the relay's; finished calls get a duration; another ch
 
 test("local events: a start shows at once (before any push); its end gives a duration; agent_end clears", () => {
 	runningTools.seed("quantcoach/sg-d", undefined);
-	runningTools.started("quantcoach/sg-d", "b1", "bash");
+	runningTools.started("quantcoach/sg-d", "b1", "bash", { command: "sleep 600" });
+	assert.match(runningTools.get("b1")?.title ?? "", /sleep 600/, "title from the call's input");
 	const run = runningTools.get("b1");
 	assert.ok(run && run.fromRelay === false && run.lines === 0 && run.startedAt !== null);
 	// a push that does not list a call only started here keeps it

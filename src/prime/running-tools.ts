@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { primeToolTitle } from "./tool-summary.js";
 
 /**
  * Commands running now in the open chat, for the live card in the chat (components/RunningTool.ts) and the status line
@@ -26,6 +27,8 @@ const RunView = z.object({
 	missedOutput: z.boolean(),
 	status: z.string().optional(),
 	fullOutputPath: z.string().optional(),
+	/** The call's input (small values only), sent in the hydrate and the first push that lists the call. */
+	args: z.record(z.string(), z.unknown()).optional(),
 });
 type RunView = z.infer<typeof RunView>;
 
@@ -58,6 +61,8 @@ export interface RunInfo {
 	status?: string;
 	/** Known only from the relay: before its first push a call shows the timer and "no output yet". */
 	fromRelay: boolean;
+	/** "Python · import time": from the call's input, so the status line can name a call without its card. */
+	title?: string;
 }
 
 /** What the card knows and the store does not: the call's title, and when its message was written. */
@@ -119,7 +124,7 @@ class RunningTools extends EventTarget {
 		const parsed = HydrateFields.safeParse(hydration);
 		if (parsed.success) {
 			const skew = Date.now() - parsed.data.now;
-			for (const r of parsed.data.running) this.runs.set(r.toolCallId, fromView(r, skew));
+			for (const r of parsed.data.running) this.runs.set(r.toolCallId, fromView(r, skew, undefined));
 			for (const [id, ms] of Object.entries(parsed.data.toolDurations)) this.durations.set(id, ms);
 		}
 		this.emit(true);
@@ -134,7 +139,7 @@ class RunningTools extends EventTarget {
 		const seen = new Set<string>();
 		for (const r of parsed.data.running) {
 			seen.add(r.toolCallId);
-			const info = fromView(r, skew);
+			const info = fromView(r, skew, this.runs.get(r.toolCallId)?.title);
 			// a start the relay did not see, but this panel did
 			if (info.startedAt === null) info.startedAt = this.localStarts.get(r.toolCallId) ?? null;
 			this.runs.set(r.toolCallId, info);
@@ -150,7 +155,7 @@ class RunningTools extends EventTarget {
 	}
 
 	/** tool_execution_start seen by this panel. */
-	started(sessionKey: string, id: string, toolName: string): void {
+	started(sessionKey: string, id: string, toolName: string, args?: unknown): void {
 		if (sessionKey !== this.session) return;
 		const now = Date.now();
 		this.localStarts.set(id, now);
@@ -165,6 +170,7 @@ class RunningTools extends EventTarget {
 				truncated: false,
 				missedOutput: false,
 				fromRelay: false,
+				title: primeToolTitle(toolName, args),
 			});
 		this.emit(true);
 	}
@@ -206,7 +212,8 @@ class RunningTools extends EventTarget {
 	}
 }
 
-function fromView(r: RunView, skew: number): RunInfo {
+function fromView(r: RunView, skew: number, knownTitle: string | undefined): RunInfo {
+	const title = r.args ? primeToolTitle(r.toolName, r.args) : knownTitle;
 	return {
 		toolCallId: r.toolCallId,
 		toolName: r.toolName,
@@ -218,6 +225,7 @@ function fromView(r: RunView, skew: number): RunInfo {
 		truncated: r.truncated,
 		missedOutput: r.missedOutput,
 		...(r.status ? { status: r.status } : {}),
+		...(title ? { title } : {}),
 		fromRelay: true,
 	};
 }
