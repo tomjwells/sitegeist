@@ -61,7 +61,7 @@ export class RunStatus extends LitElement {
 					? `quiet for ${elapsed(now - run.lastOutputAt)}`
 					: `last output ${elapsed(now - run.lastOutputAt)} ago`
 				: (run.status ?? "no output yet"),
-			...(run.lines > 0 ? [`${run.lines.toLocaleString()} lines`] : []),
+			...(run.lines > 0 ? [`${run.lines.toLocaleString()} line${run.lines === 1 ? "" : "s"}`] : []),
 		];
 		return html`<button
 			type="button"
