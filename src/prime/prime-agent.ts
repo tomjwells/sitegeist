@@ -14,11 +14,19 @@ import {
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import type { Attachment, UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
+import type { DuoModeMessage } from "../messages/DuoModeMessage.js";
 import { fitImageForModel, type ImageFit } from "../utils/model-image.js";
 import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
 import { bridgeNoticeToast, isBridgeNotice } from "./bridge-notice.js";
 import { cancelBrowserCall, handleBrowserCallBounded } from "./browser-tools.js";
-import { MAIN_AGENT_ID, PRIME_PROVIDER } from "./constants.js";
+import {
+	DUO_MODEL_ID,
+	DUO_START_MODEL_ID,
+	harnessFromSessionId,
+	MAIN_AGENT_ID,
+	PRIME_PROVIDER,
+	type PrimeHarness,
+} from "./constants.js";
 import { contentKey } from "./image-refs.js";
 import {
 	isJson,
@@ -49,6 +57,7 @@ import { ensurePrimeToolRenderers } from "./tool-renderer.js";
 
 export {
 	agentIdFromSessionId,
+	harnessFromSessionId,
 	isPrimeSessionId,
 	MAIN_AGENT_ID,
 	PRIME_PROVIDER,
@@ -83,8 +92,35 @@ export function primeModelView(model: Model<any>): Model<any> {
 }
 
 const isAgentMessage = (v: unknown): v is AgentMessage => isJson(v) && typeof v.role === "string";
-const toAgentMessages = (list: unknown[]): AgentMessage[] =>
-	stripBrowserContext(list.filter(isAgentMessage).filter((m) => LLM_ROLES.has(m.role)));
+/**
+ * The duo extension's run note (custom message `duo-role`, details.role fable|opus) as a duo-mode line; undefined
+ * for anything else. pi chats only: prime has no duo.
+ */
+export function duoModeOf(m: unknown): DuoModeMessage | undefined {
+	if (!isJson(m) || m.role !== "custom" || m.customType !== "duo-role") return undefined;
+	const d = isJson(m.details) ? m.details : {};
+	const mode = d.role === "fable" ? "planning" : d.role === "opus" ? "implementation" : undefined;
+	if (!mode) return undefined;
+	return { role: "duo-mode", mode, timestamp: typeof m.timestamp === "number" ? m.timestamp : Date.now() };
+}
+/** The last duo mode shown in this list, to show a line only when the mode changes. */
+const lastDuoMode = (list: readonly AgentMessage[]): DuoModeMessage["mode"] | undefined => {
+	for (let i = list.length - 1; i >= 0; i--) {
+		const m = list[i];
+		if (m?.role === "duo-mode") return m.mode;
+	}
+	return undefined;
+};
+const toAgentMessages = (list: unknown[]): AgentMessage[] => {
+	const out: AgentMessage[] = [];
+	for (const m of list) {
+		const duo = duoModeOf(m);
+		if (duo) {
+			if (lastDuoMode(out) !== duo.mode) out.push(duo);
+		} else if (isAgentMessage(m) && LLM_ROLES.has(m.role)) out.push(m);
+	}
+	return stripBrowserContext(out);
+};
 
 // The side panel prepends "[sitegeist browser context] … [/sitegeist browser context]" to what Tom typed so
 // prime knows the tab/tools; that is for the model, not for the transcript or the session title.
@@ -181,6 +217,8 @@ function payloadFromMessage(m: AgentMessage): SendPayload {
 
 export class PrimeRemoteAgent extends Agent {
 	readonly agentId: string;
+	/** Where this chat runs: from its id, or for a new chat what the panel chose (pi when the agent offers it). */
+	readonly harness: PrimeHarness;
 	readonly agentLabel: string;
 	primeSessionId: string | undefined;
 	status: PrimeStatus = "idle";
@@ -233,6 +271,8 @@ export class PrimeRemoteAgent extends Agent {
 	constructor(opts: {
 		/** Relay agent id: "prime" (main-pi) or a worker id such as "quantcoach". */
 		agentId?: string;
+		/** For a new chat (no sessionId): the harness to create it on. Ignored when sessionId is given (the id says it). */
+		harness?: PrimeHarness;
 		agentLabel?: string;
 		sessionId?: string;
 		model: Model<any>;
@@ -259,6 +299,7 @@ export class PrimeRemoteAgent extends Agent {
 		this.agentId = opts.agentId ?? MAIN_AGENT_ID;
 		this.agentLabel = opts.agentLabel ?? (this.agentId === MAIN_AGENT_ID ? "prime-agent" : this.agentId);
 		this.primeSessionId = opts.sessionId;
+		this.harness = opts.sessionId ? harnessFromSessionId(opts.sessionId) : (opts.harness ?? "prime");
 		this.windowId = opts.windowId;
 		this.tabContext = opts.tabContext;
 		this.remoteModel = opts.model;
@@ -268,7 +309,9 @@ export class PrimeRemoteAgent extends Agent {
 			model: primeModelView(opts.model),
 			thinkingLevel: opts.thinkingLevel,
 			tools: [],
-			messages: (opts.messages ?? []).filter((m) => LLM_ROLES.has(m.role) || isArtifactMessage(m)),
+			messages: (opts.messages ?? []).filter(
+				(m) => LLM_ROLES.has(m.role) || isArtifactMessage(m) || m.role === "duo-mode",
+			),
 			isStreaming: false,
 			streamMessage: null,
 			pendingToolCalls: new Set(),
@@ -395,14 +438,16 @@ export class PrimeRemoteAgent extends Agent {
 		if (this.primeSessionId) return this.primeSessionId;
 		if (!this.createInFlight) {
 			this.setStatus("creating");
-			this.createInFlight = primeCreateSession(this.agentId, name).then(async ({ sessionId, state }) => {
-				this.primeSessionId = sessionId;
-				this.onSessionCreated?.(sessionId);
-				this.applyRemoteState(state);
-				await this.applyChosenSettings(sessionId);
-				this.openSocket(0);
-				return sessionId;
-			});
+			this.createInFlight = primeCreateSession(this.agentId, name, this.harness).then(
+				async ({ sessionId, state }) => {
+					this.primeSessionId = sessionId;
+					this.onSessionCreated?.(sessionId);
+					this.applyRemoteState(state);
+					await this.applyChosenSettings(sessionId);
+					this.openSocket(0);
+					return sessionId;
+				},
+			);
 		}
 		try {
 			return await this.createInFlight;
@@ -445,7 +490,9 @@ export class PrimeRemoteAgent extends Agent {
 		}
 		const runningModel = this.remoteModel?.id ?? "?";
 		const runningLevel = this.remote.thinkingLevel;
-		if (model && runningModel !== model.id) failures.push(`running ${runningModel} instead of ${model.id}`);
+		// duo-start is a one-off start marker: the session then runs duo (the bridge selects duo + /duo-start)
+		const expected = model?.id === DUO_START_MODEL_ID ? DUO_MODEL_ID : model?.id;
+		if (model && runningModel !== expected) failures.push(`running ${runningModel} instead of ${model.id}`);
 		else if (level && runningLevel !== level)
 			failures.push(`thinking is ${runningLevel}, not ${level} (not supported by ${runningModel}?)`);
 		if (failures.length > 0) {
@@ -621,6 +668,11 @@ export class PrimeRemoteAgent extends Agent {
 	}
 
 	private appendRemoteMessage(incoming: AgentMessage): void {
+		const duo = duoModeOf(incoming);
+		if (duo) {
+			if (lastDuoMode(this.remote.messages) !== duo.mode) this.remote.messages = [...this.remote.messages, duo];
+			return;
+		}
 		if (!LLM_ROLES.has(incoming.role)) return;
 		const messages = this.remote.messages;
 		if (incoming.role === "user") {
@@ -1044,7 +1096,12 @@ export class PrimeRemoteAgent extends Agent {
 	 * coaches, and needs no session: a brand-new chat can list them too.
 	 */
 	async availableModels(): Promise<Model<any>[]> {
-		return (await primeModels(this.agentId)).filter(isModel);
+		return (await primeModels(this.agentId, this.harness)).filter(isModel);
+	}
+
+	/** The model menu's cache key: one list per agent and harness (only pi lists Duo and Duo-start). */
+	get modelsKey(): string {
+		return this.harness === "pi" ? `${this.agentId}:pi` : this.agentId;
 	}
 
 	async rename(name: string): Promise<void> {

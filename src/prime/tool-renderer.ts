@@ -65,6 +65,8 @@ function inputBlock(name: string, params: unknown): TemplateResult | "" {
 			${Object.keys(rest).length > 0 ? html`<code-block .code=${JSON.stringify(rest, null, 2)} language="json"></code-block>` : ""}
 		`;
 	}
+	const command = str(a.command);
+	if (command && name === "bash") return html`<code-block .code=${command} language="bash"></code-block>`;
 	if (Object.keys(a).length === 0) return "";
 	return html`<code-block .code=${JSON.stringify(a, null, 2)} language="json"></code-block>`;
 }
@@ -123,7 +125,10 @@ export function renderPrimeTool(
 	};
 }
 
-/** The panel's own tools keep their renderers (and pi-web-ui's bash/calculate/get_current_time theirs). */
+/**
+ * The panel's own tools keep their renderers (and pi-web-ui's calculate/get_current_time theirs). Not bash: since
+ * 2026-11-15 R730 chats on the pi harness run pi's bash, which gets the compact row and the running card (R730_OWNS).
+ */
 const PANEL_TOOLS = new Set([
 	"repl",
 	"navigate",
@@ -133,7 +138,6 @@ const PANEL_TOOLS = new Set([
 	"extract_document",
 	"debugger",
 	"artifacts",
-	"bash",
 	"calculate",
 	"get_current_time",
 ]);
@@ -141,14 +145,31 @@ const PANEL_TOOLS = new Set([
 const registered = new Set<string>();
 
 /** Register the compact renderer for one prime tool name (idempotent; never replaces an existing renderer). */
+/**
+ * Tools whose browser-side renderer an R730 chat replaces: pi's `bash` (sitegeist chats on the pi harness, 2026-11-15)
+ * would otherwise get pi-web-ui's BashRenderer ("Running command..." even when done, no running card).
+ */
+const R730_OWNS = new Set(["bash"]);
+
+/** The renderers registered here, to put an owned one back if a module loaded later replaced it. */
+const ours = new Map<string, ReturnType<typeof getToolRenderer>>();
+
 export function ensurePrimeToolRenderer(name: string): void {
-	if (registered.has(name) || PANEL_TOOLS.has(name)) return;
+	if (PANEL_TOOLS.has(name)) return;
+	if (registered.has(name)) {
+		// sitegeist's tools module registers BashRenderer when it loads, which can be after this ran
+		const own = ours.get(name);
+		if (own && R730_OWNS.has(name) && getToolRenderer(name) !== own) registerToolRenderer(name, own);
+		return;
+	}
 	registered.add(name);
-	if (getToolRenderer(name)) return;
-	registerToolRenderer(name, {
+	if (getToolRenderer(name) && !R730_OWNS.has(name)) return;
+	const renderer = {
 		render: (params: unknown, result: ToolResultMessage<unknown> | undefined, isStreaming?: boolean) =>
 			renderPrimeTool(name, params, result, isStreaming),
-	});
+	};
+	ours.set(name, renderer);
+	registerToolRenderer(name, renderer);
 }
 
 /** Register for every tool call in these messages (hydrated history, streamed assistant messages). */
@@ -177,6 +198,13 @@ export const KNOWN_PRIME_TOOLS = [
 	"browser_skill",
 	"browser_instructions",
 	"ipython",
+	"bash",
+	"read",
+	"edit",
+	"write",
+	"handoff",
+	"decide",
+	"stay_in_planning",
 	"telegram_attach",
 	"agent_wiki_search",
 	"agent_wiki_read",

@@ -46,6 +46,7 @@ import "./components/SessionsSidebar.js";
 import { ModelMenu } from "./components/ModelMenu.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
+import { registerDuoModeRenderer } from "./messages/DuoModeMessage.js";
 import { browserMessageTransformer } from "./messages/message-transformer.js";
 import { createNavigationMessage, registerNavigationRenderer } from "./messages/NavigationMessage.js";
 import { registerUserMessageRenderer } from "./messages/UserMessageRenderer.js";
@@ -53,6 +54,7 @@ import { registerWelcomeRenderer } from "./messages/WelcomeMessage.js";
 import { registerModels } from "./models-registry.js";
 import { isOAuthCredentials, resolveApiKey } from "./oauth/index.js";
 import { onChatListSynced, requestChatListSync, syncChatList } from "./prime/chat-list-sync.js";
+import { DUO_PROVIDER, DUO_START_MODEL_ID, harnessFromSessionId, type PrimeHarness } from "./prime/constants.js";
 import { cachedModels, MODELS_FRESH_MS, refreshModels, warmModelCache } from "./prime/model-cache.js";
 import "./components/SpeakBar.js";
 import "./components/SpeakButton.js";
@@ -133,6 +135,7 @@ import { selectionToMarkdown } from "./utils/selection-markdown.js";
 
 // Register custom message renderers
 registerNavigationRenderer();
+registerDuoModeRenderer();
 registerExtractImageRenderer();
 
 // Listen for abort messages from REPL overlay
@@ -279,6 +282,14 @@ let chatPanel: ChatPanel;
  */
 type AgentKind = string;
 let agentOptions: { value: string; label: string }[] = [{ value: MAIN_AGENT_ID, label: "main-pi" }];
+/** Agents the relay can start pi chats for (relay 2026-11-15.4+ lists each agent's harnesses; loaded before any chat). */
+const agentsWithPi = new Set<string>();
+/**
+ * New chats run on the pi harness, so they can use duo (Tom, 2026-11-15: "yes I'm fine with that"), for every agent
+ * the relay offers pi for; an older relay (no harness list) or an agent without pi gets a prime chat. Old chats keep
+ * their harness (the id says it); there is no switch for a new prime chat.
+ */
+const newChatHarness = (agentId: string): PrimeHarness => (agentsWithPi.has(agentId) ? "pi" : "prime");
 let agentKind: AgentKind = MAIN_AGENT_ID;
 /**
  * A new chat has no agent until Tom picks one (Tom, 2026-11-08: "when you create a new chat, you're forced to pick
@@ -319,6 +330,8 @@ const refreshAgentOptions = async (): Promise<void> => {
 	try {
 		const list = await primeAgents();
 		if (list.length === 0) return;
+		agentsWithPi.clear();
+		for (const a of list) if (a.harnesses?.includes("pi")) agentsWithPi.add(a.id);
 		agentOptions = list.map((a) => {
 			const label = a.label.replace(/\s*\(prime-agent\)$/, ""); // "main-pi (prime-agent)" -> "main-pi", as on the badge
 			return { value: a.id, label: a.ok ? label : `${label} (offline)` };
@@ -346,8 +359,8 @@ function focusComposer(): void {
  * agent (the relay asks the Telegram router), so it needs no session.
  */
 function prefetchModels(prime: PrimeRemoteAgent): void {
-	void warmModelCache(prime.agentId).then(() =>
-		refreshModels(prime.agentId, () => prime.availableModels()).catch((err) =>
+	void warmModelCache(prime.modelsKey).then(() =>
+		refreshModels(prime.modelsKey, () => prime.availableModels()).catch((err) =>
 			console.warn("[prime] model prefetch failed", err),
 		),
 	);
@@ -373,6 +386,31 @@ const draftScope = (): DraftScope => {
 const panelWindowId = (): number => panelWindow() ?? currentWindowId;
 /** New main-pi sessions from the panel run this unless Tom picks another model (matches the router's interactive default). */
 const PRIME_INTERACTIVE_DEFAULT_MODEL = "claude-opus-5-5";
+/**
+ * Duo-start for a new pi chat: the entry from the pi model list when it has loaded (any agent's: the duo entries are
+ * the same everywhere), else a stand-in with the same id. The relay sends set_model anthropic/duo-start; the bridge
+ * selects duo and marks the first message for planning mode, so the chat then reads "duo".
+ */
+function duoStartModel(): Model<any> {
+	for (const o of agentOptions) {
+		const found = cachedModels(`${o.value}:pi`)?.find(
+			(m) => m.provider === DUO_PROVIDER && m.id === DUO_START_MODEL_ID,
+		);
+		if (found) return found;
+	}
+	return {
+		id: DUO_START_MODEL_ID,
+		name: "Duo-start (next request starts in planning mode, then duo)",
+		api: "pi-virtual",
+		provider: DUO_PROVIDER,
+		baseUrl: "",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	};
+}
 /** Set once initApp has loaded a session/agent; tab events before that must not navigate the panel. */
 let appReady = false;
 
@@ -953,7 +991,12 @@ const createAgent = async (
 		// Telegram router gives every new human chat, coach topics included) unless Tom picks another model. Without this
 		// the body's automation default (claude-sonnet-5-5, PI_AGENT_DEFAULT_MODEL) silently replaced whatever the label
 		// said: main-pi on 2026-10-10, and every coach until 2026-10-18 (Shredded Coach, three tries in four minutes).
-		const interactiveDefault = getModels("anthropic").find((m) => m.id === PRIME_INTERACTIVE_DEFAULT_MODEL);
+		// A new chat on pi starts on Duo-start (Tom, 2026-11-15); one on prime (an agent without pi) on Opus.
+		const harness = primeSessionId ? harnessFromSessionId(primeSessionId) : newChatHarness(kind);
+		const interactiveDefault =
+			harness === "pi"
+				? duoStartModel()
+				: getModels("anthropic").find((m) => m.id === PRIME_INTERACTIVE_DEFAULT_MODEL);
 		const placeholder =
 			initialState?.model ??
 			interactiveDefault ??
@@ -965,6 +1008,7 @@ const createAgent = async (
 		if (!placeholder) throw new Error("No model available for the prime placeholder");
 		const prime: PrimeRemoteAgent = new PrimeRemoteAgent({
 			agentId: kind,
+			harness,
 			agentLabel: agentLabelFor(kind),
 			sessionId: primeSessionId,
 			model: placeholder,
@@ -1207,14 +1251,14 @@ const createAgent = async (
 			};
 			if (isPrimeAgent(agent)) {
 				const prime = agent;
-				await warmModelCache(prime.agentId);
-				const cached = cachedModels(prime.agentId);
+				await warmModelCache(prime.modelsKey);
+				const cached = cachedModels(prime.modelsKey);
 				const menu = ModelMenu.open({
 					anchor,
 					models: cached ?? [],
 					loading: !cached,
 					current: prime.remoteModel,
-					recentKey: `prime:${prime.agentId}`,
+					recentKey: `prime:${prime.modelsKey}`,
 					onPick: (model) => {
 						prime.setModel(model);
 						afterPick();
@@ -1222,7 +1266,7 @@ const createAgent = async (
 				});
 				if (!menu) return; // the click closed an open menu
 				// Refresh behind the open menu (skipped while the stored list is fresh). The list needs no session.
-				refreshModels(prime.agentId, () => prime.availableModels())
+				refreshModels(prime.modelsKey, () => prime.availableModels())
 					.then((models) => {
 						if (models && models.length > 0) menu.setModels(models);
 						else if (!cached) menu.setError("The R730 returned no models for this agent.");

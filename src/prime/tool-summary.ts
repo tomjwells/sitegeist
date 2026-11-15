@@ -71,6 +71,30 @@ export function primeToolTitle(name: string, params: unknown): string {
 			return `Skill ${str(a.action) ?? ""} ${str(a.name) ?? (isRecord(a.data) ? (str(a.data.name) ?? "") : "")}`.trim();
 		case "browser_instructions":
 			return a.command === "set" ? "Updating the custom instructions" : "Reading the custom instructions";
+		// pi harness tools (sitegeist chats on pi since 2026-11-15)
+		case "bash": {
+			const command = str(a.command);
+			return command ? `Shell · ${cut(firstLine(command), 70)}` : "Shell";
+		}
+		case "read":
+			return `Reading ${str(a.path) ? cut(str(a.path) ?? "", 70) : "a file"}`;
+		case "edit":
+			return `Editing ${str(a.path) ? cut(str(a.path) ?? "", 70) : "a file"}`;
+		case "write":
+			return `Writing ${str(a.path) ? cut(str(a.path) ?? "", 70) : "a file"}`;
+		case "grep":
+			return `Searching files for ${quoted(str(a.pattern) ?? "")}${str(a.path) ? ` in ${cut(str(a.path) ?? "", 40)}` : ""}`;
+		case "find":
+			return `Finding files ${str(a.pattern) ? quoted(str(a.pattern) ?? "") : ""}`.trim();
+		case "ls":
+			return `Listing ${str(a.path) ? cut(str(a.path) ?? "", 70) : "files"}`;
+		// duo's mode tools
+		case "handoff":
+			return "Switching mode";
+		case "decide":
+			return `Deciding in planning mode${str(a.question) ? ` · ${cut(firstLine(str(a.question) ?? ""), 60)}` : ""}`;
+		case "stay_in_planning":
+			return "Your next message starts in planning mode";
 		case "ipython": {
 			const code = str(a.code);
 			return code ? `Python · ${cut(firstLine(code), 70)}` : "Python";

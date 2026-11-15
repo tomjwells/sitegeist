@@ -7,6 +7,7 @@ import { getSitegeistStorage } from "../storage/app-storage.js";
 import { DEFAULT_SYNC_URL, proxyToken, SYNC_URL_SETTING } from "../sync.js";
 import { type RemoteChat, remoteChatOf } from "./chat-list.js";
 import { type RemoteText, remoteTextOf } from "./chat-text.js";
+import type { PrimeHarness } from "./constants.js";
 import { type ImageRef, imageUrl } from "./image-refs.js";
 
 export type Json = Record<string, unknown>;
@@ -23,6 +24,8 @@ export interface PrimeAgentInfo {
 	id: string;
 	label: string;
 	ok: boolean;
+	/** The harnesses the relay can start chats on for this agent (relay 2026-11-15.4+; absent: prime only). */
+	harnesses?: string[];
 }
 
 /** Agents the relay can drive (main-pi + worker prime sidecars), with a liveness flag each. */
@@ -36,10 +39,13 @@ export async function primeAgents(): Promise<PrimeAgentInfo[]> {
 	if (!res.ok) throw new Error(`prime relay GET /agents -> ${res.status}`);
 	const body: unknown = await res.json();
 	const list = isJson(body) && Array.isArray(body.agents) ? body.agents : [];
-	return list.filter(
-		(a): a is PrimeAgentInfo =>
-			isJson(a) && typeof a.id === "string" && typeof a.label === "string" && typeof a.ok === "boolean",
-	);
+	return list.flatMap((a): PrimeAgentInfo[] => {
+		if (!isJson(a) || typeof a.id !== "string" || typeof a.label !== "string" || typeof a.ok !== "boolean") return [];
+		const harnesses = Array.isArray(a.harnesses)
+			? a.harnesses.filter((h): h is string => typeof h === "string")
+			: undefined;
+		return [{ id: a.id, label: a.label, ok: a.ok, ...(harnesses ? { harnesses } : {}) }];
+	});
 }
 
 async function request(
@@ -88,8 +94,12 @@ export async function primeHealth(agentId: string): Promise<PrimeHealth> {
 	};
 }
 
-export async function primeCreateSession(agentId: string, name: string): Promise<{ sessionId: string; state: Json }> {
-	const r = await request(agentId, "POST", "/sessions", { name });
+export async function primeCreateSession(
+	agentId: string,
+	name: string,
+	harness: PrimeHarness,
+): Promise<{ sessionId: string; state: Json }> {
+	const r = await request(agentId, "POST", "/sessions", { name, harness });
 	if (typeof r.sessionId !== "string") throw new Error("prime relay: session create returned no id");
 	return { sessionId: r.sessionId, state: isJson(r.state) ? r.state : {} };
 }
@@ -421,8 +431,8 @@ export async function primeRpc(agentId: string, sessionId: string, command: Json
  * The agent's model menu: the list Telegram /models shows for this agent (Tom, 2026-11-09: "make them use the same
  * source"). The relay asks the Telegram router for it, so the panel filters nothing itself. Needs no session.
  */
-export async function primeModels(agentId: string): Promise<unknown[]> {
-	const r = await request(agentId, "GET", "/models", undefined, 60_000);
+export async function primeModels(agentId: string, harness: PrimeHarness): Promise<unknown[]> {
+	const r = await request(agentId, "GET", `/models?harness=${harness}`, undefined, 60_000);
 	return Array.isArray(r.models) ? r.models : [];
 }
 

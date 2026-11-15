@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **New chats run on the pi harness, with Duo and Duo-start** (1.0.301, 2026-11-15; Tom, asked whether new sitegeist chats may run on pi, no Python cells, in exchange for duo: "Oh I see… yes I'm fine with that").
+  - A new chat (main-pi and every coach) is created with `harness: "pi"` when the relay lists pi for the agent (`/sitegeist/agents` `harnesses`, relay 2026-11-15.4); an older relay gives a prime chat. Its id says where it runs: `sg-pi-<hex>` / `sg-<agent>-pi-<hex>` (`harnessFromSessionId`, `agentIdFromSessionId` in `src/prime/constants.ts`). Existing chats stay on prime.
+  - Default model of a new pi chat: Duo-start (`duoStartModel()` in `sidepanel.ts`); the bridge turns `set_model duo-start` into duo + its start marker, so the chat then reads `duo`, and that is not reported as a failed choice. The model menu asks `/models?harness=<chat's harness>` and is cached per agent and harness (`modelsKey`): pi chats list Duo and Duo-start, prime chats do not.
+  - Duo's run notes (custom `duo-role` messages) show as one muted line per mode change: "Planning mode" / "Implementation mode" (`src/messages/DuoModeMessage.ts`, `duoModeOf` in `prime-agent.ts`); the raw note is never shown.
+  - pi's tools get compact rows: `bash` → "Shell · <command>" with the running card (it was drawn by pi-web-ui's BashRenderer, "Running command…" even when done), `read`/`edit`/`write`/`grep`/`find`/`ls`, and duo's `handoff` / `decide` / `stay_in_planning`.
+  - Tests: `test:pi-duo:extension` (new), tool titles and id rules in `test:tool-summary`; the stand-in relay matches `/models?harness=…`.
+  - Live check against the real relay (main-pi, 2026-11-15 15:57): new chat on Duo-start, menu with Duo / Duo-start, first message in planning mode, Shell card 40 s with a reload mid-run, `browser_tabs` through the panel, `telegram_attach` file in the artifacts.
+
 ### Fixed
 
 - **"Python running 3m 03s" for a call that had finished; "+2 more" that could not be opened** (1.0.298, 2026-11-15; Tom: "What is running? Just python? I don't get it", then "Now it says +2 more etc").

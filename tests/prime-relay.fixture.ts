@@ -280,7 +280,7 @@ export async function startStandInRelay(
 			res.end(JSON.stringify(chatsSync(isRecord(parsed) ? parsed : {})));
 		} else if (url === "/sitegeist/agents") {
 			res.end(JSON.stringify({ agents: [{ id: "prime", label: "main-pi (prime-agent)", ok: true }] }));
-		} else if (url === `${prime}/models` && req.method === "GET") {
+		} else if (url.split("?")[0] === `${prime}/models` && req.method === "GET") {
 			// The agent's model menu (the relay serves the Telegram router's /models list); needs no session.
 			modelListRequests++;
 			res.end(JSON.stringify({ ok: true, agent: "prime", models: opts.models ?? [], notice: null }));

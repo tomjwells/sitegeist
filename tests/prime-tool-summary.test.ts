@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { primeToolSubtitleText, primeToolTitle } from "../src/prime/tool-summary.ts";
+import { agentIdFromSessionId, harnessFromSessionId } from "../src/prime/constants.ts";
 
 test("titles say what the tool is doing, like the Browser agent's rows", () => {
 	assert.equal(primeToolTitle("browser_page", { tabId: 121, links: false }), "Reading the page · tab 121");
@@ -107,4 +108,26 @@ test("the subtitle is the first output line; an image-only result says so", () =
 		'Showing 1; 1 of 14 open tabs match "linkedin". Marks: …',
 	);
 	assert.equal(primeToolSubtitleText([{ type: "text", text: "a".repeat(300) }]).length, 140);
+});
+
+test("pi harness tools and duo's mode tools get readable titles (2026-11-15)", () => {
+	assert.equal(primeToolTitle("bash", { command: "sleep 40 && echo done\nmore" }), "Shell · sleep 40 && echo done");
+	assert.equal(primeToolTitle("bash", {}), "Shell");
+	assert.equal(primeToolTitle("read", { path: "/workspace/notes.md" }), "Reading /workspace/notes.md");
+	assert.equal(primeToolTitle("edit", { path: "src/a.ts" }), "Editing src/a.ts");
+	assert.equal(primeToolTitle("write", { path: "out.txt" }), "Writing out.txt");
+	assert.equal(primeToolTitle("handoff", { brief: "x" }), "Switching mode");
+	assert.equal(primeToolTitle("decide", { question: "Which one?\nmore" }), "Deciding in planning mode · Which one?");
+	assert.equal(primeToolTitle("stay_in_planning", {}), "Your next message starts in planning mode");
+});
+
+test("session ids: pi chats have pi- before the hex; the agent comes first", () => {
+	assert.equal(harnessFromSessionId("sg-pi-0123456789ab"), "pi");
+	assert.equal(agentIdFromSessionId("sg-pi-0123456789ab"), "prime");
+	assert.equal(harnessFromSessionId("sg-quantcoach-pi-0123456789ab"), "pi");
+	assert.equal(agentIdFromSessionId("sg-quantcoach-pi-0123456789ab"), "quantcoach");
+	assert.equal(harnessFromSessionId("sg-0123456789ab"), "prime");
+	assert.equal(agentIdFromSessionId("sg-0123456789ab"), "prime");
+	assert.equal(harnessFromSessionId("sg-cassianvale-5e3b401fe41e"), "prime");
+	assert.equal(agentIdFromSessionId("sg-cassianvale-5e3b401fe41e"), "cassianvale");
 });

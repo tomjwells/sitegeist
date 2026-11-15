@@ -18,6 +18,7 @@
 		"test:attachments": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/prime-attachments.test.ts",
 		"test:anchors": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/anchors.test.ts",
 		"test:search": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/session-search.test.ts",
+		"test:pi-duo:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/pi-duo-extension.test.ts",
 		"test:prime-model:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/prime-model-extension.test.ts",
 		"test:anchors:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/anchors-extension.test.ts",
 		"test:artifacts:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/artifacts-extension.test.ts",
