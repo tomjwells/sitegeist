@@ -71,6 +71,14 @@ export interface StandInRelay {
 	runs: Record<string, unknown> | undefined;
 	/** A live running_tools push to every panel socket (the real relay sends one at most every 250 ms). */
 	pushRunning(payload: Record<string, unknown>): void;
+	/** The relay's turn supervisor: `turn` in the hydrate and GET …/turn (undefined = an old relay). */
+	turn: Record<string, unknown> | undefined;
+	/** GET …/turn calls (the panel's self-check). */
+	readonly turnRequests: number;
+	/** Any frame to every panel socket (turn_status, …). */
+	pushFrame(payload: Record<string, unknown>): void;
+	/** The agent is busy or not, as the hydrate's state says (without sending any event). */
+	setBusy(v: boolean): void;
 	/** GET …/running?toolCallId=: the whole kept output per call. */
 	runningOutput: Map<string, string>;
 	/** The chat list every browser shares (POST /sitegeist/chats/sync), as the relay keeps it: deleted ones included. */
@@ -237,6 +245,7 @@ export async function startStandInRelay(
 	const session = `${prime}/sessions/${sessionId}`;
 	const relayState = { offline: false, swallowPrompt: false, repeats: 0 };
 	const runState: { runs: Record<string, unknown> | undefined } = { runs: undefined };
+	const turnState: { turn: Record<string, unknown> | undefined; requests: number } = { turn: undefined, requests: 0 };
 	const runningOutput = new Map<string, string>();
 	/** What the bridge logs for an accepted prompt: the user message echoed, then an idle turn. */
 	const echo = (text: string): void => {
@@ -299,6 +308,9 @@ export async function startStandInRelay(
 			res.setHeader("content-type", image.mimeType);
 			res.setHeader("cache-control", "private, max-age=31536000, immutable");
 			res.end(image.bytes);
+		} else if (url.split("?")[0] === `${session}/turn` && req.method === "GET") {
+			turnState.requests++;
+			res.end(JSON.stringify({ ok: true, sessionId, turn: turnState.turn ?? { state: "idle", at: Date.now(), note: "" }, watching: false }));
 		} else if (url.split("?")[0] === session && req.method === "GET") {
 			hydrateQueries.push(url.split("?")[1] ?? "");
 			res.end(
@@ -315,6 +327,7 @@ export async function startStandInRelay(
 					messages: history,
 					queue: queue.map((i) => ({ id: i.id, text: i.text, at: i.at })),
 					...(runState.runs ?? {}),
+					...(turnState.turn ? { turn: turnState.turn } : {}),
 				}),
 			);
 		} else if (url.split("?")[0] === `${session}/running` && req.method === "GET") {
@@ -513,6 +526,21 @@ export async function startStandInRelay(
 		runningOutput,
 		pushRunning: (payload) => {
 			for (const ws of sockets) ws.send(JSON.stringify({ type: "running_tools", ...payload }));
+		},
+		get turn() {
+			return turnState.turn;
+		},
+		set turn(v: Record<string, unknown> | undefined) {
+			turnState.turn = v;
+		},
+		get turnRequests() {
+			return turnState.requests;
+		},
+		pushFrame: (payload) => {
+			for (const ws of sockets) ws.send(JSON.stringify(payload));
+		},
+		setBusy: (v) => {
+			busy = v;
 		},
 		pushEvents: (events) => {
 			for (const e of events)

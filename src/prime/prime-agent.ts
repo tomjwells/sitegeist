@@ -14,6 +14,7 @@ import {
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@mariozechner/pi-ai";
 import type { Attachment, UserMessageWithAttachments } from "@mariozechner/pi-web-ui";
+import type { AutoResumeMessage } from "../messages/AutoResumeMessage.js";
 import type { DuoModeMessage } from "../messages/DuoModeMessage.js";
 import { fitImageForModel, type ImageFit } from "../utils/model-image.js";
 import { buildAttachmentsSection, compactAttachmentsText, hasAttachmentsBlock } from "./attachments-text.js";
@@ -41,6 +42,7 @@ import {
 	primePrompt,
 	primeQueue,
 	primeRpc,
+	primeTurn,
 	primeUploadFile,
 } from "./prime-client.js";
 import { runningTools } from "./running-tools.js";
@@ -54,6 +56,7 @@ import {
 	withSendState,
 } from "./send-state.js";
 import { ensurePrimeToolRenderers } from "./tool-renderer.js";
+import { AUTO_RESUME_MARK, autoResumeTime, turnStatus } from "./turn-status.js";
 
 export {
 	agentIdFromSessionId,
@@ -111,9 +114,36 @@ const lastDuoMode = (list: readonly AgentMessage[]): DuoModeMessage["mode"] | un
 	}
 	return undefined;
 };
+/** The relay's resume prompt (a user message that is not from Tom) as one muted line; undefined for anything else. */
+export function autoResumeOf(m: unknown): AutoResumeMessage | undefined {
+	if (!isJson(m) || m.role !== "user") return undefined;
+	const c = m.content;
+	const text =
+		typeof c === "string"
+			? c
+			: Array.isArray(c)
+				? c
+						.filter((p): p is Json => isJson(p) && p.type === "text" && typeof p.text === "string")
+						.map((p) => String(p.text))
+						.join("\n")
+				: "";
+	if (!text.trimStart().startsWith(AUTO_RESUME_MARK)) return undefined;
+	const at = autoResumeTime(text);
+	return {
+		role: "auto-resume",
+		text,
+		...(at ? { cutAt: at } : {}),
+		timestamp: typeof m.timestamp === "number" ? m.timestamp : Date.now(),
+	};
+}
 const toAgentMessages = (list: unknown[]): AgentMessage[] => {
 	const out: AgentMessage[] = [];
 	for (const m of list) {
+		const resumed = autoResumeOf(m);
+		if (resumed) {
+			out.push(resumed);
+			continue;
+		}
 		const duo = duoModeOf(m);
 		if (duo) {
 			if (lastDuoMode(out) !== duo.mode) out.push(duo);
@@ -310,7 +340,7 @@ export class PrimeRemoteAgent extends Agent {
 			thinkingLevel: opts.thinkingLevel,
 			tools: [],
 			messages: (opts.messages ?? []).filter(
-				(m) => LLM_ROLES.has(m.role) || isArtifactMessage(m) || m.role === "duo-mode",
+				(m) => LLM_ROLES.has(m.role) || isArtifactMessage(m) || m.role === "duo-mode" || m.role === "auto-resume",
 			),
 			isStreaming: false,
 			streamMessage: null,
@@ -374,6 +404,7 @@ export class PrimeRemoteAgent extends Agent {
 			this.remote.messages = [...history, ...artifacts, ...unsent, ...this.reconcileQueued(h.queue, history)];
 			ensurePrimeToolRenderers(history);
 			runningTools.seed(this.runKey(), h.runs);
+			turnStatus.seed(this.runKey(), h.turn, this.remote.isStreaming);
 			// A command still running after a reload counts as pending, so it is drawn as running, not as finished.
 			this.remote.pendingToolCalls = new Set(runningTools.list().map((r) => r.toolCallId));
 			this.openSocket(h.offset);
@@ -545,6 +576,7 @@ export class PrimeRemoteAgent extends Agent {
 		this.socket = new PrimeSocket(this.agentId, this.primeSessionId, offset, {
 			onEvents: (events) => this.applyEvents(events),
 			onRunning: (payload) => runningTools.push(this.runKey(), payload),
+			onTurn: (payload) => void turnStatus.push(this.runKey(), payload),
 			onBrowserCall: (id, tool, args) => void this.runBrowserCall(id, tool, args),
 			onBrowserCancel: (id) => void cancelBrowserCall(id),
 			onAttachments: (items) => void this.receiveAttachments(items),
@@ -555,6 +587,43 @@ export class PrimeRemoteAgent extends Agent {
 			},
 		});
 		void this.socket.connect();
+		this.startSelfCheck();
+	}
+
+	private selfCheckTimer: ReturnType<typeof setInterval> | undefined;
+	private lastSelfCheck = 0;
+	/**
+	 * A running look with nothing behind it must repair itself (Tom, 2026-11-15: "I cant tell what it's waiting on"):
+	 * when this chat looks busy, no command runs and no event has come for 45 s, ask the relay (at most once a minute);
+	 * if it says the turn is not running, read the chat again.
+	 */
+	private startSelfCheck(): void {
+		if (this.selfCheckTimer) return;
+		this.selfCheckTimer = setInterval(() => void this.selfCheck(), 15_000);
+	}
+	private async selfCheck(): Promise<void> {
+		const sid = this.primeSessionId;
+		if (!sid || !this.remote.isStreaming || runningTools.list().length > 0) return;
+		const now = Date.now();
+		if (
+			turnStatus.sessionKey !== this.runKey() ||
+			now - turnStatus.lastEventAt < 45_000 ||
+			now - this.lastSelfCheck < 60_000
+		)
+			return;
+		this.lastSelfCheck = now;
+		try {
+			const { turn, watching } = await primeTurn(this.agentId, sid);
+			const view = turnStatus.push(this.runKey(), turn);
+			const running =
+				watching || view?.state === "running" || view?.state === "cut_resumed" || view?.state === "unreachable";
+			if (!running) {
+				console.warn("[prime] looked busy with nothing running; reading the chat again", view);
+				await this.attach();
+			}
+		} catch (err) {
+			console.warn("[prime] turn self-check failed", err);
+		}
 	}
 
 	private async runBrowserCall(id: string, tool: string, args: Json): Promise<void> {
@@ -589,6 +658,8 @@ export class PrimeRemoteAgent extends Agent {
 		if (this.newChatRetryTimer) clearTimeout(this.newChatRetryTimer);
 		this.newChatRetryTimer = undefined;
 		window.removeEventListener("online", this.onBrowserOnline);
+		if (this.selfCheckTimer) clearInterval(this.selfCheckTimer);
+		this.selfCheckTimer = undefined;
 		this.socket?.close();
 		this.socket = undefined;
 	}
@@ -611,6 +682,14 @@ export class PrimeRemoteAgent extends Agent {
 				continue;
 			}
 			if (typeof raw.type !== "string" || !AGENT_EVENT_TYPES.has(raw.type)) continue;
+			turnStatus.event(
+				this.runKey(),
+				raw.type,
+				isJson(raw.assistantMessageEvent) && typeof raw.assistantMessageEvent.type === "string"
+					? raw.assistantMessageEvent.type
+					: undefined,
+				isJson(raw.message) && typeof raw.message.role === "string" ? raw.message.role : undefined,
+			);
 			// The bridge log carries pi-agent-core AgentEvents verbatim; shape checked per case below.
 			const event = raw as unknown as AgentEvent;
 			switch (event.type) {
@@ -668,6 +747,11 @@ export class PrimeRemoteAgent extends Agent {
 	}
 
 	private appendRemoteMessage(incoming: AgentMessage): void {
+		const resumed = autoResumeOf(incoming);
+		if (resumed) {
+			this.remote.messages = [...this.remote.messages, resumed];
+			return;
+		}
 		const duo = duoModeOf(incoming);
 		if (duo) {
 			if (lastDuoMode(this.remote.messages) !== duo.mode) this.remote.messages = [...this.remote.messages, duo];

@@ -4,6 +4,14 @@
 
 ### Added
 
+- **A running turn always says what it waits on; a turn cut by a restart says so and is resumed** (1.0.302, 2026-11-15; Tom: "I feel like the basic problem of these stops is not really solved - both these sessions seem stopped and I cant tell what it's waiting on").
+  - Cause of Tom's two stopped Cassian chats: the 15:37 fleet roll restarted the agent mid-turn; no `agent_end` ever came, so the panel kept the running look (cursor, "Enter steers now") with nothing running.
+  - Relay 2026-11-15.5 supervises every turn (record on disk, watcher every 3 s, bridge boot time). A cut turn is resumed (3 per chat per hour) with a prompt starting `[sitegeist auto-resume — this is not a message from Tom]`, and panels get a synthetic `agent_end` plus `turn_status` pushes (also `turn` in the hydrate, `GET …/turn`). Proven on Tom's own chat at 16:33: the 0.19.129 roll cut `sg-cassianvale-f2887404d1f4`, and the relay resumed it 11 s later.
+  - Status line with no command running (`src/prime/turn-status.ts`, `RunStatus.ts` `.sg-turn-line`): "Waiting for the model · 12s", "Thinking", "Writing", "Writing a command", "· no activity for …" (amber once quiet); or the relay's note: cut (and resumed), ended without finishing, agent not reachable, compacting.
+  - The resume prompt shows as one muted line "Turn cut by a restart at HH:MM UTC · resumed automatically" (`src/messages/AutoResumeMessage.ts`), never as a bubble.
+  - Self-check: a chat that looks busy with no command and no event for 45 s asks the relay (at most once a minute) and reads the chat again if nothing runs.
+  - Tests: `test:turn-status` (3), `test:turn:extension` (new); the stand-in relay serves `turn`, `GET …/turn`, `pushFrame`, `setBusy`; `test:running:extension` reads the command line only.
+
 - **New chats run on the pi harness, with Duo and Duo-start** (1.0.301, 2026-11-15; Tom, asked whether new sitegeist chats may run on pi, no Python cells, in exchange for duo: "Oh I see… yes I'm fine with that").
   - A new chat (main-pi and every coach) is created with `harness: "pi"` when the relay lists pi for the agent (`/sitegeist/agents` `harnesses`, relay 2026-11-15.4); an older relay gives a prime chat. Its id says where it runs: `sg-pi-<hex>` / `sg-<agent>-pi-<hex>` (`harnessFromSessionId`, `agentIdFromSessionId` in `src/prime/constants.ts`). Existing chats stay on prime.
   - Default model of a new pi chat: Duo-start (`duoStartModel()` in `sidepanel.ts`); the bridge turns `set_model duo-start` into duo + its start marker, so the chat then reads `duo`, and that is not reported as a failed choice. The model menu asks `/models?harness=<chat's harness>` and is cached per agent and harness (`modelsKey`): pi chats list Duo and Duo-start, prime chats do not.

@@ -1,6 +1,7 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { elapsed, quietAfterMs, RUNNING_CHANGED, type RunInfo, runningTools } from "../prime/running-tools.js";
+import { phaseText, SILENT_AFTER_MS, TURN_CHANGED, turnStatus } from "../prime/turn-status.js";
 
 /**
  * One line above the prompt box while a command runs (Tom, 2026-11-15, yes to "a one-line status above the prompt box,
@@ -9,6 +10,11 @@ import { elapsed, quietAfterMs, RUNNING_CHANGED, type RunInfo, runningTools } fr
  * own line and jump. Stays in view when Tom has scrolled up. A click scrolls the chat to the
  * command's card (components/RunningTool.ts). Sits above the queue shelf, which stays attached to the prompt box.
  * Rendered by the patched pi-web-ui AgentInterface (scripts/build.mjs).
+ *
+ * With no command running it says what the turn is doing (Tom, 2026-11-15: "both these sessions seem stopped and I
+ * cant tell what it's waiting on"): "Waiting for the model · 12s", "Thinking · 40s", "Writing", "Writing a command",
+ * plus "no activity for …" when the chat has been silent; or the relay's word on the turn: cut by a restart (and
+ * resumed), ended without finishing, agent not reachable, compacting (prime/turn-status.ts).
  */
 @customElement("sg-run-status")
 export class RunStatus extends LitElement {
@@ -24,11 +30,13 @@ export class RunStatus extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		runningTools.addEventListener(RUNNING_CHANGED, this.onChange);
+		turnStatus.addEventListener(TURN_CHANGED, this.onChange);
 	}
 
 	override disconnectedCallback(): void {
 		super.disconnectedCallback();
 		runningTools.removeEventListener(RUNNING_CHANGED, this.onChange);
+		turnStatus.removeEventListener(TURN_CHANGED, this.onChange);
 		if (this.tick) clearInterval(this.tick);
 		this.tick = undefined;
 	}
@@ -62,13 +70,48 @@ export class RunStatus extends LitElement {
 		return { name, parts, quiet };
 	}
 
+	/** The line when no command runs: the turn's phase or the relay's note; undefined when there is nothing to say. */
+	private turnLine(now: number): { text: string; amber: boolean; kind: string } | undefined {
+		const v = turnStatus.relay;
+		const phase = turnStatus.phase;
+		const hhmm = (ms: number | undefined) => (ms ? new Date(ms).toISOString().slice(11, 16) : "");
+		if (v?.state === "unreachable") return { text: v.note, amber: true, kind: "unreachable" };
+		if (v?.state === "compacting")
+			return { text: v.note || "Compacting the conversation…", amber: false, kind: "compacting" };
+		if (phase.kind === "none") {
+			if (v && (v.state === "cut" || v.state === "ended_unexpectedly") && v.note)
+				return { text: v.note, amber: true, kind: v.state };
+			return undefined;
+		}
+		const parts = [`${phaseText(phase.kind) ?? "Working"} · ${elapsed(now - phase.since)}`];
+		if (v?.state === "cut_resumed" && now - (v.resumedAt ?? v.at) < 3 * 60_000)
+			parts.push(`resumed after a restart at ${hhmm(v.cutAt ?? v.at)} UTC`);
+		const silent = turnStatus.lastEventAt > 0 ? now - turnStatus.lastEventAt : 0;
+		if (silent >= SILENT_AFTER_MS) parts.push(`no activity for ${elapsed(silent)}`);
+		return { text: parts.join(" · "), amber: silent >= quietAfterMs(), kind: `phase-${phase.kind}` };
+	}
+
 	override render() {
 		const runs = runningTools.list();
 		if (runs.length === 0) {
-			if (this.tick) clearInterval(this.tick);
-			this.tick = undefined;
 			this.open = false;
-			return nothing;
+			const line = this.turnLine(Date.now());
+			if (!line) {
+				if (this.tick) clearInterval(this.tick);
+				this.tick = undefined;
+				return nothing;
+			}
+			this.tick ??= setInterval(() => this.requestUpdate(), 1000);
+			return html`<div class="mx-3 mb-1">
+				<div
+					class="sg-run-status sg-turn-line flex w-full items-center gap-2 rounded-lg border ${line.amber ? "border-amber-500/60" : "border-border"} bg-card/70 px-3 py-1 text-xs text-muted-foreground"
+					data-kind=${line.kind}
+					data-quiet=${line.amber ? "true" : "false"}
+				>
+					<span class="inline-block h-2 w-2 shrink-0 rounded-full ${line.amber ? "bg-amber-500" : "bg-sky-500 animate-pulse"}"></span>
+					<span class="min-w-0 flex-1 truncate ${line.amber ? "text-amber-600 dark:text-amber-400" : ""}" title=${line.text}>${line.text}</span>
+				</div>
+			</div>`;
 		}
 		this.tick ??= setInterval(() => this.requestUpdate(), 1000);
 		const now = Date.now();

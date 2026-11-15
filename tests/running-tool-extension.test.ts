@@ -70,7 +70,8 @@ async function dismissPermissionDialog(page: Page): Promise<void> {
 function look(page: Page, id: string) {
 	return page.evaluate((callId) => {
 		const card = document.querySelector<HTMLElement>(`.sg-running-tool[data-call-id="${callId}"]`);
-		const status = document.querySelector<HTMLElement>(".sg-run-status");
+		// the command line, not the turn line (what a turn with no command waits on, turn-status.ts)
+		const status = document.querySelector<HTMLElement>(".sg-run-status:not(.sg-turn-line)");
 		const toolMessages = Array.from(document.querySelectorAll("tool-message")).filter(
 			(t) =>
 				// the patched ToolMessage keeps its toolCall as a property

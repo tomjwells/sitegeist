@@ -135,6 +135,8 @@ export interface PrimeHydration {
 	queue: PrimeQueuedItem[];
 	/** The relay's running commands and finished durations (`now`, `running`, `toolDurations`; running-tools.ts). */
 	runs: Json;
+	/** The relay's view of this chat's turn (turn-status.ts); undefined from relays before 2026-11-15.5. */
+	turn: unknown;
 }
 
 /**
@@ -234,7 +236,14 @@ export async function primeHydrate(agentId: string, sessionId: string): Promise<
 		messages: Array.isArray(r.messages) ? r.messages.filter(isJson) : [],
 		queue: queuedItems(r.queue),
 		runs: { now: r.now, running: r.running, toolDurations: r.toolDurations },
+		turn: r.turn,
 	};
+}
+
+/** What the relay knows about this chat's turn (passive: never starts the session); undefined from older relays. */
+export async function primeTurn(agentId: string, sessionId: string): Promise<{ turn: unknown; watching: boolean }> {
+	const r = await request(agentId, "GET", `/sessions/${encodeURIComponent(sessionId)}/turn`, undefined, 15_000);
+	return { turn: r.turn, watching: r.watching === true };
 }
 
 /** The whole kept output of one running command ("Show all output"), or undefined when it is no longer running. */
@@ -465,6 +474,8 @@ export interface PrimeSocketHandlers {
 	onAttachments: (items: PrimeAttachment[]) => void;
 	/** The relay's running commands for this chat (running-tools.ts). */
 	onRunning?: (payload: Json) => void;
+	/** The relay's turn supervisor: cut / resumed / unreachable / compacting (turn-status.ts). */
+	onTurn?: (payload: Json) => void;
 	/** detail: plain words for the status light's tooltip (why it closed, when it retries). */
 	onStatus: (status: "connecting" | "open" | "closed", detail?: string) => void;
 }
@@ -595,6 +606,8 @@ export class PrimeSocket {
 			if (items.length > 0) this.handlers.onAttachments(items);
 		} else if (msg.type === "running_tools") {
 			this.handlers.onRunning?.(msg);
+		} else if (msg.type === "turn_status") {
+			this.handlers.onTurn?.(msg);
 		} else if (msg.type === "relay_error") {
 			console.warn("[prime] relay error:", msg.message);
 		}

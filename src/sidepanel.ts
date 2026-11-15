@@ -46,6 +46,7 @@ import "./components/SessionsSidebar.js";
 import { ModelMenu } from "./components/ModelMenu.js";
 import { SkillsTab } from "./dialogs/SkillsTab.js";
 import { UserScriptsPermissionDialog } from "./dialogs/UserScriptsPermissionDialog.js";
+import { registerAutoResumeRenderer } from "./messages/AutoResumeMessage.js";
 import { registerDuoModeRenderer } from "./messages/DuoModeMessage.js";
 import { browserMessageTransformer } from "./messages/message-transformer.js";
 import { createNavigationMessage, registerNavigationRenderer } from "./messages/NavigationMessage.js";
@@ -136,6 +137,7 @@ import { selectionToMarkdown } from "./utils/selection-markdown.js";
 // Register custom message renderers
 registerNavigationRenderer();
 registerDuoModeRenderer();
+registerAutoResumeRenderer();
 registerExtractImageRenderer();
 
 // Listen for abort messages from REPL overlay
