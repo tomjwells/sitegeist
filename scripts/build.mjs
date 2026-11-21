@@ -55,6 +55,19 @@ const srcImport = (names, file) =>
 	`import { ${names} } from ${JSON.stringify(join(packageRoot, file).replace(/\\/g, "/"))};`;
 const piWebUiPatches = [
 	{
+		// mini-lit CodeBlock: line numbers (Tom, 2026-11-21: "Can we have things like syntax highlighting and things like
+		// line numbers in sitegeist code blocks?"); src/utils/code-lines.ts, styles in src/app.css (.sg-code-*).
+		file: /@mariozechner[\\/]mini-lit[\\/]dist[\\/]CodeBlock\.js$/,
+		imports: [srcImport("numberedCodeHtml as __sgNumberedCode", "src/utils/code-lines.ts")],
+		replacements: [
+			{
+				find: '<code class="hljs language-${this.language || "plaintext"}">${unsafeHTML(highlighted)}</code>',
+				replace:
+					'<code class="hljs sg-code language-${this.language || "plaintext"}">${unsafeHTML(__sgNumberedCode(highlighted).html)}</code>',
+			},
+		],
+	},
+	{
 		// mini-lit MarkdownBlock: "$...$" is inline math only under Pandoc's rule (src/utils/inline-math.ts), so dollar
 		// amounts ("for $43,766. ... "$43,000"") stay text instead of one italic KaTeX run (Cassian, 2026-11-15).
 		file: /@mariozechner[\\/]mini-lit[\\/]dist[\\/]MarkdownBlock\.js$/,

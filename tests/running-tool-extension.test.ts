@@ -89,6 +89,8 @@ function look(page: Page, id: string) {
 			tail: card?.querySelector(".sg-run-tail")?.textContent ?? "",
 			all: card?.querySelector(".sg-run-all")?.textContent ?? "",
 			command: card?.querySelector(".sg-run-command")?.textContent ?? "",
+			commandLines: card?.querySelectorAll(".sg-run-command .sg-code-ln").length ?? 0,
+			commandKeywords: card?.querySelectorAll(".sg-run-command .hljs-keyword").length ?? 0,
 			quiet: card?.dataset.quiet === "true",
 			status: status?.textContent?.replace(/\s+/g, " ").trim() ?? "",
 			statusQuiet: status?.dataset.quiet === "true",
@@ -254,6 +256,10 @@ test(
 				3_000,
 				"command",
 			);
+			// highlighted (python keywords) and numbered, one number per line (Tom, 2026-11-21)
+			assert.equal(v.commandLines, 4, "four numbered lines");
+			assert.ok(v.commandKeywords >= 2, `python keywords highlighted: ${v.commandKeywords}`);
+			await page.screenshot({ path: join(out, "running-command-highlighted.png") });
 			await page.click(`.sg-running-tool[data-call-id="${CALL}"] .sg-run-show-all`);
 			await page.click(`.sg-running-tool[data-call-id="${CALL}"] .sg-run-show-command`);
 

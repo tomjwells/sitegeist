@@ -173,3 +173,18 @@ body {
 	border-style: dashed;
 	opacity: 0.7;
 }
+
+/* Code blocks with line numbers (scripts/build.mjs CodeBlock patch, src/utils/code-lines.ts; Tom 2026-11-21) */
+code.sg-code .sg-code-line {
+	display: block;
+}
+code.sg-code .sg-code-ln {
+	display: inline-block;
+	box-sizing: content-box;
+	padding-right: 1em;
+	text-align: right;
+	color: var(--muted-foreground);
+	opacity: 0.6;
+	user-select: none;
+	-webkit-user-select: none;
+}

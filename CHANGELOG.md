@@ -4,6 +4,11 @@
 
 ### Added
 
+- **Code blocks: line numbers; the running card's command highlighted** (1.0.304, 2026-11-21; Tom: "Can we have things like syntax highlighting and things like line numbers in sitegeist code blocks?").
+  - Every `<code-block>` (answers, tool blocks, running card) numbers its lines from two lines up (`src/utils/code-lines.ts`: highlight.js spans across lines are closed and reopened per line; build patch on mini-lit `CodeBlock.js`; styles `.sg-code-*` in `src/app.css`). The numbers are not selectable and the Copy button copies the code only.
+  - The running card's "Show command" was a plain `<pre>`: now a highlighted `<code-block>` (python for ipython, bash, javascript for browser tools).
+  - Tests: `test:code-lines` (2), `test:running:extension` checks 4 numbered lines and highlighted keywords.
+
 - **A running turn always says what it waits on; a turn cut by a restart says so and is resumed** (1.0.302, 2026-11-15; Tom: "I feel like the basic problem of these stops is not really solved - both these sessions seem stopped and I cant tell what it's waiting on").
   - Cause of Tom's two stopped Cassian chats: the 15:37 fleet roll restarted the agent mid-turn; no `agent_end` ever came, so the panel kept the running look (cursor, "Enter steers now") with nothing running.
   - Relay 2026-11-15.5 supervises every turn (record on disk, watcher every 3 s, bridge boot time). A cut turn is resumed (3 per chat per hour) with a prompt starting `[sitegeist auto-resume — this is not a message from Tom]`, and panels get a synthetic `agent_end` plus `turn_status` pushes (also `turn` in the hydrate, `GET …/turn`). Proven on Tom's own chat at 16:33: the 0.19.129 roll cut `sg-cassianvale-f2887404d1f4`, and the relay resumed it 11 s later.

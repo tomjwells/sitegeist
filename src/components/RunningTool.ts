@@ -210,7 +210,7 @@ export class RunningTool extends LitElement {
 							>${shown.join("\n")}</pre>`
 						: ""
 			}
-			${this.showCommand ? html`<pre class="sg-run-command mt-2 max-h-60 overflow-auto rounded bg-muted/60 p-2 font-mono text-[11px] whitespace-pre-wrap break-all">${commandText(this.call)}</pre>` : ""}
+			${this.showCommand ? html`<code-block class="sg-run-command mt-2" .code=${commandText(this.call)} language=${commandLanguage(this.call)}></code-block>` : ""}
 			<div class="mt-1.5 flex gap-3 text-muted-foreground">
 				${
 					run.lines > 0
@@ -252,6 +252,20 @@ function splitKey(key: string): [string, string] {
 }
 
 /** The command as text: the code of a code-carrying tool, else its arguments as JSON. */
+/** Highlighting language of the command (the code-block shows it highlighted and numbered, Tom 2026-11-21). */
+function commandLanguage(call: ToolCall): string {
+	if (call.name === "ipython") return "python";
+	if (call.name === "bash") return "bash";
+	if (call.name.startsWith("browser_")) return "javascript";
+	const a: unknown = call.arguments;
+	return typeof a === "object" &&
+		a !== null &&
+		typeof Reflect.get(a, "code") !== "string" &&
+		typeof Reflect.get(a, "command") !== "string"
+		? "json"
+		: "";
+}
+
 function commandText(call: ToolCall): string {
 	const a: unknown = call.arguments;
 	if (typeof a === "object" && a !== null) {

@@ -37,6 +37,7 @@
 		"test:model-image": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/model-image.test.ts",
 		"test:send-retry:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/prime-send-retry.test.ts",
 		"test:open-by-id:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=120000 --test-force-exit tests/prime-open-by-id.test.ts",
+		"test:code-lines": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test tests/code-lines.test.ts",
 		"test:turn-status": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test tests/turn-status.test.ts",
 		"test:running": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test tests/running-tools.test.ts",
 		"test:turn:extension": "tsc --noEmit -p tsconfig.test.json && node --experimental-strip-types --test --test-timeout=240000 --test-force-exit tests/turn-status-extension.test.ts",
