@@ -8,8 +8,8 @@ import { z } from "zod";
 export const DEFAULT_SPEAK_URL = "http://speak.tjwpier:8610";
 export const FALLBACK_VOICE = "main-pi";
 /** One chunk: up to ~4,000 characters at ~2.5x real time, plus 4-18 s when the model has to load first. */
-// speak runs on the R730 3090 since 2026-11-23 (~0.2 s per character): a 400-char chunk ~85 s, plus up to one queued
-// Telegram voice-note piece (~100 s) ahead of it.
+// 300 s per chunk: room for a chunk plus a queued Telegram voice note ahead of it (raised 2026-11-23 while speak was
+// briefly on the slower R730 engine; kept).
 const SPEECH_TIMEOUT_MS = 300_000;
 const SMALL_TIMEOUT_MS = 6_000;
 
@@ -35,7 +35,7 @@ export class SpeakError extends Error {
 export function errorNote(err: SpeakError): string {
 	switch (err.kind) {
 		case "offline":
-			return "speak is offline";
+			return "speak is offline (M4 asleep?)";
 		case "too-long":
 			return "too long for speak";
 		case "voice":
