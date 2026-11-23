@@ -174,12 +174,24 @@ body {
 	opacity: 0.7;
 }
 
+/* Code blocks wrap long lines instead of scrolling sideways (Tom 2026-11-23: "can I have line wrapping"). */
+code-block pre,
+code-block pre code {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
 /* Code blocks with line numbers (scripts/build.mjs CodeBlock patch, src/utils/code-lines.ts; Tom 2026-11-21) */
+/* flex row: a wrapped line continues under its own text, not under the line number */
 code.sg-code .sg-code-line {
-	display: block;
+	display: flex;
+}
+code.sg-code .sg-code-text {
+	flex: 1 1 auto;
+	min-width: 0;
 }
 code.sg-code .sg-code-ln {
-	display: inline-block;
+	flex: 0 0 auto;
 	box-sizing: content-box;
 	padding-right: 1em;
 	text-align: right;
