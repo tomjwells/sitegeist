@@ -37,9 +37,9 @@ export class SpeakTab extends SettingsTab {
 			const voices = ok ? await fetchVoices(url) : [];
 			this.status = ok
 				? `speak is up · voices: ${voices.join(", ")}`
-				: "speak answered, but its engine is down (M4 asleep?)";
+				: "speak answered, but its engine is down";
 		} catch {
-			this.status = "speak is offline (M4 asleep?)";
+			this.status = "speak is offline";
 		}
 	}
 
